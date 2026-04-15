@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
-  ReactFlow, Background, Controls, MiniMap,
+  ReactFlow, Background, MiniMap,
   addEdge, useNodesState, useEdgesState,
   useReactFlow, useViewport,
   type Node, type Edge, type Connection,
@@ -12,14 +13,19 @@ import {
   List, ListItem, ListItemText, ListItemSecondaryAction, IconButton,
   Divider, Button, Select, MenuItem, FormControl, InputLabel,
   useTheme, alpha, Tooltip, LinearProgress,
+  Dialog, DialogTitle, DialogContent, DialogActions,
+  Tab, Tabs, TextField,
 } from '@mui/material'
 import {
   Delete, Add, Refresh, AccountTree, Storage, Info,
   CheckCircle, Error as ErrorIcon, PendingOutlined, Cancel,
   ZoomIn as ZoomInIcon, ZoomOut as ZoomOutIcon,
   FitScreen as FitScreenIcon, RestartAlt as ResetIcon,
+  Edit as EditIcon, OpenInNew as OpenInNewIcon,
+  PlayArrow, Schedule,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { formatDistanceToNow } from 'date-fns'
 import { graphApi, pipelinesApi, GraphNode as ApiNode, GraphEdge as ApiEdge } from '../api/client'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -359,11 +365,192 @@ function DependencyPanel({
   )
 }
 
+// ─── Edit dialog ─────────────────────────────────────────────────────────────
+interface EditDialogProps {
+  pipelineId: number | null
+  open: boolean
+  onClose: () => void
+}
+function EditPipelineDialog({ pipelineId, open, onClose }: EditDialogProps) {
+  const qc = useQueryClient()
+  const { data: pipeline } = useQuery({
+    queryKey: ['pipeline', pipelineId],
+    queryFn: () => pipelinesApi.get(pipelineId!).then((r) => r.data),
+    enabled: !!pipelineId && open,
+  })
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [status, setStatus] = useState<'active' | 'inactive' | 'draft'>('active')
+  useEffect(() => {
+    if (pipeline) {
+      setName(pipeline.name)
+      setDescription(pipeline.description ?? '')
+      setStatus(pipeline.status)
+    }
+  }, [pipeline])
+  const mut = useMutation({
+    mutationFn: () => pipelinesApi.update(pipelineId!, { name, description, status }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['pipeline-graph'] })
+      qc.invalidateQueries({ queryKey: ['pipeline', pipelineId] })
+      onClose()
+    },
+  })
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ pb: 1 }}>Edit Pipeline</DialogTitle>
+      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
+        <TextField
+          label="Name" value={name} onChange={(e) => setName(e.target.value)}
+          size="small" fullWidth autoFocus
+        />
+        <TextField
+          label="Description" value={description} onChange={(e) => setDescription(e.target.value)}
+          size="small" fullWidth multiline rows={3}
+        />
+        <FormControl size="small" fullWidth>
+          <InputLabel>Status</InputLabel>
+          <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
+            <MenuItem value="active">Active</MenuItem>
+            <MenuItem value="inactive">Inactive</MenuItem>
+            <MenuItem value="draft">Draft</MenuItem>
+          </Select>
+        </FormControl>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} size="small">Cancel</Button>
+        <Button
+          variant="contained" size="small"
+          disabled={!name.trim() || mut.isPending}
+          onClick={() => mut.mutate()}
+        >
+          {mut.isPending ? 'Saving…' : 'Save'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+// ─── Node detail panel ────────────────────────────────────────────────────────
+interface NodeDetailPanelProps {
+  selectedNode: ApiNode
+  onEdit: () => void
+}
+function NodeDetailPanel({ selectedNode, onEdit }: NodeDetailPanelProps) {
+  const navigate = useNavigate()
+  const { data: pipeline } = useQuery({
+    queryKey: ['pipeline', selectedNode.id],
+    queryFn: () => pipelinesApi.get(selectedNode.id).then((r) => r.data),
+  })
+  const theme = useTheme()
+  const statusColor = STATUS_COLOUR[selectedNode.status] ?? '#6b7280'
+
+  return (
+    <Box sx={{ px: 1.5, py: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+      {/* name + actions */}
+      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
+        <Typography variant="subtitle2" fontWeight={700} sx={{ flex: 1, wordBreak: 'break-word' }}>
+          {selectedNode.name}
+        </Typography>
+        <Tooltip title="Edit pipeline">
+          <IconButton size="small" onClick={onEdit} sx={{ color: 'text.secondary' }}>
+            <EditIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title="Open in Pipelines">
+          <IconButton size="small" onClick={() => navigate('/etl')} sx={{ color: 'text.secondary' }}>
+            <OpenInNewIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Box>
+
+      {/* status + source */}
+      <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+        <Chip
+          size="small"
+          label={selectedNode.status}
+          sx={{ bgcolor: alpha(statusColor, 0.15), color: statusColor, fontWeight: 600, fontSize: '0.68rem', height: 20 }}
+        />
+        <Chip
+          size="small"
+          icon={<Storage sx={{ fontSize: '0.75rem !important' }} />}
+          label={SOURCE_LABEL[selectedNode.source_type] ?? selectedNode.source_type}
+          sx={{ fontSize: '0.68rem', height: 20 }}
+          variant="outlined"
+        />
+      </Box>
+
+      {/* description */}
+      {selectedNode.description && (
+        <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.4 }}>
+          {selectedNode.description}
+        </Typography>
+      )}
+
+      <Divider />
+
+      {/* run stats */}
+      {pipeline ? (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <PlayArrow sx={{ fontSize: '0.85rem', color: 'text.secondary' }} />
+              <Typography variant="caption" color="text.secondary">Total runs</Typography>
+            </Box>
+            <Typography variant="caption" fontWeight={600}>{pipeline.total_runs}</Typography>
+          </Box>
+          {pipeline.last_run && (
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Schedule sx={{ fontSize: '0.85rem', color: 'text.secondary' }} />
+                <Typography variant="caption" color="text.secondary">Last run</Typography>
+              </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                {pipeline.last_run.status === 'success'
+                  ? <CheckCircle sx={{ fontSize: '0.8rem', color: STATUS_COLOUR.active }} />
+                  : pipeline.last_run.status === 'running'
+                    ? <PendingOutlined sx={{ fontSize: '0.8rem', color: STATUS_COLOUR.inactive }} />
+                    : <ErrorIcon sx={{ fontSize: '0.8rem', color: '#ef4444' }} />}
+                <Typography variant="caption" fontWeight={600}>
+                  {pipeline.last_run.started_at
+                    ? formatDistanceToNow(new Date(pipeline.last_run.started_at), { addSuffix: true })
+                    : '—'}
+                </Typography>
+              </Box>
+            </Box>
+          )}
+          {pipeline.schedule && (
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Typography variant="caption" color="text.secondary">Schedule</Typography>
+              <Chip
+                size="small"
+                label={pipeline.schedule}
+                sx={{ fontSize: '0.65rem', height: 18, fontFamily: 'monospace' }}
+                variant="outlined"
+              />
+            </Box>
+          )}
+          <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+            <Typography variant="caption" color="text.secondary">Updated</Typography>
+            <Typography variant="caption">
+              {formatDistanceToNow(new Date(pipeline.updated_at), { addSuffix: true })}
+            </Typography>
+          </Box>
+        </Box>
+      ) : (
+        <CircularProgress size={16} sx={{ alignSelf: 'center' }} />
+      )}
+    </Box>
+  )
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function PipelineGraph() {
   const theme = useTheme()
   const qc = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [sideTab, setSideTab] = useState(0)   // 0 = Details, 1 = Dependencies
+  const [editOpen, setEditOpen] = useState(false)
 
   const { data: graph, isLoading, refetch } = useQuery({
     queryKey: ['pipeline-graph'],
@@ -473,7 +660,6 @@ export default function PipelineGraph() {
             proOptions={{ hideAttribution: true }}
           >
             <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#1e293b" />
-            <Controls style={{ background: '#1a2236', borderColor: '#2a3550', color: '#e2e8f0' }} showInteractive={false} />
             <MiniMap
               nodeStrokeColor={(n) => STATUS_COLOUR[(n.data as unknown as ApiNode).status] ?? '#2a3550'}
               nodeColor={() => '#1a2236'}
@@ -495,46 +681,77 @@ export default function PipelineGraph() {
         </Box>
 
         {/* ── Side panel ── */}
-        <Card variant="outlined" sx={{ width: 280, flexShrink: 0, overflow: 'auto' }}>
-          <CardContent sx={{ p: 0, '&:last-child': { pb: 0 } }}>
-            <Box sx={{ px: 1.5, py: 1, bgcolor: alpha(theme.palette.primary.main, 0.08), borderBottom: `1px solid ${theme.palette.divider}` }}>
-              <Typography variant="subtitle2" fontWeight={700}>Dependencies</Typography>
-            </Box>
-            <DependencyPanel
-              selected={selectedNode}
-              allNodes={graph?.nodes ?? []}
-              onAdded={() => refetch()}
-              onRemoved={() => refetch()}
-            />
+        <Card variant="outlined" sx={{ width: 280, flexShrink: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+          {selectedNode ? (
+            <>
+              {/* Tabs header */}
+              <Tabs
+                value={sideTab}
+                onChange={(_, v) => setSideTab(v)}
+                variant="fullWidth"
+                sx={{ borderBottom: `1px solid ${theme.palette.divider}`, minHeight: 36 }}
+                TabIndicatorProps={{ style: { height: 2 } }}
+              >
+                <Tab label="Details" sx={{ minHeight: 36, fontSize: '0.75rem', py: 0 }} />
+                <Tab label="Dependencies" sx={{ minHeight: 36, fontSize: '0.75rem', py: 0 }} />
+              </Tabs>
 
-            {graph && graph.nodes.length > 0 && (
-              <>
-                <Divider />
-                <Box sx={{ px: 1.5, py: 1 }}>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75 }}>ALL PIPELINES</Typography>
-                  <List dense disablePadding>
-                    {graph.nodes.map((n) => (
-                      <ListItem
-                        key={n.id}
-                        disableGutters
-                        sx={{ py: 0.25, cursor: 'pointer', borderRadius: 1, px: 0.5, bgcolor: selectedId === n.id ? alpha(theme.palette.primary.main, 0.1) : 'transparent' }}
-                        onClick={() => setSelectedId(n.id === selectedId ? null : n.id)}
-                      >
-                        <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: STATUS_COLOUR[n.status] ?? '#6b7280', mr: 1, flexShrink: 0 }} />
-                        <ListItemText
-                          primary={n.name}
-                          primaryTypographyProps={{ variant: 'body2', fontSize: '0.78rem', noWrap: true }}
-                          secondary={SOURCE_LABEL[n.source_type] ?? n.source_type}
-                          secondaryTypographyProps={{ fontSize: '0.68rem' }}
-                        />
-                      </ListItem>
-                    ))}
-                  </List>
+              {sideTab === 0 && (
+                <NodeDetailPanel
+                  selectedNode={selectedNode}
+                  onEdit={() => setEditOpen(true)}
+                />
+              )}
+              {sideTab === 1 && (
+                <DependencyPanel
+                  selected={selectedNode}
+                  allNodes={graph?.nodes ?? []}
+                  onAdded={() => refetch()}
+                  onRemoved={() => refetch()}
+                />
+              )}
+            </>
+          ) : (
+            <CardContent sx={{ p: 0, '&:last-child': { pb: 0 } }}>
+              <Box sx={{ px: 1.5, py: 1, bgcolor: alpha(theme.palette.primary.main, 0.08), borderBottom: `1px solid ${theme.palette.divider}` }}>
+                <Typography variant="subtitle2" fontWeight={700}>All Pipelines</Typography>
+              </Box>
+              {graph && graph.nodes.length > 0 ? (
+                <List dense disablePadding sx={{ px: 0.5, py: 0.5 }}>
+                  {graph.nodes.map((n) => (
+                    <ListItem
+                      key={n.id}
+                      disableGutters
+                      sx={{ py: 0.25, cursor: 'pointer', borderRadius: 1, px: 0.5 }}
+                      onClick={() => { setSelectedId(n.id); setSideTab(0) }}
+                    >
+                      <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: STATUS_COLOUR[n.status] ?? '#6b7280', mr: 1, flexShrink: 0 }} />
+                      <ListItemText
+                        primary={n.name}
+                        primaryTypographyProps={{ variant: 'body2', fontSize: '0.78rem', noWrap: true }}
+                        secondary={SOURCE_LABEL[n.source_type] ?? n.source_type}
+                        secondaryTypographyProps={{ fontSize: '0.68rem' }}
+                      />
+                    </ListItem>
+                  ))}
+                </List>
+              ) : (
+                <Box sx={{ px: 1.5, py: 2 }}>
+                  <Typography variant="caption" color="text.secondary">
+                    Click a node to inspect it, or create pipelines on the ETL page.
+                  </Typography>
                 </Box>
-              </>
-            )}
-          </CardContent>
+              )}
+            </CardContent>
+          )}
         </Card>
+
+        {/* Edit dialog */}
+        <EditPipelineDialog
+          pipelineId={selectedId}
+          open={editOpen}
+          onClose={() => setEditOpen(false)}
+        />
       </Box>
     </Box>
   )
