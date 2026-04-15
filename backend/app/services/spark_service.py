@@ -245,6 +245,13 @@ class SparkService:
             # Auto-register file-based data as temp views so SHOW TABLES,
             # DESCRIBE, and SELECT queries can find them immediately.
             _register_file_views(spark, suppress=suppressed)
+            # Ensure suppressed views are actually gone from the session
+            # (guards against Spark Connect not fully honoring the earlier DROP VIEW)
+            for v in suppressed:
+                try:
+                    spark.sql(f"DROP VIEW IF EXISTS `{v}`")
+                except Exception:
+                    pass
             t0 = _time.perf_counter()
             df = spark.sql(sql).limit(limit)
             rows_collected = df.collect()
@@ -316,6 +323,9 @@ class SparkService:
                 try:
                     rows = spark.sql(f"SHOW TABLES IN `{db}`").collect()
                     for r in rows:
+                        # Filter out any views that were explicitly dropped this session
+                        if r.tableName in suppressed:
+                            continue
                         result.append({
                             "database": db,
                             "name": r.tableName,
@@ -332,14 +342,12 @@ class SparkService:
         self._suppressed_views.add(table)
         def _drop():
             spark = _get_spark()
-            # Drop persistent table (qualified name)
+            # Drop as a persistent catalog table (fully-qualified)
             spark.sql(f"DROP TABLE IF EXISTS `{db}`.`{table}`")
-            # Also remove if it's a session-scoped temp view (no database qualifier)
-            try:
-                spark.catalog.dropTempView(table)
-            except Exception:
-                pass
-            logger.info("Dropped table: %s.%s", db, table)
+            # Drop as a session-scoped temp view — temp views require DROP VIEW,
+            # not DROP TABLE, and must be unqualified (no database prefix)
+            spark.sql(f"DROP VIEW IF EXISTS `{table}`")
+            logger.info("Dropped: %s.%s", db, table)
         await asyncio.to_thread(_drop)
 
     async def drop_database(self, db: str) -> None:
