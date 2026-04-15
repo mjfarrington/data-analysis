@@ -8,9 +8,10 @@ import {
 } from '@mui/material'
 import {
   Add, PlayArrow, Edit, Delete, ExpandMore, Schedule, ChevronRight,
-  Storage, Description, TableChart, Code, CalendarToday, Tag,
+  Storage, Description, TableChart, Code, CalendarToday, Tag, OpenInNew,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import { useSnackbar } from 'notistack'
 import { pipelinesApi, sqlFilesApi, Pipeline, ExtractConfig, SourceType, ExecutionContext, RunTrigger } from '../api/client'
 import StatusChip from '../components/StatusChip'
@@ -72,6 +73,7 @@ function PipelineCard({ pipeline, onEdit, onDelete, onRun }: {
   onRun: (p: Pipeline) => void
 }) {
   const theme = useTheme()
+  const navigate = useNavigate()
   const lastRun = pipeline.last_run
 
   return (
@@ -93,6 +95,13 @@ function PipelineCard({ pipeline, onEdit, onDelete, onRun }: {
             <Tooltip title="Run now">
               <IconButton size="small" color="primary" onClick={() => onRun(pipeline)}>
                 <PlayArrow fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Explore extracted data">
+              <IconButton size="small" color="secondary"
+                onClick={() => navigate('/explorer')}
+              >
+                <OpenInNew fontSize="small" />
               </IconButton>
             </Tooltip>
             <Tooltip title="Edit">

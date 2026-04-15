@@ -59,6 +59,24 @@ async def list_catalog_tables():
         return []
 
 
+@router.delete("/catalog/databases/{db_name}", status_code=204)
+async def drop_catalog_database(db_name: str):
+    """Drop an entire Spark database and all its tables (CASCADE)."""
+    try:
+        await spark_service.drop_database(db_name)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/catalog/{db_name}/{table_name}", status_code=204)
+async def drop_catalog_table(db_name: str, table_name: str):
+    """Drop a specific table from a Spark database."""
+    try:
+        await spark_service.drop_table(db_name, table_name)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/errors", response_model=list[ErrorRecord])
 async def list_errors(
     service: Optional[str] = None,

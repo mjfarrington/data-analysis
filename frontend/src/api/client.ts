@@ -247,6 +247,10 @@ export const servicesApi = {
 export const dataApi = {
   tables: () => api.get<DataTable[]>('/data/tables'),
   catalog: () => api.get<CatalogTable[]>('/data/catalog'),
+  dropTable: (db: string, table: string) =>
+    api.delete(`/data/catalog/${encodeURIComponent(db)}/${encodeURIComponent(table)}`),
+  dropDatabase: (db: string) =>
+    api.delete(`/data/catalog/databases/${encodeURIComponent(db)}`),
   query: (sql: string, limit?: number) =>
     api.post<QueryResult>('/data/query', { sql, limit: limit ?? 1000 }),
   errors: (params?: { service?: string; resolved?: boolean; limit?: number }) =>

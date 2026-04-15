@@ -323,5 +323,21 @@ class SparkService:
 
         return await asyncio.to_thread(_list)
 
+    async def drop_table(self, db: str, table: str) -> None:
+        """Drop a specific table from a Spark database."""
+        def _drop():
+            spark = _get_spark()
+            spark.sql(f"DROP TABLE IF EXISTS `{db}`.`{table}`")
+            logger.info("Dropped table: %s.%s", db, table)
+        await asyncio.to_thread(_drop)
+
+    async def drop_database(self, db: str) -> None:
+        """Drop an entire Spark database and all its tables (CASCADE)."""
+        def _drop():
+            spark = _get_spark()
+            spark.sql(f"DROP DATABASE IF EXISTS `{db}` CASCADE")
+            logger.info("Dropped database: %s", db)
+        await asyncio.to_thread(_drop)
+
 
 spark_service = SparkService()
