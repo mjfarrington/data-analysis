@@ -4,14 +4,15 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions, TextField, MenuItem,
   Grid, Tooltip, alpha, useTheme, Accordion, AccordionSummary, AccordionDetails,
   FormControlLabel, Switch, Alert, CircularProgress, InputAdornment,
+  Paper, Select, FormControl, InputLabel,
 } from '@mui/material'
 import {
   Add, PlayArrow, Edit, Delete, ExpandMore, Schedule, ChevronRight,
-  Storage, Description, TableChart, Code,
+  Storage, Description, TableChart, Code, CalendarToday, Tag,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSnackbar } from 'notistack'
-import { pipelinesApi, sqlFilesApi, Pipeline, ExtractConfig, SourceType } from '../api/client'
+import { pipelinesApi, sqlFilesApi, Pipeline, ExtractConfig, SourceType, ExecutionContext, RunTrigger } from '../api/client'
 import StatusChip from '../components/StatusChip'
 import { formatDistanceToNow } from 'date-fns'
 
@@ -56,6 +57,7 @@ const defaultPipeline = () => ({
   load_config: {
     target: 'parquet' as 'parquet' | 'csv' | 'spark_table',
     table_name: undefined as string | undefined,
+    use_namespace: false,
     partition_by: ['date', 'application_id'] as string[],
     mode: 'overwrite' as 'overwrite' | 'append',
   },
@@ -121,7 +123,11 @@ function PipelineCard({ pipeline, onEdit, onDelete, onRun }: {
           <Grid item xs={6}>
             <Typography variant="caption" color="text.secondary" display="block">Output</Typography>
             <Typography variant="body2">{pipeline.load_config.target.toUpperCase()}</Typography>
-            {pipeline.load_config.table_name && (
+            {pipeline.load_config.use_namespace && (
+              <Chip label="namespace" size="small" color="primary" variant="outlined"
+                sx={{ fontSize: '0.62rem', height: 16, mt: 0.25 }} />
+            )}
+            {!pipeline.load_config.use_namespace && pipeline.load_config.table_name && (
               <Typography variant="caption" color="text.secondary" noWrap sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.7rem' }}>
                 {pipeline.load_config.table_name}
               </Typography>
@@ -216,6 +222,7 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
     load_config: {
       target: (initial.load_config?.target ?? 'parquet') as 'parquet' | 'csv' | 'spark_table',
       table_name: initial.load_config?.table_name,
+      use_namespace: initial.load_config?.use_namespace ?? false,
       partition_by: initial.load_config?.partition_by ?? ['date', 'application_id'],
       mode: (initial.load_config?.mode ?? 'overwrite') as 'overwrite' | 'append',
     },
@@ -480,8 +487,27 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
                   <Grid item xs={12}>
                     <TextField label="Table Name" value={form.load_config.table_name || ''} fullWidth size="small"
                       placeholder="e.g. transactions, events.daily_summary"
-                      helperText="Required for Spark Table target; used as destination table name"
+                      helperText="Static table name — ignored when 'Use namespace' is on"
                       onChange={(e) => setLoad('table_name', e.target.value)} />
+                  </Grid>
+                  <Grid item xs={12}>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={form.load_config.use_namespace ?? false}
+                          onChange={(e) => setLoad('use_namespace', e.target.checked)}
+                          size="small"
+                        />
+                      }
+                      label={
+                        <Box>
+                          <Typography variant="body2">Use platform namespace</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Table name will be resolved from the platform execution context (prefix + business date) at run time
+                          </Typography>
+                        </Box>
+                      }
+                    />
                   </Grid>
                 </Grid>
               </AccordionDetails>
@@ -526,11 +552,31 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
   const [appIds, setAppIds] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [useNamespace, setUseNamespace] = useState(false)
+  const [nsDateOverride, setNsDateOverride] = useState('')
   const { enqueueSnackbar } = useSnackbar()
   const qc = useQueryClient()
 
+  const { data: ctx } = useQuery<ExecutionContext>({
+    queryKey: ['execution-context'],
+    queryFn: () => pipelinesApi.getContext().then((r) => r.data),
+    enabled: open,
+  })
+
+  // default useNamespace from pipeline's load_config
+  useState(() => {
+    if (pipeline) setUseNamespace(pipeline.load_config?.use_namespace ?? false)
+  })
+
+  // Resolved namespace for display
+  const resolvedDate = nsDateOverride || ctx?.business_date || ''
+  const resolvedPrefix = ctx?.namespace_prefix ?? ''
+  const resolvedNamespace = resolvedDate
+    ? `${resolvedPrefix}${resolvedDate.replace(/-/g, '')}`
+    : null
+
   const mutation = useMutation({
-    mutationFn: (cfg: Partial<ExtractConfig>) => pipelinesApi.run(pipeline!.id, cfg).then((r) => r.data),
+    mutationFn: (trigger: RunTrigger) => pipelinesApi.run(pipeline!.id, trigger).then((r) => r.data),
     onSuccess: () => {
       enqueueSnackbar('Run started', { variant: 'success' })
       qc.invalidateQueries({ queryKey: ['pipelines'] })
@@ -541,17 +587,68 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
   })
 
   const handleRun = () => {
+    const trigger: RunTrigger = {}
     const cfg: Partial<ExtractConfig> = {}
     if (appIds.trim()) cfg.application_ids = appIds.split(',').map((s) => s.trim()).filter(Boolean)
     if (dateFrom) cfg.date_from = dateFrom
     if (dateTo) cfg.date_to = dateTo
-    mutation.mutate(cfg)
+    if (Object.keys(cfg).length) trigger.extract_config = cfg
+    if (useNamespace) {
+      trigger.use_namespace = true
+      if (nsDateOverride) trigger.business_date = nsDateOverride
+    } else {
+      trigger.use_namespace = false
+    }
+    mutation.mutate(trigger)
   }
+
+  const pipelineUsesNs = pipeline?.load_config?.use_namespace ?? false
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>Run Pipeline: {pipeline?.name}</DialogTitle>
       <DialogContent dividers>
+        {/* Namespace section */}
+        <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+            <Tag fontSize="small" color="primary" />
+            <Typography variant="subtitle2" fontWeight={600}>Table Namespace</Typography>
+            {pipelineUsesNs && (
+              <Chip label="pipeline default: on" size="small" color="primary" variant="outlined" sx={{ fontSize: '0.65rem', height: 18 }} />
+            )}
+          </Box>
+          <FormControlLabel
+            control={<Switch checked={useNamespace} onChange={(e) => setUseNamespace(e.target.checked)} size="small" />}
+            label={<Typography variant="body2">Save to namespace table</Typography>}
+          />
+          {useNamespace && (
+            <Box sx={{ mt: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <CalendarToday sx={{ fontSize: 14, color: 'text.secondary' }} />
+                <Typography variant="caption" color="text.secondary">
+                  Platform date: <strong>{ctx?.business_date ?? '(not set)'}</strong>
+                  {ctx?.namespace_prefix && <> · prefix: <strong>{ctx.namespace_prefix}</strong></>}
+                </Typography>
+              </Box>
+              <TextField
+                label="Business date override (optional)" type="date" value={nsDateOverride}
+                fullWidth size="small" InputLabelProps={{ shrink: true }}
+                onChange={(e) => setNsDateOverride(e.target.value)}
+                helperText="Leave blank to use the platform business date"
+              />
+              {resolvedNamespace ? (
+                <Alert severity="success" sx={{ py: 0.5 }}>
+                  Data will be saved to Spark table: <strong>{resolvedNamespace}</strong>
+                </Alert>
+              ) : (
+                <Alert severity="warning" sx={{ py: 0.5 }}>
+                  No business date set. Set one above or on the platform context bar.
+                </Alert>
+              )}
+            </Box>
+          )}
+        </Paper>
+
         <Alert severity="info" sx={{ mb: 2 }}>
           Override extract config for this run, or leave blank to use pipeline defaults.
         </Alert>
@@ -579,6 +676,132 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
         </Button>
       </DialogActions>
     </Dialog>
+  )
+}
+
+// ─── Platform execution context bar ──────────────────────────────────────────
+function ExecutionContextBar() {
+  const qc = useQueryClient()
+  const { enqueueSnackbar } = useSnackbar()
+  const [editing, setEditing] = useState(false)
+  const [date, setDate] = useState('')
+  const [prefix, setPrefix] = useState('')
+
+  const { data: ctx, isLoading } = useQuery<ExecutionContext>({
+    queryKey: ['execution-context'],
+    queryFn: () => pipelinesApi.getContext().then((r) => r.data),
+    refetchInterval: 60_000,
+  })
+
+  const mut = useMutation({
+    mutationFn: (d: { business_date?: string | null; namespace_prefix?: string }) =>
+      pipelinesApi.updateContext(d).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['execution-context'] })
+      setEditing(false)
+      enqueueSnackbar('Execution context updated', { variant: 'success' })
+    },
+    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
+  })
+
+  const theme = useTheme()
+
+  const handleEdit = () => {
+    setDate(ctx?.business_date ?? '')
+    setPrefix(ctx?.namespace_prefix ?? '')
+    setEditing(true)
+  }
+
+  const handleSave = () => {
+    mut.mutate({
+      business_date: date || null,
+      namespace_prefix: prefix,
+    })
+  }
+
+  const handleClear = () => {
+    mut.mutate({ business_date: null, namespace_prefix: '' })
+  }
+
+  if (isLoading) return null
+
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        mb: 2, px: 2, py: 1,
+        display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap',
+        bgcolor: alpha(theme.palette.primary.main, 0.04),
+        borderColor: alpha(theme.palette.primary.main, 0.2),
+      }}
+    >
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+        <CalendarToday sx={{ fontSize: 16, color: 'primary.main' }} />
+        <Typography variant="caption" fontWeight={600} color="primary.main">Execution Context</Typography>
+      </Box>
+
+      {!editing ? (
+        <>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Typography variant="caption" color="text.secondary">Business date:</Typography>
+            <Chip
+              size="small"
+              label={ctx?.business_date ?? 'not set'}
+              color={ctx?.business_date ? 'primary' : 'default'}
+              variant="outlined"
+              sx={{ fontSize: '0.72rem', height: 20 }}
+            />
+          </Box>
+          {ctx?.namespace_prefix && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Typography variant="caption" color="text.secondary">Prefix:</Typography>
+              <Chip size="small" label={ctx.namespace_prefix} variant="outlined"
+                sx={{ fontSize: '0.72rem', height: 20, fontFamily: 'monospace' }} />
+            </Box>
+          )}
+          {ctx?.namespace && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Tag sx={{ fontSize: 14, color: 'success.main' }} />
+              <Typography variant="caption" fontWeight={600} sx={{ fontFamily: 'monospace', color: 'success.main' }}>
+                {ctx.namespace}
+              </Typography>
+            </Box>
+          )}
+          <Box sx={{ display: 'flex', gap: 0.75, ml: 'auto' }}>
+            <Button size="small" variant="outlined" startIcon={<Edit />} onClick={handleEdit} sx={{ py: 0.25 }}>
+              Edit
+            </Button>
+            {ctx?.business_date && (
+              <Button size="small" color="warning" onClick={handleClear} disabled={mut.isPending} sx={{ py: 0.25 }}>
+                Clear
+              </Button>
+            )}
+          </Box>
+        </>
+      ) : (
+        <>
+          <TextField
+            label="Business date" type="date" value={date} size="small"
+            InputLabelProps={{ shrink: true }}
+            onChange={(e) => setDate(e.target.value)}
+            sx={{ width: 160 }}
+          />
+          <TextField
+            label="Table prefix" value={prefix} size="small"
+            placeholder="e.g. markets_"
+            onChange={(e) => setPrefix(e.target.value)}
+            sx={{ width: 160 }}
+            helperText={date ? `→ ${prefix}${date.replace(/-/g, '')}` : ''}
+          />
+          <Box sx={{ display: 'flex', gap: 0.75, ml: 'auto' }}>
+            <Button size="small" onClick={() => setEditing(false)} sx={{ py: 0.25 }}>Cancel</Button>
+            <Button size="small" variant="contained" onClick={handleSave} disabled={mut.isPending} sx={{ py: 0.25 }}>
+              {mut.isPending ? <CircularProgress size={12} color="inherit" /> : 'Save'}
+            </Button>
+          </Box>
+        </>
+      )}
+    </Paper>
   )
 }
 
@@ -617,7 +840,7 @@ export default function ETLPipelines() {
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', mb: 3, gap: 1 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', mb: 2, gap: 1 }}>
         <Box sx={{ flex: 1 }}>
           <Typography variant="h5" fontWeight={700}>ETL Pipelines</Typography>
           <Typography variant="caption" color="text.secondary">Create and manage Extract → Transform → Load workflows</Typography>
@@ -626,6 +849,8 @@ export default function ETLPipelines() {
           New Pipeline
         </Button>
       </Box>
+
+      <ExecutionContextBar />
 
       {isLoading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>

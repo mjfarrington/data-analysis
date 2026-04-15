@@ -51,6 +51,9 @@ class TransformConfig(BaseModel):
 class LoadConfig(BaseModel):
     target: str = "parquet"  # parquet | csv | spark_table
     table_name: Optional[str] = None
+    # When True, ignore table_name and use the platform namespace
+    # (namespace_prefix + business_date) as the Spark table name.
+    use_namespace: bool = False
     partition_by: list[str] = Field(default_factory=lambda: ["date", "application_id"])
     mode: str = "overwrite"  # overwrite | append
 
@@ -95,6 +98,10 @@ class PipelineResponse(PipelineBase):
 # ─────────────────────────────────────────────────────────────────────────────
 class RunTrigger(BaseModel):
     extract_config: Optional[ExtractConfig] = None  # override pipeline config
+    # Inline overrides — take precedence over the pipeline's load_config
+    business_date: Optional[str] = None    # YYYY-MM-DD override for this run
+    namespace_prefix: Optional[str] = None # prefix override for this run
+    use_namespace: Optional[bool] = None   # force namespace on/off for this run
 
 
 class RunSummary(BaseModel):
@@ -216,6 +223,23 @@ class SparkTestResult(BaseModel):
     spark_version: Optional[str] = None
     catalog_tables: Optional[int] = None
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Execution context schemas
+# ─────────────────────────────────────────────────────────────────────────────
+class ExecutionContextResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    business_date: Optional[str]
+    namespace_prefix: str
+    # Derived: the full namespace string
+    namespace: Optional[str]  # e.g. "markets_20260414" or None if no date set
+    updated_at: datetime
+
+
+class ExecutionContextUpdate(BaseModel):
+    business_date: Optional[str] = None   # YYYY-MM-DD or null to clear
+    namespace_prefix: Optional[str] = None
 
 
 class ErrorRecord(BaseModel):

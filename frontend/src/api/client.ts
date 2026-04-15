@@ -62,8 +62,24 @@ export interface TransformConfig {
 export interface LoadConfig {
   target: 'parquet' | 'csv' | 'spark_table'
   table_name?: string
+  use_namespace: boolean
   partition_by: string[]
   mode: 'overwrite' | 'append'
+}
+
+export interface ExecutionContext {
+  id: number
+  business_date: string | null
+  namespace_prefix: string
+  namespace: string | null  // resolved: prefix + compact date
+  updated_at: string
+}
+
+export interface RunTrigger {
+  extract_config?: Partial<ExtractConfig>
+  business_date?: string
+  namespace_prefix?: string
+  use_namespace?: boolean
 }
 
 export interface Pipeline {
@@ -202,8 +218,11 @@ export const pipelinesApi = {
   create: (data: Partial<Pipeline>) => api.post<Pipeline>('/etl/pipelines', data),
   update: (id: number, data: Partial<Pipeline>) => api.put<Pipeline>(`/etl/pipelines/${id}`, data),
   delete: (id: number) => api.delete(`/etl/pipelines/${id}`),
-  run: (id: number, cfg?: Partial<ExtractConfig>) =>
-    api.post<RunSummary>(`/etl/pipelines/${id}/run`, { extract_config: cfg }),
+  run: (id: number, trigger?: RunTrigger) =>
+    api.post<RunSummary>(`/etl/pipelines/${id}/run`, trigger ?? {}),
+  getContext: () => api.get<ExecutionContext>('/etl/context'),
+  updateContext: (data: { business_date?: string | null; namespace_prefix?: string }) =>
+    api.put<ExecutionContext>('/etl/context', data),
   runs: (id: number, limit?: number) =>
     api.get<RunSummary[]>(`/etl/pipelines/${id}/runs`, { params: { limit } }),
 }

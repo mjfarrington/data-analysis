@@ -203,3 +203,20 @@ class PipelineDependency(Base):
     upstream: Mapped[ETLPipeline] = relationship(
         "ETLPipeline", foreign_keys=[upstream_id], back_populates="dependents"
     )
+
+
+class ExecutionContext(Base):
+    """Platform-wide execution context: business date and namespace settings.
+    Only one active row is used (id=1, upserted on every update).
+    """
+    __tablename__ = "execution_context"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    # The business date all jobs should operate on (YYYY-MM-DD)
+    business_date: Mapped[Optional[str]] = mapped_column(String(10))
+    # Prefix prepended to the business date to form the table namespace
+    # e.g. "markets_" → table namespace "markets_20260414"
+    namespace_prefix: Mapped[str] = mapped_column(String(100), default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

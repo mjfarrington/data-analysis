@@ -10,12 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, PipelineDependency
+from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, PipelineDependency, ExecutionContext
 from app.schemas.etl import (
     PipelineCreate, PipelineUpdate, PipelineResponse,
     RunTrigger, RunSummary, RunDetail,
     SqlFileCreate, SqlFileUpdate, SqlFileResponse,
     DependencyCreate, DependencyResponse, GraphNode, GraphEdge, PipelineGraph,
+    ExecutionContextResponse, ExecutionContextUpdate,
 )
 from app.services.etl_engine import execute_pipeline, cancel_run, get_active_run_ids
 from app.services.grpc_client import grpc_client
@@ -149,6 +150,24 @@ async def trigger_run(
     extract_cfg = body.extract_config or ExtractConfig(**(pipeline.extract_config or {}))
     transform_cfg = TransformConfig(**(pipeline.transform_config or {}))
     load_cfg = LoadConfig(**(pipeline.load_config or {}))
+
+    # Resolve namespace: run-level overrides > platform context
+    ctx = await db.get(ExecutionContext, 1)
+    platform_date = ctx.business_date if ctx else None
+    platform_prefix = ctx.namespace_prefix if ctx else ""
+
+    # Merge run-time overrides into load_cfg
+    resolved_use_namespace = body.use_namespace if body.use_namespace is not None else load_cfg.use_namespace
+    resolved_date = body.business_date or platform_date
+    resolved_prefix = body.namespace_prefix if body.namespace_prefix is not None else platform_prefix
+
+    if resolved_use_namespace and resolved_date:
+        date_compact = resolved_date.replace("-", "")
+        load_cfg = load_cfg.model_copy(update={
+            "use_namespace": True,
+            "table_name": f"{resolved_prefix}{date_compact}",
+            "target": "spark_table",
+        })
 
     run = ETLRun(
         pipeline_id=pid,
@@ -411,3 +430,51 @@ async def remove_dependency(pid: int, dep_id: int, db: AsyncSession = Depends(ge
         raise HTTPException(status_code=404, detail="Dependency not found")
     await db.delete(dep)
     await db.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Execution context (platform-wide business date + namespace)
+# ─────────────────────────────────────────────────────────────────────────────
+def _build_context_response(ctx: ExecutionContext) -> ExecutionContextResponse:
+    namespace = None
+    if ctx.business_date:
+        date_compact = ctx.business_date.replace("-", "")
+        namespace = f"{ctx.namespace_prefix}{date_compact}" if ctx.namespace_prefix else date_compact
+    return ExecutionContextResponse(
+        id=ctx.id,
+        business_date=ctx.business_date,
+        namespace_prefix=ctx.namespace_prefix,
+        namespace=namespace,
+        updated_at=ctx.updated_at,
+    )
+
+
+@router.get("/context", response_model=ExecutionContextResponse)
+async def get_execution_context(db: AsyncSession = Depends(get_db)):
+    ctx = await db.get(ExecutionContext, 1)
+    if not ctx:
+        ctx = ExecutionContext(id=1, business_date=None, namespace_prefix="")
+        db.add(ctx)
+        await db.commit()
+        await db.refresh(ctx)
+    return _build_context_response(ctx)
+
+
+@router.put("/context", response_model=ExecutionContextResponse)
+async def update_execution_context(
+    body: ExecutionContextUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    ctx = await db.get(ExecutionContext, 1)
+    if not ctx:
+        ctx = ExecutionContext(id=1, business_date=None, namespace_prefix="")
+        db.add(ctx)
+    if body.business_date is not None:
+        ctx.business_date = body.business_date or None  # empty string → clear
+    if body.namespace_prefix is not None:
+        ctx.namespace_prefix = body.namespace_prefix
+    ctx.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(ctx)
+    return _build_context_response(ctx)
+
