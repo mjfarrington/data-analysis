@@ -429,50 +429,39 @@ export default function DataExplorer() {
               {/* Catalog tab */}
               {browserTab === 0 && (
                 <>
-                  {/* Database selector */}
-                  {uniqueDbs.length > 1 && (
-                    <Box sx={{ display: 'flex', gap: 1, mb: 1.5, alignItems: 'center' }}>
-                      <FilterList sx={{ fontSize: 16, color: 'text.secondary', flexShrink: 0 }} />
-                      <FormControl size="small" fullWidth>
-                        <InputLabel sx={{ fontSize: '0.78rem' }}>Database</InputLabel>
-                        <Select
-                          value={dbFilter}
-                          label="Database"
-                          onChange={(e) => {
-                            const db = e.target.value
-                            setDbFilter(db)
-                            setActiveDb(db)  // selecting a DB also sets it as SQL context
-                          }}
-                          sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace' }}
-                        >
-                          <MenuItem value="" sx={{ fontSize: '0.78rem' }}>
-                            <em>All databases ({catalogTables?.length ?? 0} tables)</em>
+                  {/* Database selector — always visible */}
+                  <Box sx={{ display: 'flex', gap: 1, mb: 1.5, alignItems: 'center' }}>
+                    <FilterList sx={{ fontSize: 16, color: 'text.secondary', flexShrink: 0 }} />
+                    <FormControl size="small" fullWidth>
+                      <InputLabel sx={{ fontSize: '0.78rem' }}>Database</InputLabel>
+                      <Select
+                        value={dbFilter}
+                        label="Database"
+                        onChange={(e) => {
+                          const db = e.target.value
+                          setDbFilter(db)
+                          setActiveDb(db)
+                        }}
+                        sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace' }}
+                      >
+                        <MenuItem value="" sx={{ fontSize: '0.78rem' }}>
+                          <em>All databases ({catalogTables?.length ?? 0} tables)</em>
+                        </MenuItem>
+                        {uniqueDbs.map((db) => (
+                          <MenuItem key={db} value={db} sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace' }}>
+                            {db}
+                            <Chip label={(catalogTables ?? []).filter((t) => (t.database || 'default') === db).length}
+                              size="small" sx={{ ml: 1, fontSize: '0.62rem', height: 16 }} />
                           </MenuItem>
-                          {uniqueDbs.map((db) => (
-                            <MenuItem key={db} value={db} sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace' }}>
-                              {db}
-                              <Chip label={(catalogTables ?? []).filter((t) => (t.database || 'default') === db).length}
-                                size="small" sx={{ ml: 1, fontSize: '0.62rem', height: 16 }} />
-                            </MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                      <Tooltip title="Load Extracted Data">
-                        <IconButton size="small" color="primary" onClick={() => { setLoadDialogDb(dbFilter); setLoadDialogOpen(true) }}>
-                          <OpenInNew sx={{ fontSize: 18 }} />
-                        </IconButton>
-                      </Tooltip>
-                    </Box>
-                  )}
-                  {uniqueDbs.length <= 1 && (
-                    <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
-                      <Tooltip title="Load Extracted Data">
-                        <IconButton size="small" color="primary" onClick={() => { setLoadDialogDb(''); setLoadDialogOpen(true) }}>
-                          <OpenInNew sx={{ fontSize: 18 }} />
-                        </IconButton>
-                      </Tooltip>
-                    </Box>
-                  )}
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <Tooltip title="Load Extracted Data">
+                      <IconButton size="small" color="primary" onClick={() => { setLoadDialogDb(dbFilter); setLoadDialogOpen(true) }}>
+                        <OpenInNew sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
 
                   {catalogLoading ? <LinearProgress /> : (
                     <CatalogTableList
