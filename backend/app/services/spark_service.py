@@ -58,7 +58,7 @@ def _view_name(app_id: str, date_str: str) -> str:
     return re.sub(r"[^0-9a-zA-Z_]", "_", f"{app_id}__{date_str}")
 
 
-def _register_file_views(spark: Any) -> None:
+def _register_file_views(spark: Any, suppress: set | None = None) -> None:
     """Scan the parquet data directory and create temp views for any dataset
     not yet visible in the catalog.  A lightweight no-op when nothing new."""
     base = settings.parquet_path
@@ -82,6 +82,8 @@ def _register_file_views(spark: Any) -> None:
             view = _view_name(app_dir.name, date_dir.name)
             if view in existing:
                 continue
+            if suppress and view in suppress:
+                continue
             try:
                 if parquet_files:
                     df = spark.read.option("recursiveFileLookup", "true").parquet(str(date_dir))
@@ -96,6 +98,7 @@ def _register_file_views(spark: Any) -> None:
 class SparkService:
     def __init__(self) -> None:
         self._connected = False
+        self._suppressed_views: set[str] = set()
 
     # ─────────────────────────────────────────────────────────────────────
     # Health / status
@@ -236,12 +239,12 @@ class SparkService:
     async def execute_query(self, sql: str, limit: int = 1000) -> dict:
         """Run SQL on Spark and return results."""
         import time as _time
-
+        suppressed = frozenset(self._suppressed_views)
         def _run():
             spark = _get_spark()
             # Auto-register file-based data as temp views so SHOW TABLES,
             # DESCRIBE, and SELECT queries can find them immediately.
-            _register_file_views(spark)
+            _register_file_views(spark, suppress=suppressed)
             t0 = _time.perf_counter()
             df = spark.sql(sql).limit(limit)
             rows_collected = df.collect()
@@ -296,9 +299,10 @@ class SparkService:
         Auto-registers parquet/CSV files from the data directory as temp views
         so that SHOW TABLES always reflects the data on disk.
         """
+        suppressed = frozenset(self._suppressed_views)
         def _list():
             spark = _get_spark()
-            _register_file_views(spark)
+            _register_file_views(spark, suppress=suppressed)
             result = []
             try:
                 databases = [r.namespace for r in spark.sql("SHOW DATABASES").collect()]
@@ -324,10 +328,17 @@ class SparkService:
         return await asyncio.to_thread(_list)
 
     async def drop_table(self, db: str, table: str) -> None:
-        """Drop a specific table from a Spark database."""
+        """Drop a specific table from a Spark database, or a session temp view."""
+        self._suppressed_views.add(table)
         def _drop():
             spark = _get_spark()
+            # Drop persistent table (qualified name)
             spark.sql(f"DROP TABLE IF EXISTS `{db}`.`{table}`")
+            # Also remove if it's a session-scoped temp view (no database qualifier)
+            try:
+                spark.catalog.dropTempView(table)
+            except Exception:
+                pass
             logger.info("Dropped table: %s.%s", db, table)
         await asyncio.to_thread(_drop)
 
