@@ -45,6 +45,47 @@ def _get_spark():
         raise
 
 
+def _view_name(app_id: str, date_str: str) -> str:
+    """Convert app_id + date string to a SQL-safe view name."""
+    import re
+    return re.sub(r"[^0-9a-zA-Z_]", "_", f"{app_id}__{date_str}")
+
+
+def _register_file_views(spark: Any) -> None:
+    """Scan the parquet data directory and create temp views for any dataset
+    not yet visible in the catalog.  A lightweight no-op when nothing new."""
+    base = settings.parquet_path
+    if not base.exists():
+        return
+    try:
+        existing = {r.tableName for r in spark.sql("SHOW TABLES").collect()}
+    except Exception:
+        existing = set()
+
+    for app_dir in sorted(base.iterdir()):
+        if not app_dir.is_dir():
+            continue
+        for date_dir in sorted(app_dir.iterdir()):
+            if not date_dir.is_dir():
+                continue
+            parquet_files = list(date_dir.glob("*.parquet"))
+            csv_files = list(date_dir.glob("*.csv"))
+            if not parquet_files and not csv_files:
+                continue
+            view = _view_name(app_dir.name, date_dir.name)
+            if view in existing:
+                continue
+            try:
+                if parquet_files:
+                    df = spark.read.option("recursiveFileLookup", "true").parquet(str(date_dir))
+                else:
+                    df = spark.read.option("header", "true").option("inferSchema", "true").csv(str(date_dir))
+                df.createOrReplaceTempView(view)
+                logger.debug("Registered temp view: %s → %s", view, date_dir)
+            except Exception as exc:
+                logger.warning("Could not register view %s: %s", view, exc)
+
+
 class SparkService:
     def __init__(self) -> None:
         self._connected = False
@@ -175,6 +216,9 @@ class SparkService:
 
         def _run():
             spark = _get_spark()
+            # Auto-register file-based data as temp views so SHOW TABLES,
+            # DESCRIBE, and SELECT queries can find them immediately.
+            _register_file_views(spark)
             t0 = _time.perf_counter()
             df = spark.sql(sql).limit(limit)
             rows_collected = df.collect()
@@ -225,9 +269,13 @@ class SparkService:
         return tables
 
     async def list_catalog_tables(self) -> list[dict]:
-        """List all tables registered in the Spark catalog via SHOW TABLES."""
+        """List all tables registered in the Spark catalog via SHOW TABLES.
+        Auto-registers parquet/CSV files from the data directory as temp views
+        so that SHOW TABLES always reflects the data on disk.
+        """
         def _list():
             spark = _get_spark()
+            _register_file_views(spark)
             rows = spark.sql("SHOW TABLES").collect()
             result = []
             for r in rows:
