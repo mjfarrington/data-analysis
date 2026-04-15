@@ -236,7 +236,7 @@ class SparkService:
     # ─────────────────────────────────────────────────────────────────────
     # Query
     # ─────────────────────────────────────────────────────────────────────
-    async def execute_query(self, sql: str, limit: int = 1000) -> dict:
+    async def execute_query(self, sql: str, limit: int = 1000, database: Optional[str] = None) -> dict:
         """Run SQL on Spark and return results."""
         import time as _time
         suppressed = frozenset(self._suppressed_views)
@@ -252,6 +252,13 @@ class SparkService:
                     spark.sql(f"DROP VIEW IF EXISTS `{v}`")
                 except Exception:
                     pass
+            # Set active database context so unqualified SHOW TABLES, SELECT etc.
+            # resolve against the user-selected database
+            if database:
+                try:
+                    spark.sql(f"USE `{database}`")
+                except Exception as exc:
+                    logger.warning("Could not USE database %s: %s", database, exc)
             t0 = _time.perf_counter()
             df = spark.sql(sql).limit(limit)
             rows_collected = df.collect()

@@ -251,8 +251,8 @@ export const dataApi = {
     api.delete(`/data/catalog/${encodeURIComponent(db)}/${encodeURIComponent(table)}`),
   dropDatabase: (db: string) =>
     api.delete(`/data/catalog/databases/${encodeURIComponent(db)}`),
-  query: (sql: string, limit?: number) =>
-    api.post<QueryResult>('/data/query', { sql, limit: limit ?? 1000 }),
+  query: (sql: string, limit?: number, database?: string) =>
+    api.post<QueryResult>('/data/query', { sql, limit: limit ?? 1000, database: database ?? null }),
   errors: (params?: { service?: string; resolved?: boolean; limit?: number }) =>
     api.get<ErrorRecord[]>('/data/errors', { params }),
   resolveError: (id: number) => api.patch<ErrorRecord>(`/data/errors/${id}/resolve`),

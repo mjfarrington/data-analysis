@@ -43,7 +43,7 @@ async def execute_query(body: QueryRequest):
             detail="Only SELECT, SHOW, and DESCRIBE statements are allowed",
         )
     try:
-        result = await spark_service.execute_query(body.sql, body.limit)
+        result = await spark_service.execute_query(body.sql, body.limit, database=body.database)
         return QueryResult(**result)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

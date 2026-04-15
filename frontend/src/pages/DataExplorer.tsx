@@ -302,6 +302,7 @@ export default function DataExplorer() {
   const [browserTab, setBrowserTab] = useState(0)
   const [selectedCatalogTable, setSelectedCatalogTable] = useState<CatalogTable | null>(null)
   const [dbFilter, setDbFilter] = useState<string>('')
+  const [activeDb, setActiveDb] = useState<string>('')  // database context for SQL execution
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'table' | 'database'; db: string; table?: string } | null>(null)
   const [loadDialogOpen, setLoadDialogOpen] = useState(false)
   const [loadDialogDb, setLoadDialogDb] = useState<string>('')
@@ -321,7 +322,7 @@ export default function DataExplorer() {
   // Pre-select database from URL ?db= param
   useEffect(() => {
     const db = searchParams.get('db')
-    if (db) setDbFilter(db)
+    if (db) { setDbFilter(db); setActiveDb(db) }
   }, [searchParams])
 
   const uniqueDbs = [...new Set((catalogTables ?? []).map((t) => t.database || 'default'))].sort()
@@ -330,8 +331,8 @@ export default function DataExplorer() {
     : (catalogTables ?? [])
 
   const queryMutation = useMutation({
-    mutationFn: ({ sql, limit }: { sql: string; limit: number }) =>
-      dataApi.query(sql, limit).then((r) => r.data),
+    mutationFn: ({ sql, limit, database }: { sql: string; limit: number; database?: string }) =>
+      dataApi.query(sql, limit, database).then((r) => r.data),
   })
 
   const dropTableMutation = useMutation({
@@ -353,23 +354,27 @@ export default function DataExplorer() {
       enqueueSnackbar(`Dropped database ${db}`, { variant: 'success' })
       qc.invalidateQueries({ queryKey: ['catalog-tables'] })
       if (dbFilter === db) setDbFilter('')
+      if (activeDb === db) setActiveDb('')
       if (selectedCatalogTable?.database === db) setSelectedCatalogTable(null)
     },
     onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
   })
 
-  const handleExecute = () => queryMutation.mutate({ sql, limit })
+  const handleExecute = () => queryMutation.mutate({ sql, limit, database: activeDb || undefined })
 
   const handlePreviewTable = (t: CatalogTable) => {
     setSelectedCatalogTable(t)
-    const fullName = t.database ? `\`${t.database}\`.\`${t.name}\`` : t.name
+    const db = t.database || 'default'
+    const fullName = `\`${t.name}\``
     setSql(`SELECT *\nFROM ${fullName}\nLIMIT 100`)
-    queryMutation.mutate({ sql: `SELECT * FROM ${fullName} LIMIT 100`, limit })
+    setActiveDb(db)
+    queryMutation.mutate({ sql: `SELECT * FROM ${fullName} LIMIT 100`, limit, database: db })
   }
 
   const handleUseTable = (t: CatalogTable) => {
-    const fullName = t.database ? `\`${t.database}\`.\`${t.name}\`` : t.name
-    setSql(`SELECT *\nFROM ${fullName}\nLIMIT 100`)
+    const db = t.database || 'default'
+    setSql(`SELECT *\nFROM \`${t.name}\`\nLIMIT 100`)
+    setActiveDb(db)
   }
 
   const handleConfirmDelete = () => {
@@ -433,7 +438,11 @@ export default function DataExplorer() {
                         <Select
                           value={dbFilter}
                           label="Database"
-                          onChange={(e) => setDbFilter(e.target.value)}
+                          onChange={(e) => {
+                            const db = e.target.value
+                            setDbFilter(db)
+                            setActiveDb(db)  // selecting a DB also sets it as SQL context
+                          }}
                           sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace' }}
                         >
                           <MenuItem value="" sx={{ fontSize: '0.78rem' }}>
@@ -479,11 +488,11 @@ export default function DataExplorer() {
                       <Button
                         size="small" variant="outlined" fullWidth startIcon={<TableChart />}
                         onClick={() => {
-                          const fullName = selectedCatalogTable.database
-                            ? `\`${selectedCatalogTable.database}\`.\`${selectedCatalogTable.name}\``
-                            : selectedCatalogTable.name
-                          setSql(`DESCRIBE ${fullName}`)
-                          queryMutation.mutate({ sql: `DESCRIBE ${fullName}`, limit: 200 })
+                          const db = selectedCatalogTable.database || 'default'
+                          const name = selectedCatalogTable.name
+                          setSql(`DESCRIBE \`${name}\``)
+                          setActiveDb(db)
+                          queryMutation.mutate({ sql: `DESCRIBE \`${name}\``, limit: 200, database: db })
                         }}
                       >
                         Describe
@@ -523,7 +532,18 @@ export default function DataExplorer() {
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 1.5, gap: 1 }}>
                 <Code sx={{ color: 'primary.main' }} />
-                <Typography variant="subtitle2" fontWeight={600} sx={{ flex: 1 }}>SQL Query</Typography>
+                <Typography variant="subtitle2" fontWeight={600} sx={{ flex: 1 }}>
+                  SQL Query
+                  {activeDb && (
+                    <Chip
+                      label={activeDb}
+                      size="small"
+                      color="primary"
+                      onDelete={() => setActiveDb('')}
+                      sx={{ ml: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.7rem', height: 20, verticalAlign: 'middle' }}
+                    />
+                  )}
+                </Typography>
                 <TextField
                   label="Limit" type="number" size="small" value={limit}
                   onChange={(e) => setLimit(Number(e.target.value))}
@@ -571,6 +591,7 @@ export default function DataExplorer() {
               />
               <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
                 Ctrl/Cmd+Enter to execute · Only SELECT, SHOW, DESCRIBE allowed
+                {activeDb && <> · context: <strong style={{ fontFamily: 'monospace' }}>{activeDb}</strong></>}
               </Typography>
 
               {queryMutation.isError && (

@@ -202,6 +202,7 @@ class DataTable(BaseModel):
 class QueryRequest(BaseModel):
     sql: str = Field(..., min_length=1, max_length=10_000)
     limit: int = Field(default=1000, ge=1, le=10_000)
+    database: Optional[str] = None  # If set, USE this database before executing
 
 
 class QueryResult(BaseModel):
