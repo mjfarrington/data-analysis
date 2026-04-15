@@ -54,6 +54,9 @@ class LoadConfig(BaseModel):
     # When True, ignore table_name and use the platform namespace
     # (namespace_prefix + business_date) as the Spark table name.
     use_namespace: bool = False
+    # Resolved at run time: the Spark database that acts as the namespace.
+    # e.g. "markets_20260414". Tables are created INSIDE this database.
+    namespace_db: Optional[str] = None
     partition_by: list[str] = Field(default_factory=lambda: ["date", "application_id"])
     mode: str = "overwrite"  # overwrite | append
 

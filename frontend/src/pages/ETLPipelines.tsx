@@ -638,7 +638,11 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
               />
               {resolvedNamespace ? (
                 <Alert severity="success" sx={{ py: 0.5 }}>
-                  Data will be saved to Spark table: <strong>{resolvedNamespace}</strong>
+                  Spark database: <strong>{resolvedNamespace}</strong><br />
+                  Table: <strong>{pipeline?.load_config?.table_name || `extracts_<app_id>`}</strong><br />
+                  <Typography variant="caption" sx={{ fontFamily: 'monospace', mt: 0.5, display: 'block' }}>
+                    Full path: {resolvedNamespace}.{pipeline?.load_config?.table_name || 'extracts_<app_id>'}
+                  </Typography>
                 </Alert>
               ) : (
                 <Alert severity="warning" sx={{ py: 0.5 }}>
@@ -762,6 +766,7 @@ function ExecutionContextBar() {
           {ctx?.namespace && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
               <Tag sx={{ fontSize: 14, color: 'success.main' }} />
+              <Typography variant="caption" color="text.secondary">Active DB:</Typography>
               <Typography variant="caption" fontWeight={600} sx={{ fontFamily: 'monospace', color: 'success.main' }}>
                 {ctx.namespace}
               </Typography>

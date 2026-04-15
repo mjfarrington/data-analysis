@@ -45,6 +45,13 @@ def _get_spark():
         raise
 
 
+def _ensure_namespace_db(spark: Any, db_name: str) -> None:
+    """Create a Spark database (catalog namespace) if it does not already exist."""
+    # Backtick-quote to handle names like 'markets_20260414'
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS `{db_name}`")
+    logger.info("Ensured Spark database: %s", db_name)
+
+
 def _view_name(app_id: str, date_str: str) -> str:
     """Convert app_id + date string to a SQL-safe view name."""
     import re
@@ -185,9 +192,17 @@ class SparkService:
         app_id: str,
         date: str,
         table_name: Optional[str] = None,
+        namespace_db: Optional[str] = None,
         mode: str = "overwrite",
     ) -> str:
-        """Merge all segment files for a date into a persistent Spark catalog table."""
+        """Merge all segment files for a date into a persistent Spark catalog table.
+
+        When *namespace_db* is provided the table is saved inside that Spark
+        database (e.g. ``markets_20260414``), creating it when necessary.  The
+        table name within the database is *table_name* if given, otherwise
+        ``extracts_{app_id}`` (date is already encoded in the database name).
+        Without *namespace_db* the old behaviour is preserved.
+        """
         def _merge():
             spark = _get_spark()
             base_path = settings.parquet_path / app_id / date
@@ -200,7 +215,15 @@ class SparkService:
                 df = spark.read.option("header", "true").option("inferSchema", "true").csv(str(base_path))
             else:
                 raise FileNotFoundError(f"No segment files found under {base_path}")
-            tbl = table_name or f"extracts_{app_id}_{date.replace('-', '_')}"
+
+            if namespace_db:
+                _ensure_namespace_db(spark, namespace_db)
+                # No date in the table name — the database IS the date partition
+                base = table_name or f"extracts_{app_id}"
+                tbl = f"`{namespace_db}`.`{base}`"
+            else:
+                tbl = table_name or f"extracts_{app_id}_{date.replace('-', '_')}"
+
             df.write.mode(mode).saveAsTable(tbl)
             logger.info("Saved catalog table %s (%d rows)", tbl, df.count())
             return tbl
@@ -269,23 +292,33 @@ class SparkService:
         return tables
 
     async def list_catalog_tables(self) -> list[dict]:
-        """List all tables registered in the Spark catalog via SHOW TABLES.
+        """List all tables registered across ALL Spark databases.
         Auto-registers parquet/CSV files from the data directory as temp views
         so that SHOW TABLES always reflects the data on disk.
         """
         def _list():
             spark = _get_spark()
             _register_file_views(spark)
-            rows = spark.sql("SHOW TABLES").collect()
             result = []
-            for r in rows:
-                # Spark 4.x uses 'namespace'; older versions use 'database'
-                db = getattr(r, "namespace", None) or getattr(r, "database", "")
-                result.append({
-                    "database": db,
-                    "name": r.tableName,
-                    "is_temporary": r.isTemporary,
-                })
+            try:
+                databases = [r.namespace for r in spark.sql("SHOW DATABASES").collect()]
+            except Exception:
+                # Older Spark / in-memory catalog uses 'databaseName' column
+                try:
+                    databases = [r.databaseName for r in spark.sql("SHOW DATABASES").collect()]
+                except Exception:
+                    databases = ["default"]
+            for db in databases:
+                try:
+                    rows = spark.sql(f"SHOW TABLES IN `{db}`").collect()
+                    for r in rows:
+                        result.append({
+                            "database": db,
+                            "name": r.tableName,
+                            "is_temporary": r.isTemporary,
+                        })
+                except Exception as exc:
+                    logger.warning("Could not list tables in database %s: %s", db, exc)
             return result
 
         return await asyncio.to_thread(_list)

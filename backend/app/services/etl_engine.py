@@ -396,10 +396,12 @@ async def execute_pipeline(
                             ))
                         await db.commit()
 
-                    if load_cfg.target == "spark_table" or load_cfg.table_name:
+                    if load_cfg.target == "spark_table" or load_cfg.table_name or load_cfg.namespace_db:
                         try:
                             tbl = await spark_service.merge_and_register_table(
-                                app_id, date_str, load_cfg.table_name,
+                                app_id, date_str,
+                                table_name=load_cfg.table_name,
+                                namespace_db=load_cfg.namespace_db,
                                 mode=load_cfg.mode or "overwrite",
                             )
                             await log(f"  Saved catalog table: {tbl}", step="load")
@@ -494,10 +496,12 @@ async def execute_pipeline(
                         ))
                     await db.commit()
 
-                if load_cfg.target == "spark_table" or load_cfg.table_name:
+                if load_cfg.target == "spark_table" or load_cfg.table_name or load_cfg.namespace_db:
                     try:
                         tbl = await spark_service.merge_and_register_table(
-                            app_id, date_str, load_cfg.table_name,
+                            app_id, date_str,
+                            table_name=load_cfg.table_name,
+                            namespace_db=load_cfg.namespace_db,
                             mode=load_cfg.mode or "overwrite",
                         )
                         await log(f"  Saved catalog table: {tbl}", step="load")

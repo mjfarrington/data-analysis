@@ -63,6 +63,7 @@ export interface LoadConfig {
   target: 'parquet' | 'csv' | 'spark_table'
   table_name?: string
   use_namespace: boolean
+  namespace_db?: string   // resolved at run time: the Spark database for this run
   partition_by: string[]
   mode: 'overwrite' | 'append'
 }

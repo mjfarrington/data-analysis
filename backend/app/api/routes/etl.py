@@ -163,9 +163,12 @@ async def trigger_run(
 
     if resolved_use_namespace and resolved_date:
         date_compact = resolved_date.replace("-", "")
+        namespace_db = f"{resolved_prefix}{date_compact}"
         load_cfg = load_cfg.model_copy(update={
             "use_namespace": True,
-            "table_name": f"{resolved_prefix}{date_compact}",
+            # The namespace DB is the Spark database; table_name stays as the
+            # user-defined unqualified name (or the engine defaults to app_id).
+            "namespace_db": namespace_db,
             "target": "spark_table",
         })
 
