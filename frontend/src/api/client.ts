@@ -143,6 +143,21 @@ export interface ServicesStatus {
   checked_at: string
 }
 
+export interface SparkTestItem {
+  name: string
+  status: 'passed' | 'failed' | 'skipped'
+  duration_ms: number
+  detail?: string
+}
+
+export interface SparkTestResult {
+  overall: 'passed' | 'failed'
+  tests: SparkTestItem[]
+  total_ms: number
+  spark_version?: string
+  catalog_tables?: number
+}
+
 export interface DataTable {
   name: string
   path: string
@@ -204,6 +219,7 @@ export const runsApi = {
 export const servicesApi = {
   status: () => api.get<ServicesStatus>('/services/status'),
   testSpark: () => api.post('/services/spark/test-connection'),
+  runSparkTest: () => api.post<SparkTestResult>('/services/spark/run-test'),
   testGrpc: () => api.post('/services/grpc/test-connection'),
   grpcStatus: () => api.get('/services/grpc/status'),
 }
@@ -238,4 +254,42 @@ export const sqlFilesApi = {
   update: (id: number, data: Partial<Omit<SqlFile, 'id' | 'created_at' | 'updated_at'>>) =>
     api.put<SqlFile>(`/etl/sql-files/${id}`, data),
   delete: (id: number) => api.delete(`/etl/sql-files/${id}`),
+}
+
+// ─── Pipeline Graph / Dependencies ───────────────────────────────────────────
+export interface GraphNode {
+  id: number
+  name: string
+  description?: string
+  status: string
+  source_type: string
+  last_run_status?: string
+}
+
+export interface GraphEdge {
+  id: string
+  source: number
+  target: number
+  dependency_id: number
+}
+
+export interface PipelineGraph {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+export interface Dependency {
+  id: number
+  pipeline_id: number
+  upstream_id: number
+  created_at: string
+}
+
+export const graphApi = {
+  graph: () => api.get<PipelineGraph>('/etl/graph'),
+  listDeps: (pid: number) => api.get<Dependency[]>(`/etl/pipelines/${pid}/dependencies`),
+  addDep: (pid: number, upstream_id: number) =>
+    api.post<Dependency>(`/etl/pipelines/${pid}/dependencies`, { upstream_id }),
+  removeDep: (pid: number, dep_id: number) =>
+    api.delete(`/etl/pipelines/${pid}/dependencies/${dep_id}`),
 }

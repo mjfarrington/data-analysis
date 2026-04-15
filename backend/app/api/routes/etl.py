@@ -10,11 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile
+from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, PipelineDependency
 from app.schemas.etl import (
     PipelineCreate, PipelineUpdate, PipelineResponse,
     RunTrigger, RunSummary, RunDetail,
     SqlFileCreate, SqlFileUpdate, SqlFileResponse,
+    DependencyCreate, DependencyResponse, GraphNode, GraphEdge, PipelineGraph,
 )
 from app.services.etl_engine import execute_pipeline, cancel_run, get_active_run_ids
 from app.services.grpc_client import grpc_client
@@ -307,4 +308,106 @@ async def delete_sql_file(fid: int, db: AsyncSession = Depends(get_db)):
     if not sql_file:
         raise HTTPException(status_code=404, detail="SQL file not found")
     await db.delete(sql_file)
+    await db.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+@router.get("/graph", response_model=PipelineGraph)
+async def get_pipeline_graph(db: AsyncSession = Depends(get_db)):
+    """Return all pipelines as nodes and dependencies as edges."""
+    pipelines_result = await db.execute(select(ETLPipeline).order_by(ETLPipeline.id))
+    pipelines = pipelines_result.scalars().all()
+
+    deps_result = await db.execute(select(PipelineDependency))
+    deps = deps_result.scalars().all()
+
+    # Gather last run status per pipeline
+    last_run_by_pipeline: dict[int, str] = {}
+    for p in pipelines:
+        run_q = await db.execute(
+            select(ETLRun)
+            .where(ETLRun.pipeline_id == p.id)
+            .order_by(desc(ETLRun.created_at))
+            .limit(1)
+        )
+        last_run = run_q.scalar_one_or_none()
+        if last_run:
+            last_run_by_pipeline[p.id] = last_run.status
+
+    nodes = [
+        GraphNode(
+            id=p.id,
+            name=p.name,
+            description=p.description,
+            status=p.status,
+            source_type=(p.extract_config or {}).get("source_type", "grpc"),
+            last_run_status=last_run_by_pipeline.get(p.id),
+        )
+        for p in pipelines
+    ]
+    edges = [
+        GraphEdge(id=f"dep-{d.id}", source=d.upstream_id, target=d.pipeline_id, dependency_id=d.id)
+        for d in deps
+    ]
+    return PipelineGraph(nodes=nodes, edges=edges)
+
+
+@router.get("/pipelines/{pid}/dependencies", response_model=list[DependencyResponse])
+async def list_dependencies(pid: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(PipelineDependency).where(PipelineDependency.pipeline_id == pid)
+    )
+    return [DependencyResponse.model_validate(d) for d in result.scalars()]
+
+
+@router.post("/pipelines/{pid}/dependencies", response_model=DependencyResponse, status_code=201)
+async def add_dependency(
+    pid: int,
+    body: DependencyCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    if body.upstream_id == pid:
+        raise HTTPException(status_code=400, detail="A pipeline cannot depend on itself")
+
+    # Check both pipelines exist
+    if not await db.get(ETLPipeline, pid):
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    if not await db.get(ETLPipeline, body.upstream_id):
+        raise HTTPException(status_code=404, detail="Upstream pipeline not found")
+
+    # Check for duplicate
+    existing = await db.execute(
+        select(PipelineDependency).where(
+            PipelineDependency.pipeline_id == pid,
+            PipelineDependency.upstream_id == body.upstream_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Dependency already exists")
+
+    # Simple cycle check: upstream must not already depend on pid (direct only)
+    reverse = await db.execute(
+        select(PipelineDependency).where(
+            PipelineDependency.pipeline_id == body.upstream_id,
+            PipelineDependency.upstream_id == pid,
+        )
+    )
+    if reverse.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Adding this dependency would create a cycle")
+
+    dep = PipelineDependency(pipeline_id=pid, upstream_id=body.upstream_id)
+    db.add(dep)
+    await db.commit()
+    await db.refresh(dep)
+    return DependencyResponse.model_validate(dep)
+
+
+@router.delete("/pipelines/{pid}/dependencies/{dep_id}", status_code=204)
+async def remove_dependency(pid: int, dep_id: int, db: AsyncSession = Depends(get_db)):
+    dep = await db.get(PipelineDependency, dep_id)
+    if not dep or dep.pipeline_id != pid:
+        raise HTTPException(status_code=404, detail="Dependency not found")
+    await db.delete(dep)
     await db.commit()

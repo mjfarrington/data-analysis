@@ -202,6 +202,22 @@ class QueryResult(BaseModel):
     duration_ms: float
 
 
+class SparkTestItem(BaseModel):
+    name: str
+    status: str          # passed | failed | skipped
+    duration_ms: float
+    detail: Optional[str] = None
+
+
+class SparkTestResult(BaseModel):
+    overall: str         # passed | failed
+    tests: list[SparkTestItem]
+    total_ms: float
+    spark_version: Optional[str] = None
+    catalog_tables: Optional[int] = None
+
+
+
 class ErrorRecord(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -241,3 +257,40 @@ class SqlFileResponse(BaseModel):
     content: str
     created_at: datetime
     updated_at: datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline dependency schemas
+# ─────────────────────────────────────────────────────────────────────────────
+class DependencyCreate(BaseModel):
+    upstream_id: int = Field(..., description="Pipeline that must complete first")
+
+
+class DependencyResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    pipeline_id: int
+    upstream_id: int
+    created_at: datetime
+
+
+class GraphNode(BaseModel):
+    """Lightweight pipeline summary for the graph view."""
+    id: int
+    name: str
+    description: Optional[str]
+    status: str
+    source_type: str
+    last_run_status: Optional[str] = None
+
+
+class GraphEdge(BaseModel):
+    id: str          # "dep-{id}"
+    source: int      # upstream_id
+    target: int      # pipeline_id (downstream)
+    dependency_id: int
+
+
+class PipelineGraph(BaseModel):
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]

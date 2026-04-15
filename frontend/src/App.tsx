@@ -8,6 +8,8 @@ import ETLPipelines from './pages/ETLPipelines'
 import ETLRuns from './pages/ETLRuns'
 import DataExplorer from './pages/DataExplorer'
 import ErrorsPage from './pages/ErrorsPage'
+import PipelineGraph from './pages/PipelineGraph'
+import Services from './pages/Services'
 
 interface ThemeContextType {
   mode: 'light' | 'dark'
@@ -31,9 +33,11 @@ export default function App() {
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/pipelines" element={<ETLPipelines />} />
+              <Route path="/graph" element={<PipelineGraph />} />
               <Route path="/runs" element={<ETLRuns />} />
               <Route path="/explorer" element={<DataExplorer />} />
               <Route path="/errors" element={<ErrorsPage />} />
+              <Route path="/services" element={<Services />} />
             </Routes>
           </Layout>
         </BrowserRouter>

@@ -77,6 +77,14 @@ class ETLPipeline(Base):
     runs: Mapped[list[ETLRun]] = relationship(
         "ETLRun", back_populates="pipeline", cascade="all, delete-orphan"
     )
+    dependencies: Mapped[list[PipelineDependency]] = relationship(
+        "PipelineDependency", foreign_keys="PipelineDependency.pipeline_id",
+        back_populates="pipeline", cascade="all, delete-orphan"
+    )
+    dependents: Mapped[list[PipelineDependency]] = relationship(
+        "PipelineDependency", foreign_keys="PipelineDependency.upstream_id",
+        back_populates="upstream", cascade="all, delete-orphan"
+    )
 
 
 class ETLRun(Base):
@@ -171,4 +179,27 @@ class ServiceError(Base):
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class PipelineDependency(Base):
+    """Directed edge: pipeline_id depends on upstream_id completing first."""
+    __tablename__ = "pipeline_dependencies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    pipeline_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("etl_pipelines.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    upstream_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("etl_pipelines.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    pipeline: Mapped[ETLPipeline] = relationship(
+        "ETLPipeline", foreign_keys=[pipeline_id], back_populates="dependencies"
+    )
+    upstream: Mapped[ETLPipeline] = relationship(
+        "ETLPipeline", foreign_keys=[upstream_id], back_populates="dependents"
     )

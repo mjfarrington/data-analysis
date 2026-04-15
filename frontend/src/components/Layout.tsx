@@ -14,6 +14,8 @@ import {
   Brightness4, Brightness7,
   ChevronLeft, Menu as MenuIcon,
   Circle as DotIcon,
+  Share as GraphIcon,
+  HealthAndSafety as ServicesIcon,
 } from '@mui/icons-material'
 import { useQuery } from '@tanstack/react-query'
 import { useThemeMode } from '../App'
@@ -25,8 +27,10 @@ const DRAWER_MINI = 64
 const navItems = [
   { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon /> },
   { label: 'ETL Pipelines', path: '/pipelines', icon: <PipelineIcon /> },
+  { label: 'Pipeline Graph', path: '/graph', icon: <GraphIcon /> },
   { label: 'Runs', path: '/runs', icon: <RunsIcon /> },
   { label: 'Data Explorer', path: '/explorer', icon: <DataIcon /> },
+  { label: 'Services', path: '/services', icon: <ServicesIcon /> },
   { label: 'Errors', path: '/errors', icon: <ErrorIcon /> },
 ]
 

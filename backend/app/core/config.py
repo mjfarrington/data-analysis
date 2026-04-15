@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     ]
 
     # Database (SQLite for metadata)
-    DATABASE_URL: str = "sqlite+aiosqlite:///./data/metadata.db"
+    DATABASE_URL: str = f"sqlite+aiosqlite:///{Path(__file__).parents[3] / 'data' / 'metadata.db'}"
 
     # Spark
     SPARK_MASTER_URL: str = "spark://localhost:7077"

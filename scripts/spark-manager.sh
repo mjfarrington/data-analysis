@@ -165,6 +165,8 @@ start_worker() {
     fi
     "$SPARK_HOME/sbin/start-worker.sh" \
         "$SPARK_MASTER_URL" \
+        --cores "${SPARK_WORKER_CORES:-8}" \
+        --memory "${SPARK_WORKER_MEMORY:-8g}" \
         --webui-port "$SPARK_WORKER_WEBUI_PORT"
     wait_for_port "Spark Worker" "$SPARK_WORKER_WEBUI_PORT" 30
     log_success "Worker UI: http://${SPARK_MASTER_HOST}:${SPARK_WORKER_WEBUI_PORT}"
