@@ -1,0 +1,77 @@
+from __future__ import annotations
+import os
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # App
+    APP_NAME: str = "Data Analysis Platform"
+    APP_VERSION: str = "1.0.0"
+    DEBUG: bool = False
+    LOG_LEVEL: str = "INFO"
+
+    # API
+    API_PREFIX: str = "/api/v1"
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+    ]
+
+    # Database (SQLite for metadata)
+    DATABASE_URL: str = "sqlite+aiosqlite:///./data/metadata.db"
+
+    # Spark
+    SPARK_MASTER_URL: str = "spark://localhost:7077"
+    SPARK_CONNECT_URL: str = "sc://localhost:15002"
+    SPARK_THRIFT_HOST: str = "localhost"
+    SPARK_THRIFT_PORT: int = 10000
+    SPARK_MASTER_WEBUI: str = "http://localhost:8080"
+    SPARK_WORKER_WEBUI: str = "http://localhost:8081"
+    SPARK_HISTORY_WEBUI: str = "http://localhost:18080"
+    SPARK_HOME: str = str(Path(__file__).parents[3] / "spark")
+
+    # Data storage
+    DATA_DIR: str = str(Path(__file__).parents[3] / "data")
+    EXTRACT_DIR: str = str(Path(__file__).parents[3] / "data" / "extracts")
+    PARQUET_DIR: str = str(Path(__file__).parents[3] / "data" / "parquet")
+
+    # gRPC Data Extract Service
+    GRPC_HOST: str = "localhost"
+    GRPC_PORT: int = 50051
+    GRPC_TIMEOUT: float = 30.0
+    GRPC_MAX_MESSAGE_MB: int = 64
+
+    # ETL defaults
+    DEFAULT_PAGE_SIZE: int = 10_000
+    MAX_CONCURRENT_RUNS: int = 5
+
+    @property
+    def grpc_address(self) -> str:
+        return f"{self.GRPC_HOST}:{self.GRPC_PORT}"
+
+    @property
+    def data_path(self) -> Path:
+        return Path(self.DATA_DIR)
+
+    @property
+    def extract_path(self) -> Path:
+        return Path(self.EXTRACT_DIR)
+
+    @property
+    def parquet_path(self) -> Path:
+        return Path(self.PARQUET_DIR)
+
+
+settings = Settings()
+
+# Ensure data directories exist
+for _dir in [settings.DATA_DIR, settings.EXTRACT_DIR, settings.PARQUET_DIR]:
+    Path(_dir).mkdir(parents=True, exist_ok=True)

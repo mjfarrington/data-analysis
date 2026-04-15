@@ -1,0 +1,241 @@
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: '/api/v1',
+  headers: { 'Content-Type': 'application/json' },
+})
+
+api.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    const msg = err.response?.data?.detail || err.message || 'Unknown error'
+    return Promise.reject(new Error(msg))
+  },
+)
+
+export default api
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+export type SourceType = 'grpc' | 'jdbc' | 'json' | 'csv'
+
+export interface ExtractConfig {
+  // Source selector
+  source_type: SourceType
+
+  // gRPC
+  application_ids: string[]
+
+  // Date range (all sources)
+  dates: string[]
+  date_from?: string
+  date_to?: string
+
+  // Segmentation
+  rows_per_segment: number   // rows per output file (jdbc/json/csv)
+  page_size: number          // gRPC batch fetch size
+
+  output_format: 'parquet' | 'csv'
+
+  // JDBC
+  jdbc_url?: string
+  jdbc_sql_file_id?: number
+  jdbc_sql?: string
+  jdbc_table?: string
+  jdbc_date_column?: string
+
+  // File (json / csv)
+  file_path?: string
+  file_encoding?: string
+  csv_delimiter?: string
+  csv_has_header?: boolean
+  json_lines?: boolean
+}
+
+export interface TransformConfig {
+  filters: Record<string, string>
+  drop_columns: string[]
+  rename_columns: Record<string, string>
+  dedup: boolean
+  dedup_keys: string[]
+}
+
+export interface LoadConfig {
+  target: 'parquet' | 'csv' | 'spark_table'
+  table_name?: string
+  partition_by: string[]
+  mode: 'overwrite' | 'append'
+}
+
+export interface Pipeline {
+  id: number
+  name: string
+  description?: string
+  status: 'active' | 'inactive' | 'draft'
+  extract_config: ExtractConfig
+  transform_config: TransformConfig
+  load_config: LoadConfig
+  schedule?: string
+  schedule_enabled: boolean
+  created_at: string
+  updated_at: string
+  last_run?: RunSummary
+  total_runs: number
+}
+
+export interface RunSummary {
+  id: number
+  pipeline_id: number
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  triggered_by: string
+  started_at?: string
+  finished_at?: string
+  duration_seconds?: number
+  records_extracted: number
+  records_loaded: number
+  segments_processed: number
+  error_message?: string
+  created_at: string
+}
+
+export interface RunLog {
+  id: number
+  level: string
+  message: string
+  step?: string
+  timestamp: string
+  extra?: Record<string, unknown>
+}
+
+export interface RunDetail extends RunSummary {
+  records_transformed: number
+  run_metadata?: Record<string, unknown>
+  logs: RunLog[]
+  extract_jobs: ExtractJob[]
+}
+
+export interface ExtractJob {
+  id: number
+  application_id: string
+  date: string
+  segment: number
+  total_segments?: number
+  status: string
+  records_count: number
+  output_path?: string
+  output_format: string
+  started_at?: string
+  finished_at?: string
+  error_message?: string
+}
+
+export interface ServiceInfo {
+  name: string
+  status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown'
+  url?: string
+  message?: string
+  latency_ms?: number
+  details?: Record<string, unknown>
+}
+
+export interface ServicesStatus {
+  overall: string
+  services: ServiceInfo[]
+  checked_at: string
+}
+
+export interface DataTable {
+  name: string
+  path: string
+  format: string
+  size_bytes: number
+  row_count?: number
+  columns: string[]
+  partitions: string[]
+  last_modified?: string
+  file_count?: number
+}
+
+export interface QueryResult {
+  columns: string[]
+  rows: unknown[][]
+  row_count: number
+  truncated: boolean
+  duration_ms: number
+}
+
+export interface CatalogTable {
+  database: string
+  name: string
+  is_temporary: boolean
+}
+
+export interface ErrorRecord {
+  id: number
+  service: string
+  level: string
+  message: string
+  traceback?: string
+  context?: Record<string, unknown>
+  resolved: boolean
+  timestamp: string
+}
+
+// ─── API helpers ─────────────────────────────────────────────────────────────
+export const pipelinesApi = {
+  list: (status?: string) => api.get<Pipeline[]>('/etl/pipelines', { params: { status } }),
+  get: (id: number) => api.get<Pipeline>(`/etl/pipelines/${id}`),
+  create: (data: Partial<Pipeline>) => api.post<Pipeline>('/etl/pipelines', data),
+  update: (id: number, data: Partial<Pipeline>) => api.put<Pipeline>(`/etl/pipelines/${id}`, data),
+  delete: (id: number) => api.delete(`/etl/pipelines/${id}`),
+  run: (id: number, cfg?: Partial<ExtractConfig>) =>
+    api.post<RunSummary>(`/etl/pipelines/${id}/run`, { extract_config: cfg }),
+  runs: (id: number, limit?: number) =>
+    api.get<RunSummary[]>(`/etl/pipelines/${id}/runs`, { params: { limit } }),
+}
+
+export const runsApi = {
+  list: (status?: string, limit?: number) =>
+    api.get<RunSummary[]>('/etl/runs', { params: { status, limit } }),
+  get: (id: number) => api.get<RunDetail>(`/etl/runs/${id}`),
+  cancel: (id: number) => api.post(`/etl/runs/${id}/cancel`),
+  active: () => api.get<number[]>('/etl/active'),
+}
+
+export const servicesApi = {
+  status: () => api.get<ServicesStatus>('/services/status'),
+  testSpark: () => api.post('/services/spark/test-connection'),
+  testGrpc: () => api.post('/services/grpc/test-connection'),
+  grpcStatus: () => api.get('/services/grpc/status'),
+}
+
+export const dataApi = {
+  tables: () => api.get<DataTable[]>('/data/tables'),
+  catalog: () => api.get<CatalogTable[]>('/data/catalog'),
+  query: (sql: string, limit?: number) =>
+    api.post<QueryResult>('/data/query', { sql, limit: limit ?? 1000 }),
+  errors: (params?: { service?: string; resolved?: boolean; limit?: number }) =>
+    api.get<ErrorRecord[]>('/data/errors', { params }),
+  resolveError: (id: number) => api.patch<ErrorRecord>(`/data/errors/${id}/resolve`),
+  sources: (appId?: string) =>
+    api.get('/etl/sources/available', { params: { application_id: appId } }),
+}
+
+// ─── SQL Files ────────────────────────────────────────────────────────────────
+export interface SqlFile {
+  id: number
+  name: string
+  description?: string
+  content: string
+  created_at: string
+  updated_at: string
+}
+
+export const sqlFilesApi = {
+  list: () => api.get<SqlFile[]>('/etl/sql-files'),
+  get: (id: number) => api.get<SqlFile>(`/etl/sql-files/${id}`),
+  create: (data: Omit<SqlFile, 'id' | 'created_at' | 'updated_at'>) =>
+    api.post<SqlFile>('/etl/sql-files', data),
+  update: (id: number, data: Partial<Omit<SqlFile, 'id' | 'created_at' | 'updated_at'>>) =>
+    api.put<SqlFile>(`/etl/sql-files/${id}`, data),
+  delete: (id: number) => api.delete(`/etl/sql-files/${id}`),
+}
