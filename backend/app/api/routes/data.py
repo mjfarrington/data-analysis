@@ -33,6 +33,19 @@ async def list_data_tables():
     ]
 
 
+@router.delete("/tables/{table_name:path}", status_code=204)
+async def delete_file_table(table_name: str):
+    """Delete a file store entry (removes directory from disk)."""
+    try:
+        await spark_service.delete_file_table(table_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.post("/query", response_model=QueryResult)
 async def execute_query(body: QueryRequest):
     # Basic SQL injection prevention — whitelist-style check for SELECT only
@@ -43,7 +56,7 @@ async def execute_query(body: QueryRequest):
             detail="Only SELECT, SHOW, and DESCRIBE statements are allowed",
         )
     try:
-        result = await spark_service.execute_query(body.sql, body.limit, database=body.database)
+        result = await spark_service.execute_query(body.sql, body.limit, body.offset, database=body.database)
         return QueryResult(**result)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -59,11 +72,27 @@ async def list_catalog_tables():
         return []
 
 
+@router.get("/catalog/databases")
+async def list_catalog_databases():
+    """Return all Spark database names (for UI dropdowns, including empty databases)."""
+    return await spark_service.list_databases()
+
+
 @router.delete("/catalog/databases/{db_name}", status_code=204)
 async def drop_catalog_database(db_name: str):
     """Drop an entire Spark database and all its tables (CASCADE)."""
     try:
         await spark_service.drop_database(db_name)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/catalog/{db_name}/tables", status_code=200)
+async def clear_catalog_database_tables(db_name: str):
+    """Drop all tables in a database without dropping the database itself."""
+    try:
+        count = await spark_service.clear_database_tables(db_name)
+        return {"dropped": count}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

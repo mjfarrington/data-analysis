@@ -12,7 +12,7 @@ grpcio>=1.63.0
 grpcio-tools>=1.63.0
 grpcio-status>=1.63.0
 zstandard>=0.25.0
-pyspark>=4.0.0
+pyspark==4.0.2
 pandas>=2.2.0
 pyarrow>=16.0.0
 python-multipart>=0.0.9

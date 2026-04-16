@@ -3,14 +3,15 @@ import {
   Box, Typography, Card, CardContent, Chip, IconButton, Tooltip, LinearProgress,
   Dialog, DialogTitle, DialogContent, DialogActions, Button, Tab, Tabs,
   Table, TableHead, TableBody, TableRow, TableCell, alpha, useTheme,
-  CircularProgress, Divider, Paper,
+  CircularProgress, Divider, Paper, Checkbox,
 } from '@mui/material'
-import { Refresh, Cancel, ExpandMore, ExpandLess, Circle } from '@mui/icons-material'
+import { Refresh, Cancel, ExpandMore, ExpandLess, Circle, Delete, ClearAll } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSnackbar } from 'notistack'
-import { runsApi, RunDetail, RunLog } from '../api/client'
+import { runsApi, adminApi, RunDetail, RunLog } from '../api/client'
 import StatusChip from '../components/StatusChip'
 import { formatDistanceToNow, format } from 'date-fns'
+import { parseApiDate } from '../utils/dates'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 const LOG_LEVEL_COLOR: Record<string, string> = {
@@ -22,7 +23,7 @@ function LogLine({ entry }: { entry: RunLog }) {
   return (
     <Box sx={{ display: 'flex', gap: 1.5, py: 0.25, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.75rem', lineHeight: 1.5 }}>
       <Typography component="span" sx={{ color: 'text.secondary', flexShrink: 0, minWidth: 80 }}>
-        {format(new Date(entry.timestamp), 'HH:mm:ss.SSS')}
+        {format(parseApiDate(entry.timestamp), 'HH:mm:ss.SSS')}
       </Typography>
       <Typography component="span" sx={{ color, flexShrink: 0, minWidth: 45, fontWeight: 600 }}>
         {entry.level.padEnd(5)}
@@ -156,6 +157,8 @@ function RunDetailDialog({ runId, open, onClose }: { runId: number; open: boolea
 
 export default function ETLRuns() {
   const [selectedRun, setSelectedRun] = useState<number | null>(null)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [confirmClearAll, setConfirmClearAll] = useState(false)
   const { enqueueSnackbar } = useSnackbar()
   const qc = useQueryClient()
   const theme = useTheme()
@@ -176,6 +179,38 @@ export default function ETLRuns() {
     onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: (ids: number[]) => adminApi.deleteRuns(ids),
+    onSuccess: () => {
+      enqueueSnackbar(`Deleted ${selected.size} run(s)`, { variant: 'success' })
+      setSelected(new Set())
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+    },
+    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
+  })
+
+  const clearAllMutation = useMutation({
+    mutationFn: () => adminApi.deleteRuns(),
+    onSuccess: (r) => {
+      enqueueSnackbar(r.data.message, { variant: 'success' })
+      setSelected(new Set())
+      setConfirmClearAll(false)
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+    },
+    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
+  })
+
+  const terminalRuns = runs?.filter((r) => !['running', 'pending'].includes(r.status)) ?? []
+  const allTerminalSelected = terminalRuns.length > 0 && terminalRuns.every((r) => selected.has(r.id))
+
+  const toggleSelectAll = () => {
+    if (allTerminalSelected) {
+      setSelected(new Set())
+    } else {
+      setSelected(new Set(terminalRuns.map((r) => r.id)))
+    }
+  }
+
   return (
     <Box>
       <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
@@ -183,15 +218,40 @@ export default function ETLRuns() {
           <Typography variant="h5" fontWeight={700}>ETL Runs</Typography>
           <Typography variant="caption" color="text.secondary">History and live monitoring of pipeline executions</Typography>
         </Box>
-        <IconButton onClick={() => qc.invalidateQueries({ queryKey: ['all-runs'] })}>
-          <Refresh />
-        </IconButton>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          {selected.size > 0 && (
+            <Button
+              size="small" color="error" variant="outlined" startIcon={<Delete />}
+              disabled={deleteMutation.isPending}
+              onClick={() => deleteMutation.mutate(Array.from(selected))}
+            >
+              Delete ({selected.size})
+            </Button>
+          )}
+          <Button
+            size="small" color="warning" variant="outlined" startIcon={<ClearAll />}
+            onClick={() => setConfirmClearAll(true)}
+          >
+            Clear All
+          </Button>
+          <IconButton onClick={() => qc.invalidateQueries({ queryKey: ['all-runs'] })}>
+            <Refresh />
+          </IconButton>
+        </Box>
       </Box>
 
       <Card>
         <Table size="small">
           <TableHead>
             <TableRow>
+              <TableCell padding="checkbox">
+                <Checkbox
+                  size="small"
+                  indeterminate={selected.size > 0 && !allTerminalSelected}
+                  checked={allTerminalSelected}
+                  onChange={toggleSelectAll}
+                />
+              </TableCell>
               <TableCell>Run</TableCell>
               <TableCell>Pipeline</TableCell>
               <TableCell>Status</TableCell>
@@ -206,11 +266,12 @@ export default function ETLRuns() {
           </TableHead>
           <TableBody>
             {isLoading ? (
-              <TableRow><TableCell colSpan={10} align="center" sx={{ py: 4 }}><CircularProgress size={24} /></TableCell></TableRow>
+              <TableRow><TableCell colSpan={11} align="center" sx={{ py: 4 }}><CircularProgress size={24} /></TableCell></TableRow>
             ) : !runs?.length ? (
-              <TableRow><TableCell colSpan={10} align="center" sx={{ py: 4, color: 'text.secondary' }}>No runs yet</TableCell></TableRow>
+              <TableRow><TableCell colSpan={11} align="center" sx={{ py: 4, color: 'text.secondary' }}>No runs yet</TableCell></TableRow>
             ) : runs.map((r) => {
               const isActive = r.status === 'running' || r.status === 'pending'
+              const isSelected = selected.has(r.id)
               return (
                 <TableRow
                   key={r.id}
@@ -218,9 +279,26 @@ export default function ETLRuns() {
                     cursor: 'pointer',
                     '&:hover': { bgcolor: alpha(theme.palette.primary.main, 0.04) },
                     ...(isActive ? { bgcolor: alpha(theme.palette.warning.main, 0.04) } : {}),
+                    ...(isSelected ? { bgcolor: alpha(theme.palette.error.main, 0.05) } : {}),
                   }}
                   onClick={() => setSelectedRun(r.id)}
                 >
+                  <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
+                    {!isActive && (
+                      <Checkbox
+                        size="small"
+                        checked={isSelected}
+                        onChange={() => {
+                          setSelected((prev) => {
+                            const next = new Set(prev)
+                            if (next.has(r.id)) next.delete(r.id)
+                            else next.add(r.id)
+                            return next
+                          })
+                        }}
+                      />
+                    )}
+                  </TableCell>
                   <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem', fontWeight: 600, color: 'primary.main' }}>
                     #{r.id} {isActive && <CircularProgress size={10} sx={{ ml: 0.5 }} />}
                   </TableCell>
@@ -235,7 +313,7 @@ export default function ETLRuns() {
                   </TableCell>
                   <TableCell>
                     <Typography variant="caption" color="text.secondary">
-                      {r.started_at ? formatDistanceToNow(new Date(r.started_at), { addSuffix: true }) : '—'}
+                      {r.started_at ? formatDistanceToNow(parseApiDate(r.started_at), { addSuffix: true }) : '—'}
                     </Typography>
                   </TableCell>
                   <TableCell onClick={(e) => e.stopPropagation()}>
@@ -257,6 +335,26 @@ export default function ETLRuns() {
       {selectedRun !== null && (
         <RunDetailDialog runId={selectedRun} open onClose={() => setSelectedRun(null)} />
       )}
+
+      <Dialog open={confirmClearAll} onClose={() => setConfirmClearAll(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Clear all run history?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            This will permanently delete all completed, failed, and cancelled runs.
+            Active and pending runs are not affected.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmClearAll(false)}>Cancel</Button>
+          <Button
+            color="error" variant="contained"
+            disabled={clearAllMutation.isPending}
+            onClick={() => clearAllMutation.mutate()}
+          >
+            Clear All
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }

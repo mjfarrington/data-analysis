@@ -10,6 +10,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSnackbar } from 'notistack'
 import { dataApi, ErrorRecord } from '../api/client'
 import { format, formatDistanceToNow } from 'date-fns'
+import { parseApiDate } from '../utils/dates'
 
 const LEVEL_COLOR: Record<string, 'error' | 'warning' | 'info' | 'default'> = {
   ERROR: 'error', CRITICAL: 'error', WARN: 'warning', WARNING: 'warning',
@@ -179,9 +180,9 @@ export default function ErrorsPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <Tooltip title={format(new Date(e.timestamp), 'PPpp')}>
+                    <Tooltip title={format(parseApiDate(e.timestamp), 'PPpp')}>
                       <Typography variant="caption" color="text.secondary">
-                        {formatDistanceToNow(new Date(e.timestamp), { addSuffix: true })}
+                        {formatDistanceToNow(parseApiDate(e.timestamp), { addSuffix: true })}
                       </Typography>
                     </Tooltip>
                   </TableCell>

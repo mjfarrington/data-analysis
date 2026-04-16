@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -107,6 +107,91 @@ def _apply_transforms(records: list[dict], cfg: TransformConfig) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SQL variable injection
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DATE_FORMATS: dict[str, str] = {
+    "YYYYMMDD": "%Y%m%d",
+    "YYYY-MM-DD": "%Y-%m-%d",
+    "YYYYMM": "%Y%m",
+    "YYYY/MM/DD": "%Y/%m/%d",
+    "DD/MM/YYYY": "%d/%m/%Y",
+    "MM/DD/YYYY": "%m/%d/%Y",
+}
+
+
+def _fmt_date(d: _date, fmt: str) -> str:
+    return d.strftime(_DATE_FORMATS.get(fmt, "%Y%m%d"))
+
+
+def inject_sql_vars(
+    sql: str,
+    business_date_iso: Optional[str],
+    date_var_format: str = "YYYYMMDD",
+    date_range_mode: str = "single",
+    date_range_from_iso: Optional[str] = None,
+    date_range_to_iso: Optional[str] = None,
+    app_id: Optional[str] = None,
+) -> tuple[str, dict[str, str]]:
+    """Replace $business_date* and $app_id placeholders in *sql*.
+
+    Returns (resolved_sql, variables) where *variables* maps each placeholder
+    to the value that was (or would be) substituted.
+
+    Supported placeholders:
+        $business_date          – the business date (single mode) or range start
+        $business_date_from     – start of the resolved date range
+        $business_date_to       – end of the resolved date range
+        $business_date_range    – BETWEEN <from> AND <to>
+        $app_id                 – the application ID (JDBC only)
+    """
+    variables: dict[str, str] = {}
+
+    if app_id:
+        variables["$app_id"] = app_id
+
+    if business_date_iso:
+        base = _date.fromisoformat(business_date_iso)
+
+        if date_range_mode == "current_month":
+            d_from = base.replace(day=1)
+            d_to = (d_from.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        elif date_range_mode == "previous_month":
+            first_this = base.replace(day=1)
+            d_to = first_this - timedelta(days=1)
+            d_from = d_to.replace(day=1)
+        elif date_range_mode == "custom" and date_range_from_iso and date_range_to_iso:
+            d_from = _date.fromisoformat(date_range_from_iso)
+            d_to = _date.fromisoformat(date_range_to_iso)
+        else:  # single
+            d_from = base
+            d_to = base
+
+        fmt_base = _fmt_date(base, date_var_format)
+        fmt_from = _fmt_date(d_from, date_var_format)
+        fmt_to = _fmt_date(d_to, date_var_format)
+
+        variables.update({
+            "$business_date": fmt_base,
+            "$business_date_from": fmt_from,
+            "$business_date_to": fmt_to,
+            "$business_date_range": f"BETWEEN {fmt_from} AND {fmt_to}",
+        })
+
+    if not variables:
+        return sql, {}
+
+    result = sql
+    # Replace longer placeholders first so that a shared prefix (e.g. the
+    # 14-char "$business_date") does not corrupt longer siblings such as
+    # "$business_date_from" before they get a chance to be substituted.
+    for placeholder, value in sorted(variables.items(), key=lambda kv: -len(kv[0])):
+        result = result.replace(placeholder, value)
+
+    return result, variables
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Source handlers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -131,21 +216,41 @@ async def _extract_grpc(
         yield chunk.get("records", []), seg, total_segments
 
 
-async def _resolve_sql(cfg: ExtractConfig, db: AsyncSession) -> str:
-    """Return the SQL string from inline text or referenced SqlFile."""
+async def _resolve_sql(
+    cfg: ExtractConfig,
+    db: AsyncSession,
+    business_date: Optional[str] = None,
+    app_id: Optional[str] = None,
+) -> str:
+    """Return the SQL string from inline text or referenced SqlFile, with
+    $business_date* and $app_id placeholders substituted."""
     if cfg.jdbc_sql:
-        return cfg.jdbc_sql.strip()
-    if cfg.jdbc_sql_file_id:
+        raw = cfg.jdbc_sql.strip()
+    elif cfg.jdbc_sql_file_id:
         from app.models.etl import SqlFile
         sql_file = await db.get(SqlFile, cfg.jdbc_sql_file_id)
         if not sql_file:
             raise ValueError(f"SqlFile id={cfg.jdbc_sql_file_id} not found")
-        return sql_file.content.strip()
-    if cfg.jdbc_table:
+        raw = sql_file.content.strip()
+    elif cfg.jdbc_table:
         return f"SELECT * FROM {cfg.jdbc_table}"
-    raise ValueError(
-        "JDBC source requires one of: jdbc_sql, jdbc_sql_file_id, or jdbc_table"
-    )
+    else:
+        raise ValueError(
+            "JDBC source requires one of: jdbc_sql, jdbc_sql_file_id, or jdbc_table"
+        )
+
+    if business_date or app_id:
+        resolved, _ = inject_sql_vars(
+            raw,
+            business_date,
+            date_var_format=cfg.jdbc_date_var_format or "YYYYMMDD",
+            date_range_mode=cfg.jdbc_date_range_mode or "single",
+            date_range_from_iso=cfg.jdbc_date_range_from,
+            date_range_to_iso=cfg.jdbc_date_range_to,
+            app_id=app_id,
+        )
+        return resolved
+    return raw
 
 
 def _read_jdbc_sync(
@@ -181,11 +286,14 @@ async def _extract_jdbc(
     date_str: Optional[str],
     log_fn,
     db: AsyncSession,
+    business_date: Optional[str] = None,
+    app_id: Optional[str] = None,
 ) -> list[dict]:
-    sql = await _resolve_sql(cfg, db)
+    sql = await _resolve_sql(cfg, db, business_date=business_date, app_id=app_id)
     await log_fn(
         f"  JDBC: {cfg.jdbc_url!r} — SQL {len(sql)} chars"
-        + (f" filtered on {cfg.jdbc_date_column}={date_str!r}" if cfg.jdbc_date_column and date_str else ""),
+        + (f" filtered on {cfg.jdbc_date_column}={date_str!r}" if cfg.jdbc_date_column and date_str else "")
+        + (f" app_id={app_id!r}" if app_id else ""),
         step="extract",
     )
     return await asyncio.to_thread(
@@ -208,7 +316,7 @@ def _read_file_sync(
     """Synchronous file read (runs in thread pool)."""
     import pandas as pd
 
-    path = Path(settings.DATA_DIR) / "sources" / file_path
+    path = Path(settings.SOURCES_DIR) / file_path
     if not path.exists():
         raise FileNotFoundError(f"Source file not found: {path}")
 
@@ -295,6 +403,7 @@ async def execute_pipeline(
     extract_cfg: ExtractConfig,
     transform_cfg: TransformConfig,
     load_cfg: LoadConfig,
+    business_date: Optional[str] = None,
 ) -> None:
     """Execute one ETL run. Updates run + extract_job rows in DB."""
     run_id = run.id
@@ -318,6 +427,26 @@ async def execute_pipeline(
         await log(f"Source: {extract_cfg.source_type.upper()}", step="init")
 
         source = extract_cfg.source_type
+
+        # Validate that non-gRPC sources have an explicit application ID.
+        # Writing to 'default' or other reserved names is never permitted.
+        _RESERVED_APP_IDS: frozenset[str] = frozenset({"default"})
+        if source != "grpc":
+            ids = [s.strip() for s in (extract_cfg.application_ids or []) if s.strip()]
+            if not ids:
+                raise ValueError(
+                    f"{source.upper()} source requires at least one application_id. "
+                    "Set 'application_ids' in the extract config to a meaningful "
+                    "identifier (e.g. the pipeline name or data source key). "
+                    "Writing to 'default' is not permitted."
+                )
+            reserved = [i for i in ids if i.lower() in _RESERVED_APP_IDS]
+            if reserved:
+                raise ValueError(
+                    f"application_ids contains reserved name(s): {reserved}. "
+                    "Choose a meaningful identifier instead."
+                )
+
         dates = _resolve_dates(extract_cfg)
         rows_per_seg = extract_cfg.rows_per_segment
 
@@ -410,103 +539,117 @@ async def execute_pipeline(
 
         # ── JDBC / JSON / CSV: read all → chunk by rows_per_segment ──────────
         else:
-            app_id = (extract_cfg.application_ids or ["default"])[0]
+            fallback_app_id = (extract_cfg.application_ids or ["default"])[0]
+            # For JDBC, iterate over jdbc_application_ids (if set) so each
+            # gets its own $app_id substitution; otherwise run once.
+            jdbc_app_ids: list[Optional[str]] = (
+                extract_cfg.jdbc_application_ids
+                if source == "jdbc" and extract_cfg.jdbc_application_ids
+                else [None]
+            )
 
-            for date_str in dates:
-                await log(
-                    f"Extracting {source.upper()} date={date_str}",
-                    step="extract",
-                    extra={"date": date_str, "source": source},
-                )
+            for jdbc_app_id in jdbc_app_ids:
+                app_id = jdbc_app_id or fallback_app_id
 
-                if source == "jdbc":
-                    all_records = await _extract_jdbc(extract_cfg, date_str, log, db)
-                else:
-                    all_records = await _extract_file(extract_cfg, log)
-
-                total_extracted += len(all_records)
-                run.records_extracted = total_extracted
-
-                chunks = _chunk_records(all_records, rows_per_seg)
-                n_segs = len(chunks)
-
-                await log(
-                    f"  {len(all_records):,} records → {n_segs} segment"
-                    f"{'s' if n_segs != 1 else ''} of {rows_per_seg:,} rows",
-                    step="extract",
-                    extra={"total_records": len(all_records), "segments": n_segs},
-                )
-
-                if not chunks:
-                    await log("  No records — skipping load", level="WARN", step="load")
-                    continue
-
-                for seg_idx, chunk in enumerate(chunks):
-                    job = ExtractJob(
-                        run_id=run_id,
-                        application_id=app_id,
-                        date=date_str,
-                        segment=seg_idx,
-                        total_segments=n_segs,
-                        status=RunStatus.RUNNING,
-                        started_at=datetime.now(timezone.utc),
+                for date_str in dates:
+                    await log(
+                        f"Extracting {source.upper()} date={date_str}"
+                        + (f" app={app_id}" if jdbc_app_id else ""),
+                        step="extract",
+                        extra={"date": date_str, "source": source},
                     )
-                    db.add(job)
-                    await db.flush()
-                    try:
-                        transformed = _apply_transforms(chunk, transform_cfg)
-                        run.records_transformed = (run.records_transformed or 0) + len(transformed)
-                        output_path = ""
-                        if transformed:
-                            output_path = await _load_segment(
-                                transformed, app_id, date_str, seg_idx, load_cfg, log
-                            )
-                        total_loaded += len(transformed)
-                        run.records_loaded = total_loaded
-                        total_segs += 1
-                        run.segments_processed = total_segs
-                        job.status = RunStatus.COMPLETED
-                        job.records_count = len(transformed)
-                        job.output_path = output_path
-                        job.output_format = load_cfg.target
-                        job.finished_at = datetime.now(timezone.utc)
-                        await log(
-                            f"  seg={seg_idx + 1}/{n_segs}: "
-                            f"{len(transformed):,} records -> {output_path}",
-                            step="load",
-                            extra={"segment": seg_idx, "records": len(transformed)},
-                        )
-                    except Exception as exc:
-                        tb = traceback.format_exc()
-                        job.status = RunStatus.FAILED
-                        job.error_message = str(exc)
-                        job.finished_at = datetime.now(timezone.utc)
-                        await log(
-                            f"  seg={seg_idx} FAILED: {exc}",
-                            level="ERROR",
-                            step="load",
-                        )
-                        db.add(ServiceError(
-                            service="etl_engine",
-                            level="ERROR",
-                            message=str(exc),
-                            traceback=tb,
-                            context={"run_id": run_id, "source": source,
-                                     "date": date_str, "segment": seg_idx},
-                        ))
-                    await db.commit()
 
-                if load_cfg.target == "spark_table" or load_cfg.table_name or load_cfg.namespace_db:
-                    try:
-                        tbl = await spark_service.merge_and_register_table(
-                            app_id, date_str,
-                            table_name=load_cfg.table_name,
-                            namespace_db=load_cfg.namespace_db,
-                            mode=load_cfg.mode or "overwrite",
+                    if source == "jdbc":
+                        all_records = await _extract_jdbc(
+                            extract_cfg, date_str, log, db,
+                            business_date=business_date, app_id=jdbc_app_id,
                         )
-                        await log(f"  Saved catalog table: {tbl}", step="load")
-                    except Exception as exc:
-                        await log(f"  Spark table skipped: {exc}", level="WARN")
+                    else:
+                        all_records = await _extract_file(extract_cfg, log)
+
+                    total_extracted += len(all_records)
+                    run.records_extracted = total_extracted
+
+                    chunks = _chunk_records(all_records, rows_per_seg)
+                    n_segs = len(chunks)
+
+                    await log(
+                        f"  {len(all_records):,} records → {n_segs} segment"
+                        f"{'s' if n_segs != 1 else ''} of {rows_per_seg:,} rows",
+                        step="extract",
+                        extra={"total_records": len(all_records), "segments": n_segs},
+                    )
+
+                    if not chunks:
+                        await log("  No records — skipping load", level="WARN", step="load")
+                        continue
+
+                    for seg_idx, chunk in enumerate(chunks):
+                        job = ExtractJob(
+                            run_id=run_id,
+                            application_id=app_id,
+                            date=date_str,
+                            segment=seg_idx,
+                            total_segments=n_segs,
+                            status=RunStatus.RUNNING,
+                            started_at=datetime.now(timezone.utc),
+                        )
+                        db.add(job)
+                        await db.flush()
+                        try:
+                            transformed = _apply_transforms(chunk, transform_cfg)
+                            run.records_transformed = (run.records_transformed or 0) + len(transformed)
+                            output_path = ""
+                            if transformed:
+                                output_path = await _load_segment(
+                                    transformed, app_id, date_str, seg_idx, load_cfg, log
+                                )
+                            total_loaded += len(transformed)
+                            run.records_loaded = total_loaded
+                            total_segs += 1
+                            run.segments_processed = total_segs
+                            job.status = RunStatus.COMPLETED
+                            job.records_count = len(transformed)
+                            job.output_path = output_path
+                            job.output_format = load_cfg.target
+                            job.finished_at = datetime.now(timezone.utc)
+                            await log(
+                                f"  seg={seg_idx + 1}/{n_segs}: "
+                                f"{len(transformed):,} records -> {output_path}",
+                                step="load",
+                                extra={"segment": seg_idx, "records": len(transformed)},
+                            )
+                        except Exception as exc:
+                            tb = traceback.format_exc()
+                            job.status = RunStatus.FAILED
+                            job.error_message = str(exc)
+                            job.finished_at = datetime.now(timezone.utc)
+                            await log(
+                                f"  seg={seg_idx} FAILED: {exc}",
+                                level="ERROR",
+                                step="load",
+                            )
+                            db.add(ServiceError(
+                                service="etl_engine",
+                                level="ERROR",
+                                message=str(exc),
+                                traceback=tb,
+                                context={"run_id": run_id, "source": source,
+                                         "date": date_str, "segment": seg_idx},
+                            ))
+                        await db.commit()
+
+                    if load_cfg.target == "spark_table" or load_cfg.table_name or load_cfg.namespace_db:
+                        try:
+                            tbl = await spark_service.merge_and_register_table(
+                                app_id, date_str,
+                                table_name=load_cfg.table_name,
+                                namespace_db=load_cfg.namespace_db,
+                                mode=load_cfg.mode or "overwrite",
+                            )
+                            await log(f"  Saved catalog table: {tbl}", step="load")
+                        except Exception as exc:
+                            await log(f"  Spark table skipped: {exc}", level="WARN")
 
         run.status = RunStatus.COMPLETED
         run.finished_at = datetime.now(timezone.utc)

@@ -39,9 +39,16 @@ class Settings(BaseSettings):
     SPARK_HOME: str = str(Path(__file__).parents[3] / "spark")
 
     # Data storage
-    DATA_DIR: str = str(Path(__file__).parents[3] / "data")
-    EXTRACT_DIR: str = str(Path(__file__).parents[3] / "data" / "extracts")
-    PARQUET_DIR: str = str(Path(__file__).parents[3] / "data" / "parquet")
+    DATA_DIR:           str = str(Path(__file__).parents[3] / "data")
+    STATIC_DIR:         str = str(Path(__file__).parents[3] / "data" / "static")
+    PIPELINE_DIR:       str = str(Path(__file__).parents[3] / "data" / "pipeline")
+    EXTRACT_DIR:        str = str(Path(__file__).parents[3] / "data" / "pipeline" / "extracts")
+    PARQUET_DIR:        str = str(Path(__file__).parents[3] / "data" / "pipeline" / "parquet")
+    SOURCES_DIR:        str = str(Path(__file__).parents[3] / "data" / "static" / "sources")
+    SQL_EXTRACT_DIR:    str = str(Path(__file__).parents[3] / "data" / "static" / "sql" / "extract")
+    SQL_TRANSFORM_DIR:  str = str(Path(__file__).parents[3] / "data" / "static" / "sql" / "transform")
+    SPARK_EVENTS_DIR:   str = str(Path(__file__).parents[3] / "data" / "spark" / "events")
+    SPARK_WAREHOUSE_DIR: str = str(Path(__file__).parents[3] / "data" / "spark" / "warehouse")
 
     # gRPC Data Extract Service
     GRPC_HOST: str = "localhost"
@@ -52,6 +59,11 @@ class Settings(BaseSettings):
     # ETL defaults
     DEFAULT_PAGE_SIZE: int = 10_000
     MAX_CONCURRENT_RUNS: int = 5
+
+    # Connections — secret key for Fernet encryption of stored passwords.
+    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # Must be set in .env — do NOT commit the actual key.
+    CONNECTIONS_SECRET_KEY: str = ''
 
     @property
     def grpc_address(self) -> str:
@@ -73,5 +85,10 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # Ensure data directories exist
-for _dir in [settings.DATA_DIR, settings.EXTRACT_DIR, settings.PARQUET_DIR]:
+for _dir in [
+    settings.DATA_DIR, settings.STATIC_DIR, settings.PIPELINE_DIR,
+    settings.EXTRACT_DIR, settings.PARQUET_DIR, settings.SOURCES_DIR,
+    settings.SQL_EXTRACT_DIR, settings.SQL_TRANSFORM_DIR,
+    settings.SPARK_EVENTS_DIR, settings.SPARK_WAREHOUSE_DIR,
+]:
     Path(_dir).mkdir(parents=True, exist_ok=True)

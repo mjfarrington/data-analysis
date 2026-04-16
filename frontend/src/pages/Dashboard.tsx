@@ -4,6 +4,7 @@ import { servicesApi, runsApi, pipelinesApi, dataApi } from '../api/client'
 import StatusChip from '../components/StatusChip'
 import { Refresh, Speed, CheckCircle, Error as ErrorIcon, PlayArrow, LocalFireDepartment } from '@mui/icons-material'
 import { formatDistanceToNow } from 'date-fns'
+import { parseApiDate } from '../utils/dates'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip,
   ResponsiveContainer, BarChart, Bar, Legend,
@@ -259,7 +260,7 @@ export default function Dashboard() {
                   <Box sx={{ textAlign: 'right' }}>
                     <StatusChip status={r.status} />
                     <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
-                      {formatDistanceToNow(new Date(r.created_at), { addSuffix: true })}
+                      {formatDistanceToNow(parseApiDate(r.created_at), { addSuffix: true })}
                     </Typography>
                   </Box>
                 </Box>
@@ -285,7 +286,7 @@ export default function Dashboard() {
                 <Box key={e.id} sx={{ mb: 1.5, p: 1.5, bgcolor: alpha(theme.palette.error.main, 0.08), borderRadius: 2, border: `1px solid ${alpha(theme.palette.error.main, 0.2)}` }}>
                   <Box sx={{ display: 'flex', gap: 1, mb: 0.25 }}>
                     <Typography variant="caption" sx={{ fontFamily: '"JetBrains Mono", monospace', color: 'error.main', fontWeight: 600 }}>{e.service}</Typography>
-                    <Typography variant="caption" color="text.secondary">{formatDistanceToNow(new Date(e.timestamp), { addSuffix: true })}</Typography>
+                    <Typography variant="caption" color="text.secondary">{formatDistanceToNow(parseApiDate(e.timestamp), { addSuffix: true })}</Typography>
                   </Box>
                   <Typography variant="caption" noWrap display="block" color="text.secondary">{e.message}</Typography>
                 </Box>

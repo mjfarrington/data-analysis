@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
@@ -9,20 +10,35 @@ from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.database import get_db
-from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, PipelineDependency, ExecutionContext
+from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, SqlFileVersion, PipelineDependency, ExecutionContext
 from app.schemas.etl import (
     PipelineCreate, PipelineUpdate, PipelineResponse,
     RunTrigger, RunSummary, RunDetail,
     SqlFileCreate, SqlFileUpdate, SqlFileResponse,
+    SqlFileVersionCreate, SqlFileVersionTagUpdate, SqlFileVersionResponse,
+    SqlPreviewRequest, SqlPreviewResponse,
     DependencyCreate, DependencyResponse, GraphNode, GraphEdge, PipelineGraph,
     ExecutionContextResponse, ExecutionContextUpdate,
 )
-from app.services.etl_engine import execute_pipeline, cancel_run, get_active_run_ids
+from app.services.etl_engine import execute_pipeline, cancel_run, get_active_run_ids, inject_sql_vars
 from app.services.grpc_client import grpc_client
 
 router = APIRouter(prefix="/etl", tags=["ETL"])
 logger = logging.getLogger(__name__)
+
+
+def _sql_dir(file_type: str) -> Path:
+    """Return (and create) the on-disk directory for an SQL file type."""
+    base = Path(settings.SQL_EXTRACT_DIR if file_type == "extract" else settings.SQL_TRANSFORM_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _sql_path(name: str, file_type: str) -> Path:
+    """Canonical on-disk path for an SQL file."""
+    return _sql_dir(file_type) / f"{name.lower()}.sql"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,26 +167,20 @@ async def trigger_run(
     transform_cfg = TransformConfig(**(pipeline.transform_config or {}))
     load_cfg = LoadConfig(**(pipeline.load_config or {}))
 
-    # Resolve namespace: run-level overrides > platform context
+    # Always resolve namespace from business_date
     ctx = await db.get(ExecutionContext, 1)
     platform_date = ctx.business_date if ctx else None
-    platform_prefix = ctx.namespace_prefix if ctx else ""
-
-    # Merge run-time overrides into load_cfg
-    resolved_use_namespace = body.use_namespace if body.use_namespace is not None else load_cfg.use_namespace
     resolved_date = body.business_date or platform_date
-    resolved_prefix = body.namespace_prefix if body.namespace_prefix is not None else platform_prefix
 
-    if resolved_use_namespace and resolved_date:
+    if resolved_date:
         date_compact = resolved_date.replace("-", "")
-        namespace_db = f"{resolved_prefix}{date_compact}"
+        namespace_db = f"{_resolve_ns_prefix(ctx)}{date_compact}"
         load_cfg = load_cfg.model_copy(update={
-            "use_namespace": True,
-            # The namespace DB is the Spark database; table_name stays as the
-            # user-defined unqualified name (or the engine defaults to app_id).
             "namespace_db": namespace_db,
             "target": "spark_table",
         })
+    else:
+        raise HTTPException(status_code=400, detail="No business date set. Set one on the execution context bar before running.")
 
     run = ETLRun(
         pipeline_id=pid,
@@ -183,10 +193,12 @@ async def trigger_run(
 
     # Launch background task
     from app.core.database import AsyncSessionLocal
+    _resolved_date = resolved_date  # capture for closure
+
     async def _bg():
         async with AsyncSessionLocal() as bg_db:
             bg_run = await bg_db.get(ETLRun, run.id)
-            await execute_pipeline(bg_db, bg_run, extract_cfg, transform_cfg, load_cfg)
+            await execute_pipeline(bg_db, bg_run, extract_cfg, transform_cfg, load_cfg, business_date=_resolved_date)
 
     asyncio.create_task(_bg())
     return RunSummary.model_validate(run)
@@ -255,6 +267,19 @@ async def cancel_run_endpoint(run_id: int, db: AsyncSession = Depends(get_db)):
     return {"message": f"Cancellation requested for run {run_id}"}
 
 
+@router.delete("/runs/{run_id}", status_code=204)
+async def delete_run(run_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a single completed/failed/cancelled run record."""
+    run = await db.get(ETLRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    active_statuses = {RunStatus.RUNNING, RunStatus.PENDING}
+    if run.status in active_statuses:
+        raise HTTPException(status_code=409, detail="Cannot delete an active run")
+    await db.delete(run)
+    await db.commit()
+
+
 @router.get("/active", response_model=list[int])
 async def get_active_runs():
     return get_active_run_ids()
@@ -279,9 +304,79 @@ async def list_available_sources(
 # ─────────────────────────────────────────────────────────────────────────────
 # SQL Files
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _next_version(existing: list[str]) -> str:
+    """Given a list of semver strings like ['v0.1.0', 'v0.2.0'], return the next patch."""
+    max_patch = 0
+    for v in existing:
+        try:
+            parts = v.lstrip('v').split('.')
+            patch = int(parts[2]) if len(parts) >= 3 else 0
+            minor = int(parts[1]) if len(parts) >= 2 else 0
+            # Treat as a single ordinal: minor*1000 + patch
+            ordinal = minor * 1000 + patch
+            if ordinal > max_patch:
+                max_patch = ordinal
+        except (ValueError, IndexError):
+            pass
+    minor = max_patch // 1000
+    patch = (max_patch % 1000) + 1
+    if patch >= 10:
+        minor += 1
+        patch = 0
+    return f"v0.{minor}.{patch}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SQL preview (variable injection)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/sql/preview", response_model=SqlPreviewResponse)
+async def preview_sql(
+    body: SqlPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Resolve $business_date* placeholders and return the injected SQL for preview."""
+    # Resolve SQL source
+    if body.sql:
+        raw = body.sql.strip()
+    elif body.sql_file_id:
+        sql_file = await db.get(SqlFile, body.sql_file_id)
+        if not sql_file:
+            raise HTTPException(status_code=404, detail=f"SqlFile id={body.sql_file_id} not found")
+        raw = sql_file.content.strip()
+    else:
+        raise HTTPException(status_code=422, detail="Provide either 'sql' or 'sql_file_id'")
+
+    # Get platform business date
+    ctx = await db.get(ExecutionContext, 1)
+    biz_date = ctx.business_date if ctx else None
+
+    resolved_sql, variables = inject_sql_vars(
+        raw,
+        biz_date,
+        date_var_format=body.date_var_format,
+        date_range_mode=body.date_range_mode,
+        date_range_from_iso=body.date_range_from,
+        date_range_to_iso=body.date_range_to,
+    )
+
+    return SqlPreviewResponse(
+        resolved_sql=resolved_sql,
+        variables=variables,
+        business_date=biz_date,
+    )
+
+
 @router.get("/sql-files", response_model=list[SqlFileResponse])
-async def list_sql_files(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(SqlFile).order_by(SqlFile.name))
+async def list_sql_files(
+    file_type: Optional[str] = Query(None, description="'extract' or 'transform'"),
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(SqlFile).options(selectinload(SqlFile.versions)).order_by(SqlFile.name)
+    if file_type:
+        q = q.where(SqlFile.file_type == file_type)
+    result = await db.execute(q)
     return [SqlFileResponse.model_validate(f) for f in result.scalars()]
 
 
@@ -290,17 +385,27 @@ async def create_sql_file(body: SqlFileCreate, db: AsyncSession = Depends(get_db
     sql_file = SqlFile(
         name=body.name,
         description=body.description,
+        file_type=body.file_type,
         content=body.content,
     )
     db.add(sql_file)
     await db.commit()
     await db.refresh(sql_file)
+    result2 = await db.execute(
+        select(SqlFile).where(SqlFile.id == sql_file.id).options(selectinload(SqlFile.versions))
+    )
+    sql_file = result2.scalar_one()
+    # Sync to disk
+    await asyncio.to_thread(_sql_path(sql_file.name, sql_file.file_type).write_text, sql_file.content, "utf-8")
     return SqlFileResponse.model_validate(sql_file)
 
 
 @router.get("/sql-files/{fid}", response_model=SqlFileResponse)
 async def get_sql_file(fid: int, db: AsyncSession = Depends(get_db)):
-    sql_file = await db.get(SqlFile, fid)
+    result = await db.execute(
+        select(SqlFile).where(SqlFile.id == fid).options(selectinload(SqlFile.versions))
+    )
+    sql_file = result.scalar_one_or_none()
     if not sql_file:
         raise HTTPException(status_code=404, detail="SQL file not found")
     return SqlFileResponse.model_validate(sql_file)
@@ -312,15 +417,27 @@ async def update_sql_file(
     body: SqlFileUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    sql_file = await db.get(SqlFile, fid)
+    result = await db.execute(
+        select(SqlFile).where(SqlFile.id == fid).options(selectinload(SqlFile.versions))
+    )
+    sql_file = result.scalar_one_or_none()
     if not sql_file:
         raise HTTPException(status_code=404, detail="SQL file not found")
+    old_path = _sql_path(sql_file.name, sql_file.file_type)
     update_data = body.model_dump(exclude_none=True)
     for k, v in update_data.items():
         setattr(sql_file, k, v)
     sql_file.updated_at = datetime.now(timezone.utc)
     await db.commit()
-    await db.refresh(sql_file)
+    result2 = await db.execute(
+        select(SqlFile).where(SqlFile.id == fid).options(selectinload(SqlFile.versions))
+    )
+    sql_file = result2.scalar_one()
+    # Sync to disk — remove old path if name/type changed, write new
+    new_path = _sql_path(sql_file.name, sql_file.file_type)
+    if old_path != new_path and old_path.exists():
+        await asyncio.to_thread(old_path.unlink)
+    await asyncio.to_thread(new_path.write_text, sql_file.content, "utf-8")
     return SqlFileResponse.model_validate(sql_file)
 
 
@@ -329,8 +446,71 @@ async def delete_sql_file(fid: int, db: AsyncSession = Depends(get_db)):
     sql_file = await db.get(SqlFile, fid)
     if not sql_file:
         raise HTTPException(status_code=404, detail="SQL file not found")
+    disk_path = _sql_path(sql_file.name, sql_file.file_type)
     await db.delete(sql_file)
     await db.commit()
+    # Remove the on-disk file (best-effort)
+    if disk_path.exists():
+        await asyncio.to_thread(disk_path.unlink)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SQL File Versions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/sql-files/{fid}/versions", response_model=list[SqlFileVersionResponse])
+async def list_sql_file_versions(fid: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(SqlFileVersion)
+        .where(SqlFileVersion.sql_file_id == fid)
+        .order_by(SqlFileVersion.id)
+    )
+    return [SqlFileVersionResponse.model_validate(v) for v in result.scalars()]
+
+
+@router.post("/sql-files/{fid}/versions", response_model=SqlFileVersionResponse, status_code=201)
+async def create_sql_file_version(
+    fid: int,
+    body: SqlFileVersionCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    sql_file = await db.get(SqlFile, fid)
+    if not sql_file:
+        raise HTTPException(status_code=404, detail="SQL file not found")
+
+    # Determine next version number
+    existing_q = await db.execute(
+        select(SqlFileVersion.version).where(SqlFileVersion.sql_file_id == fid)
+    )
+    existing_versions = [r[0] for r in existing_q]
+    next_ver = _next_version(existing_versions) if existing_versions else "v0.1.0"
+
+    version = SqlFileVersion(
+        sql_file_id=fid,
+        version=next_ver,
+        tag=body.tag,
+        content=sql_file.content,
+    )
+    db.add(version)
+    await db.commit()
+    await db.refresh(version)
+    return SqlFileVersionResponse.model_validate(version)
+
+
+@router.patch("/sql-files/{fid}/versions/{vid}/tag", response_model=SqlFileVersionResponse)
+async def update_sql_file_version_tag(
+    fid: int,
+    vid: int,
+    body: SqlFileVersionTagUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    version = await db.get(SqlFileVersion, vid)
+    if not version or version.sql_file_id != fid:
+        raise HTTPException(status_code=404, detail="Version not found")
+    version.tag = body.tag
+    await db.commit()
+    await db.refresh(version)
+    return SqlFileVersionResponse.model_validate(version)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -438,15 +618,30 @@ async def remove_dependency(pid: int, dep_id: int, db: AsyncSession = Depends(ge
 # ─────────────────────────────────────────────────────────────────────────────
 # Execution context (platform-wide business date + namespace)
 # ─────────────────────────────────────────────────────────────────────────────
+# Default namespace prefix used when none is configured.
+_DEFAULT_NS_PREFIX = "data_"
+
+
+def _resolve_ns_prefix(ctx: ExecutionContext | None) -> str:
+    """Return the namespace prefix, falling back to the platform default."""
+    if ctx and ctx.namespace_prefix:
+        return ctx.namespace_prefix
+    return _DEFAULT_NS_PREFIX
+
+
 def _build_context_response(ctx: ExecutionContext) -> ExecutionContextResponse:
-    namespace = None
+    derived = None
     if ctx.business_date:
         date_compact = ctx.business_date.replace("-", "")
-        namespace = f"{ctx.namespace_prefix}{date_compact}" if ctx.namespace_prefix else date_compact
+        prefix = ctx.namespace_prefix or _DEFAULT_NS_PREFIX
+        derived = f"{prefix}{date_compact}"
+    # db_name overrides the derived prefix+date namespace
+    namespace = ctx.db_name or derived
     return ExecutionContextResponse(
         id=ctx.id,
         business_date=ctx.business_date,
         namespace_prefix=ctx.namespace_prefix,
+        db_name=ctx.db_name,
         namespace=namespace,
         updated_at=ctx.updated_at,
     )
@@ -476,6 +671,8 @@ async def update_execution_context(
         ctx.business_date = body.business_date or None  # empty string → clear
     if body.namespace_prefix is not None:
         ctx.namespace_prefix = body.namespace_prefix
+    if body.db_name is not None:
+        ctx.db_name = body.db_name or None  # empty string → clear
     ctx.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(ctx)

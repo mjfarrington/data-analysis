@@ -15,7 +15,10 @@ import { useNavigate } from 'react-router-dom'
 import { useSnackbar } from 'notistack'
 import { pipelinesApi, sqlFilesApi, Pipeline, ExtractConfig, SourceType, ExecutionContext, RunTrigger } from '../api/client'
 import StatusChip from '../components/StatusChip'
+import DateField from '../components/DateField'
+import ExecutionContextBar from '../components/ExecutionContextBar'
 import { formatDistanceToNow } from 'date-fns'
+import { parseApiDate } from '../utils/dates'
 
 const SOURCE_ICONS: Record<SourceType, React.ReactNode> = {
   grpc: <Code fontSize="small" />,
@@ -37,6 +40,7 @@ const defaultExtractConfig = (): ExtractConfig => ({
   jdbc_sql: '',
   jdbc_table: '',
   jdbc_date_column: '',
+  jdbc_application_ids: [],
   file_path: '',
   file_encoding: 'utf-8',
   csv_delimiter: ',',
@@ -47,6 +51,7 @@ const defaultExtractConfig = (): ExtractConfig => ({
 const defaultPipeline = () => ({
   name: '',
   description: '',
+  status: 'active' as 'active' | 'inactive' | 'draft',
   extract_config: defaultExtractConfig(),
   transform_config: {
     filters: {} as Record<string, string>,
@@ -56,9 +61,8 @@ const defaultPipeline = () => ({
     dedup_keys: ['id'] as string[],
   },
   load_config: {
-    target: 'parquet' as 'parquet' | 'csv' | 'spark_table',
+    target: 'spark_table' as 'parquet' | 'csv' | 'spark_table',
     table_name: undefined as string | undefined,
-    use_namespace: false,
     partition_by: ['date', 'application_id'] as string[],
     mode: 'overwrite' as 'overwrite' | 'append',
   },
@@ -131,15 +135,12 @@ function PipelineCard({ pipeline, onEdit, onDelete, onRun }: {
           </Grid>
           <Grid item xs={6}>
             <Typography variant="caption" color="text.secondary" display="block">Output</Typography>
-            <Typography variant="body2">{pipeline.load_config.target.toUpperCase()}</Typography>
-            {pipeline.load_config.use_namespace && (
-              <Chip label="namespace" size="small" color="primary" variant="outlined"
-                sx={{ fontSize: '0.62rem', height: 16, mt: 0.25 }} />
-            )}
-            {!pipeline.load_config.use_namespace && pipeline.load_config.table_name && (
-              <Typography variant="caption" color="text.secondary" noWrap sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.7rem' }}>
-                {pipeline.load_config.table_name}
+            {pipeline.load_config.table_name ? (
+              <Typography variant="body2" noWrap sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.78rem' }}>
+                {'<prefix><date>.'}{pipeline.load_config.table_name}
               </Typography>
+            ) : (
+              <Typography variant="body2" color="text.secondary">extracts_&lt;app_id&gt;</Typography>
             )}
           </Grid>
           {pipeline.extract_config.source_type === 'grpc' || !pipeline.extract_config.source_type ? (
@@ -183,7 +184,7 @@ function PipelineCard({ pipeline, onEdit, onDelete, onRun }: {
                 <>
                   <StatusChip status={lastRun.status} />
                   <Typography variant="caption" color="text.secondary">
-                    {formatDistanceToNow(new Date(lastRun.created_at), { addSuffix: true })}
+                    {formatDistanceToNow(parseApiDate(lastRun.created_at), { addSuffix: true })}
                   </Typography>
                 </>
               ) : (
@@ -215,6 +216,7 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
   const [form, setForm] = useState<ReturnType<typeof defaultPipeline>>(initial ? {
     name: initial.name,
     description: initial.description || '',
+    status: (initial.status ?? 'active') as 'active' | 'inactive' | 'draft',
     extract_config: {
       ...defaultExtractConfig(),
       ...initial.extract_config,
@@ -229,9 +231,8 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
       dedup_keys: initial.transform_config?.dedup_keys ?? ['id'],
     },
     load_config: {
-      target: (initial.load_config?.target ?? 'parquet') as 'parquet' | 'csv' | 'spark_table',
+      target: (initial.load_config?.target ?? 'spark_table') as 'parquet' | 'csv' | 'spark_table',
       table_name: initial.load_config?.table_name,
-      use_namespace: initial.load_config?.use_namespace ?? false,
       partition_by: initial.load_config?.partition_by ?? ['date', 'application_id'],
       mode: (initial.load_config?.mode ?? 'overwrite') as 'overwrite' | 'append',
     },
@@ -264,6 +265,16 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
             <TextField label="Description" value={form.description} fullWidth size="small"
               onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} />
           </Grid>
+          {initial && (
+            <Grid item xs={12} sm={4}>
+              <TextField select label="Status" value={form.status} fullWidth size="small"
+                onChange={(e) => setForm((f) => ({ ...f, status: e.target.value as typeof f.status }))}>
+                <MenuItem value="active">Active</MenuItem>
+                <MenuItem value="inactive">Inactive</MenuItem>
+                <MenuItem value="draft">Draft</MenuItem>
+              </TextField>
+            </Grid>
+          )}
 
           {/* ── Extract ── */}
           <Grid item xs={12}>
@@ -376,6 +387,17 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
                           helperText="Column used to filter by business date"
                           onChange={(e) => setExtract('jdbc_date_column', e.target.value)} />
                       </Grid>
+                      <Grid item xs={12}>
+                        <TextField
+                          label="Application IDs (optional, comma-separated)"
+                          value={form.extract_config.jdbc_application_ids?.join(', ') ?? ''}
+                          fullWidth size="small"
+                          placeholder="APP001, APP002"
+                          helperText="Each ID is injected as $app_id — query runs once per ID"
+                          onChange={(e) => setExtract('jdbc_application_ids',
+                            e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
+                        />
+                      </Grid>
                     </>
                   )}
 
@@ -440,16 +462,14 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
                     <Divider><Typography variant="caption">Business Date Range</Typography></Divider>
                   </Grid>
                   <Grid item xs={12} sm={6}>
-                    <TextField label="Date From" type="date"
-                      value={form.extract_config.date_from ?? ''} fullWidth size="small"
-                      InputLabelProps={{ shrink: true }}
-                      onChange={(e) => setExtract('date_from', e.target.value)} />
+                    <DateField label="Date From"
+                      value={form.extract_config.date_from ?? ''} fullWidth
+                      onChange={(v) => setExtract('date_from', v)} />
                   </Grid>
                   <Grid item xs={12} sm={6}>
-                    <TextField label="Date To" type="date"
-                      value={form.extract_config.date_to ?? ''} fullWidth size="small"
-                      InputLabelProps={{ shrink: true }}
-                      onChange={(e) => setExtract('date_to', e.target.value)} />
+                    <DateField label="Date To"
+                      value={form.extract_config.date_to ?? ''} fullWidth
+                      onChange={(v) => setExtract('date_to', v)} />
                   </Grid>
 
                   {/* ── Segmentation (all sources) ── */}
@@ -479,44 +499,17 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
               <AccordionDetails>
                 <Grid container spacing={2}>
                   <Grid item xs={6}>
-                    <TextField select label="Target" value={form.load_config.target} fullWidth size="small"
-                      onChange={(e) => setLoad('target', e.target.value)}>
-                      <MenuItem value="parquet">Parquet files</MenuItem>
-                      <MenuItem value="csv">CSV files</MenuItem>
-                      <MenuItem value="spark_table">Spark Table</MenuItem>
-                    </TextField>
-                  </Grid>
-                  <Grid item xs={6}>
                     <TextField select label="Write Mode" value={form.load_config.mode} fullWidth size="small"
                       onChange={(e) => setLoad('mode', e.target.value)}>
                       <MenuItem value="overwrite">Overwrite</MenuItem>
                       <MenuItem value="append">Append</MenuItem>
                     </TextField>
                   </Grid>
-                  <Grid item xs={12}>
+                  <Grid item xs={6}>
                     <TextField label="Table Name" value={form.load_config.table_name || ''} fullWidth size="small"
-                      placeholder="e.g. transactions, events.daily_summary"
-                      helperText="Static table name — ignored when 'Use namespace' is on"
+                      placeholder="e.g. transactions"
+                      helperText="Saved to <prefix><date>.<table_name> in Spark"
                       onChange={(e) => setLoad('table_name', e.target.value)} />
-                  </Grid>
-                  <Grid item xs={12}>
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={form.load_config.use_namespace ?? false}
-                          onChange={(e) => setLoad('use_namespace', e.target.checked)}
-                          size="small"
-                        />
-                      }
-                      label={
-                        <Box>
-                          <Typography variant="body2">Use platform namespace</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            Table name will be resolved from the platform execution context (prefix + business date) at run time
-                          </Typography>
-                        </Box>
-                      }
-                    />
                   </Grid>
                 </Grid>
               </AccordionDetails>
@@ -561,8 +554,7 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
   const [appIds, setAppIds] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
-  const [useNamespace, setUseNamespace] = useState(false)
-  const [nsDateOverride, setNsDateOverride] = useState('')
+  const [dateOverride, setDateOverride] = useState('')
   const { enqueueSnackbar } = useSnackbar()
   const qc = useQueryClient()
 
@@ -572,17 +564,9 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
     enabled: open,
   })
 
-  // default useNamespace from pipeline's load_config
-  useState(() => {
-    if (pipeline) setUseNamespace(pipeline.load_config?.use_namespace ?? false)
-  })
-
-  // Resolved namespace for display
-  const resolvedDate = nsDateOverride || ctx?.business_date || ''
-  const resolvedPrefix = ctx?.namespace_prefix ?? ''
-  const resolvedNamespace = resolvedDate
-    ? `${resolvedPrefix}${resolvedDate.replace(/-/g, '')}`
-    : null
+  const resolvedDate = dateOverride || ctx?.business_date || ''
+  const nsPrefix = ctx?.namespace_prefix || 'data_'
+  const resolvedDb = resolvedDate ? `${nsPrefix}${resolvedDate.replace(/-/g, '')}` : null
 
   const mutation = useMutation({
     mutationFn: (trigger: RunTrigger) => pipelinesApi.run(pipeline!.id, trigger).then((r) => r.data),
@@ -602,63 +586,38 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
     if (dateFrom) cfg.date_from = dateFrom
     if (dateTo) cfg.date_to = dateTo
     if (Object.keys(cfg).length) trigger.extract_config = cfg
-    if (useNamespace) {
-      trigger.use_namespace = true
-      if (nsDateOverride) trigger.business_date = nsDateOverride
-    } else {
-      trigger.use_namespace = false
-    }
+    if (dateOverride) trigger.business_date = dateOverride
     mutation.mutate(trigger)
   }
-
-  const pipelineUsesNs = pipeline?.load_config?.use_namespace ?? false
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>Run Pipeline: {pipeline?.name}</DialogTitle>
       <DialogContent dividers>
-        {/* Namespace section */}
         <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
             <Tag fontSize="small" color="primary" />
-            <Typography variant="subtitle2" fontWeight={600}>Table Namespace</Typography>
-            {pipelineUsesNs && (
-              <Chip label="pipeline default: on" size="small" color="primary" variant="outlined" sx={{ fontSize: '0.65rem', height: 18 }} />
-            )}
+            <Typography variant="subtitle2" fontWeight={600}>Output</Typography>
           </Box>
-          <FormControlLabel
-            control={<Switch checked={useNamespace} onChange={(e) => setUseNamespace(e.target.checked)} size="small" />}
-            label={<Typography variant="body2">Save to namespace table</Typography>}
-          />
-          {useNamespace && (
-            <Box sx={{ mt: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <CalendarToday sx={{ fontSize: 14, color: 'text.secondary' }} />
-                <Typography variant="caption" color="text.secondary">
-                  Platform date: <strong>{ctx?.business_date ?? '(not set)'}</strong>
-                  {ctx?.namespace_prefix && <> · prefix: <strong>{ctx.namespace_prefix}</strong></>}
-                </Typography>
-              </Box>
-              <TextField
-                label="Business date override (optional)" type="date" value={nsDateOverride}
-                fullWidth size="small" InputLabelProps={{ shrink: true }}
-                onChange={(e) => setNsDateOverride(e.target.value)}
-                helperText="Leave blank to use the platform business date"
-              />
-              {resolvedNamespace ? (
-                <Alert severity="success" sx={{ py: 0.5 }}>
-                  Spark database: <strong>{resolvedNamespace}</strong><br />
-                  Table: <strong>{pipeline?.load_config?.table_name || `extracts_<app_id>`}</strong><br />
-                  <Typography variant="caption" sx={{ fontFamily: 'monospace', mt: 0.5, display: 'block' }}>
-                    Full path: {resolvedNamespace}.{pipeline?.load_config?.table_name || 'extracts_<app_id>'}
-                  </Typography>
-                </Alert>
-              ) : (
-                <Alert severity="warning" sx={{ py: 0.5 }}>
-                  No business date set. Set one above or on the platform context bar.
-                </Alert>
-              )}
-            </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+            <CalendarToday sx={{ fontSize: 14, color: 'text.secondary' }} />
+            <Typography variant="caption" color="text.secondary">
+              Platform date: <strong>{ctx?.business_date ?? '(not set)'}</strong>
+            </Typography>
+          </Box>
+          <DateField label="Business date override" value={dateOverride} fullWidth
+            onChange={setDateOverride}
+            helperText="Leave blank to use the platform business date" />
+          {resolvedDb ? (
+            <Alert severity="success" sx={{ py: 0.5, mt: 1.5 }}>
+              <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>
+                <strong>{resolvedDb}</strong>.<strong>{pipeline?.load_config?.table_name || 'extracts_<app_id>'}</strong>
+              </Typography>
+            </Alert>
+          ) : (
+            <Alert severity="warning" sx={{ py: 0.5, mt: 1.5 }}>
+              No business date set — set one on the execution context bar.
+            </Alert>
           )}
         </Paper>
 
@@ -672,12 +631,10 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
               onChange={(e) => setAppIds(e.target.value)} />
           </Grid>
           <Grid item xs={6}>
-            <TextField label="Date From (override)" type="date" value={dateFrom} fullWidth size="small"
-              InputLabelProps={{ shrink: true }} onChange={(e) => setDateFrom(e.target.value)} />
+            <DateField label="Date From (override)" value={dateFrom} fullWidth onChange={setDateFrom} />
           </Grid>
           <Grid item xs={6}>
-            <TextField label="Date To (override)" type="date" value={dateTo} fullWidth size="small"
-              InputLabelProps={{ shrink: true }} onChange={(e) => setDateTo(e.target.value)} />
+            <DateField label="Date To (override)" value={dateTo} fullWidth onChange={setDateTo} />
           </Grid>
         </Grid>
       </DialogContent>
@@ -689,133 +646,6 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
         </Button>
       </DialogActions>
     </Dialog>
-  )
-}
-
-// ─── Platform execution context bar ──────────────────────────────────────────
-function ExecutionContextBar() {
-  const qc = useQueryClient()
-  const { enqueueSnackbar } = useSnackbar()
-  const [editing, setEditing] = useState(false)
-  const [date, setDate] = useState('')
-  const [prefix, setPrefix] = useState('')
-
-  const { data: ctx, isLoading } = useQuery<ExecutionContext>({
-    queryKey: ['execution-context'],
-    queryFn: () => pipelinesApi.getContext().then((r) => r.data),
-    refetchInterval: 60_000,
-  })
-
-  const mut = useMutation({
-    mutationFn: (d: { business_date?: string | null; namespace_prefix?: string }) =>
-      pipelinesApi.updateContext(d).then((r) => r.data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['execution-context'] })
-      setEditing(false)
-      enqueueSnackbar('Execution context updated', { variant: 'success' })
-    },
-    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
-  })
-
-  const theme = useTheme()
-
-  const handleEdit = () => {
-    setDate(ctx?.business_date ?? '')
-    setPrefix(ctx?.namespace_prefix ?? '')
-    setEditing(true)
-  }
-
-  const handleSave = () => {
-    mut.mutate({
-      business_date: date || null,
-      namespace_prefix: prefix,
-    })
-  }
-
-  const handleClear = () => {
-    mut.mutate({ business_date: null, namespace_prefix: '' })
-  }
-
-  if (isLoading) return null
-
-  return (
-    <Paper
-      variant="outlined"
-      sx={{
-        mb: 2, px: 2, py: 1,
-        display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap',
-        bgcolor: alpha(theme.palette.primary.main, 0.04),
-        borderColor: alpha(theme.palette.primary.main, 0.2),
-      }}
-    >
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-        <CalendarToday sx={{ fontSize: 16, color: 'primary.main' }} />
-        <Typography variant="caption" fontWeight={600} color="primary.main">Execution Context</Typography>
-      </Box>
-
-      {!editing ? (
-        <>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="caption" color="text.secondary">Business date:</Typography>
-            <Chip
-              size="small"
-              label={ctx?.business_date ?? 'not set'}
-              color={ctx?.business_date ? 'primary' : 'default'}
-              variant="outlined"
-              sx={{ fontSize: '0.72rem', height: 20 }}
-            />
-          </Box>
-          {ctx?.namespace_prefix && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <Typography variant="caption" color="text.secondary">Prefix:</Typography>
-              <Chip size="small" label={ctx.namespace_prefix} variant="outlined"
-                sx={{ fontSize: '0.72rem', height: 20, fontFamily: 'monospace' }} />
-            </Box>
-          )}
-          {ctx?.namespace && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <Tag sx={{ fontSize: 14, color: 'success.main' }} />
-              <Typography variant="caption" color="text.secondary">Active DB:</Typography>
-              <Typography variant="caption" fontWeight={600} sx={{ fontFamily: 'monospace', color: 'success.main' }}>
-                {ctx.namespace}
-              </Typography>
-            </Box>
-          )}
-          <Box sx={{ display: 'flex', gap: 0.75, ml: 'auto' }}>
-            <Button size="small" variant="outlined" startIcon={<Edit />} onClick={handleEdit} sx={{ py: 0.25 }}>
-              Edit
-            </Button>
-            {ctx?.business_date && (
-              <Button size="small" color="warning" onClick={handleClear} disabled={mut.isPending} sx={{ py: 0.25 }}>
-                Clear
-              </Button>
-            )}
-          </Box>
-        </>
-      ) : (
-        <>
-          <TextField
-            label="Business date" type="date" value={date} size="small"
-            InputLabelProps={{ shrink: true }}
-            onChange={(e) => setDate(e.target.value)}
-            sx={{ width: 160 }}
-          />
-          <TextField
-            label="Table prefix" value={prefix} size="small"
-            placeholder="e.g. markets_"
-            onChange={(e) => setPrefix(e.target.value)}
-            sx={{ width: 160 }}
-            helperText={date ? `→ ${prefix}${date.replace(/-/g, '')}` : ''}
-          />
-          <Box sx={{ display: 'flex', gap: 0.75, ml: 'auto' }}>
-            <Button size="small" onClick={() => setEditing(false)} sx={{ py: 0.25 }}>Cancel</Button>
-            <Button size="small" variant="contained" onClick={handleSave} disabled={mut.isPending} sx={{ py: 0.25 }}>
-              {mut.isPending ? <CircularProgress size={12} color="inherit" /> : 'Save'}
-            </Button>
-          </Box>
-        </>
-      )}
-    </Paper>
   )
 }
 

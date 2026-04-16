@@ -42,6 +42,13 @@ export interface ExtractConfig {
   jdbc_sql?: string
   jdbc_table?: string
   jdbc_date_column?: string
+  jdbc_application_ids?: string[]  // injected as $app_id into the SQL template
+
+  // SQL variable injection (JDBC)
+  jdbc_date_var_format?: string     // YYYYMMDD | YYYY-MM-DD | YYYYMM | YYYY/MM/DD | DD/MM/YYYY | MM/DD/YYYY
+  jdbc_date_range_mode?: string     // single | current_month | previous_month | custom
+  jdbc_date_range_from?: string     // YYYY-MM-DD (custom range start)
+  jdbc_date_range_to?: string       // YYYY-MM-DD (custom range end)
 
   // File (json / csv)
   file_path?: string
@@ -62,8 +69,7 @@ export interface TransformConfig {
 export interface LoadConfig {
   target: 'parquet' | 'csv' | 'spark_table'
   table_name?: string
-  use_namespace: boolean
-  namespace_db?: string   // resolved at run time: the Spark database for this run
+  namespace_db?: string   // resolved at run time from business_date
   partition_by: string[]
   mode: 'overwrite' | 'append'
 }
@@ -72,21 +78,21 @@ export interface ExecutionContext {
   id: number
   business_date: string | null
   namespace_prefix: string
-  namespace: string | null  // resolved: prefix + compact date
+  db_name: string | null  // direct Spark database name override
+  namespace: string | null  // resolved: db_name if set, else prefix + compact date
   updated_at: string
 }
 
 export interface RunTrigger {
   extract_config?: Partial<ExtractConfig>
   business_date?: string
-  namespace_prefix?: string
-  use_namespace?: boolean
 }
 
 export interface Pipeline {
   id: number
   name: string
   description?: string
+  tags: string[]
   status: 'active' | 'inactive' | 'draft'
   extract_config: ExtractConfig
   transform_config: TransformConfig
@@ -234,6 +240,7 @@ export const runsApi = {
   get: (id: number) => api.get<RunDetail>(`/etl/runs/${id}`),
   cancel: (id: number) => api.post(`/etl/runs/${id}/cancel`),
   active: () => api.get<number[]>('/etl/active'),
+  delete: (id: number) => api.delete(`/etl/runs/${id}`),
 }
 
 export const servicesApi = {
@@ -246,13 +253,17 @@ export const servicesApi = {
 
 export const dataApi = {
   tables: () => api.get<DataTable[]>('/data/tables'),
+  deleteFileTable: (name: string) => api.delete(`/data/tables/${encodeURIComponent(name)}`),
   catalog: () => api.get<CatalogTable[]>('/data/catalog'),
+  databases: () => api.get<string[]>('/data/catalog/databases'),
   dropTable: (db: string, table: string) =>
     api.delete(`/data/catalog/${encodeURIComponent(db)}/${encodeURIComponent(table)}`),
   dropDatabase: (db: string) =>
     api.delete(`/data/catalog/databases/${encodeURIComponent(db)}`),
-  query: (sql: string, limit?: number, database?: string) =>
-    api.post<QueryResult>('/data/query', { sql, limit: limit ?? 1000, database: database ?? null }),
+  clearDatabaseTables: (db: string) =>
+    api.delete<{ dropped: number }>(`/data/catalog/${encodeURIComponent(db)}/tables`),
+  query: (sql: string, limit?: number, offset?: number, database?: string) =>
+    api.post<QueryResult>('/data/query', { sql, limit: limit ?? 500, offset: offset ?? 0, database: database ?? null }),
   errors: (params?: { service?: string; resolved?: boolean; limit?: number }) =>
     api.get<ErrorRecord[]>('/data/errors', { params }),
   resolveError: (id: number) => api.patch<ErrorRecord>(`/data/errors/${id}/resolve`),
@@ -261,23 +272,64 @@ export const dataApi = {
 }
 
 // ─── SQL Files ────────────────────────────────────────────────────────────────
+export type SqlFileType = 'extract' | 'transform'
+
+export const SQL_VERSION_TAGS = ['DRAFT', 'REVIEW', 'FINAL', 'DEPRECATED'] as const
+export type SqlVersionTag = typeof SQL_VERSION_TAGS[number] | string
+
+export interface SqlFileVersion {
+  id: number
+  sql_file_id: number
+  version: string       // e.g. "v0.1.0"
+  tag: SqlVersionTag    // e.g. "DRAFT" | "FINAL"
+  content: string
+  created_at: string
+}
+
 export interface SqlFile {
   id: number
   name: string
   description?: string
+  file_type: SqlFileType
   content: string
+  versions: SqlFileVersion[]
   created_at: string
   updated_at: string
 }
 
 export const sqlFilesApi = {
-  list: () => api.get<SqlFile[]>('/etl/sql-files'),
+  list: (file_type?: SqlFileType) =>
+    api.get<SqlFile[]>('/etl/sql-files', { params: file_type ? { file_type } : {} }),
   get: (id: number) => api.get<SqlFile>(`/etl/sql-files/${id}`),
-  create: (data: Omit<SqlFile, 'id' | 'created_at' | 'updated_at'>) =>
+  create: (data: { name: string; description?: string; file_type: SqlFileType; content: string }) =>
     api.post<SqlFile>('/etl/sql-files', data),
-  update: (id: number, data: Partial<Omit<SqlFile, 'id' | 'created_at' | 'updated_at'>>) =>
+  update: (id: number, data: Partial<{ name: string; description: string; file_type: SqlFileType; content: string }>) =>
     api.put<SqlFile>(`/etl/sql-files/${id}`, data),
   delete: (id: number) => api.delete(`/etl/sql-files/${id}`),
+  // Versions
+  listVersions: (id: number) => api.get<SqlFileVersion[]>(`/etl/sql-files/${id}/versions`),
+  createVersion: (id: number, tag?: string) =>
+    api.post<SqlFileVersion>(`/etl/sql-files/${id}/versions`, { tag: tag ?? 'DRAFT' }),
+  updateVersionTag: (id: number, vid: number, tag: string) =>
+    api.patch<SqlFileVersion>(`/etl/sql-files/${id}/versions/${vid}/tag`, { tag }),
+  // SQL variable preview
+  previewSql: (req: SqlPreviewRequest) =>
+    api.post<SqlPreviewResponse>('/etl/sql/preview', req),
+}
+
+export interface SqlPreviewRequest {
+  sql?: string
+  sql_file_id?: number
+  date_var_format?: string
+  date_range_mode?: string     // single | current_month | previous_month | custom
+  date_range_from?: string     // YYYY-MM-DD
+  date_range_to?: string       // YYYY-MM-DD
+}
+
+export interface SqlPreviewResponse {
+  resolved_sql: string
+  variables: Record<string, string>
+  business_date: string | null
 }
 
 // ─── Pipeline Graph / Dependencies ───────────────────────────────────────────
@@ -316,4 +368,193 @@ export const graphApi = {
     api.post<Dependency>(`/etl/pipelines/${pid}/dependencies`, { upstream_id }),
   removeDep: (pid: number, dep_id: number) =>
     api.delete(`/etl/pipelines/${pid}/dependencies/${dep_id}`),
+}
+
+// ─── Notebook Files ───────────────────────────────────────────────────────────
+export interface NotebookCell {
+  type: 'code' | 'markdown'
+  source: string
+}
+
+export interface NotebookFile {
+  id: number
+  name: string
+  description?: string
+  cells: NotebookCell[]
+  created_at: string
+  updated_at: string
+}
+
+export const notebookFilesApi = {
+  list: () => api.get<NotebookFile[]>('/transform/notebooks'),
+  get: (id: number) => api.get<NotebookFile>(`/transform/notebooks/${id}`),
+  create: (data: Omit<NotebookFile, 'id' | 'created_at' | 'updated_at'>) =>
+    api.post<NotebookFile>('/transform/notebooks', data),
+  update: (id: number, data: Partial<Omit<NotebookFile, 'id' | 'created_at' | 'updated_at'>>) =>
+    api.put<NotebookFile>(`/transform/notebooks/${id}`, data),
+  delete: (id: number) => api.delete(`/transform/notebooks/${id}`),
+}
+
+// ─── Transform Jobs ───────────────────────────────────────────────────────────
+export type TransformJobStatus = 'idle' | 'running' | 'completed' | 'failed'
+export type TransformType = 'sql' | 'notebook'
+export type WriteMode = 'overwrite' | 'append'
+
+export interface TransformJob {
+  id: number
+  name: string
+  description?: string
+  tags: string[]
+  source_database?: string
+  source_table: string
+  transform_type: TransformType
+  sql_content?: string
+  sql_file_id?: number
+  sql_file_name?: string
+  notebook_file_id?: number
+  notebook_file_name?: string
+  target_database?: string
+  target_table: string
+  target_mode: WriteMode
+  status: TransformJobStatus
+  last_run_at?: string
+  last_run_duration_s?: number
+  last_run_rows?: number
+  last_error?: string
+  created_at: string
+  updated_at: string
+}
+
+export const transformJobsApi = {
+  list: () => api.get<TransformJob[]>('/transform/jobs'),
+  get: (id: number) => api.get<TransformJob>(`/transform/jobs/${id}`),
+  create: (data: Omit<TransformJob, 'id' | 'status' | 'last_run_at' | 'last_run_duration_s' | 'last_run_rows' | 'last_error' | 'created_at' | 'updated_at' | 'sql_file_name' | 'notebook_file_name'>) =>
+    api.post<TransformJob>('/transform/jobs', data),
+  update: (id: number, data: Partial<Omit<TransformJob, 'id' | 'status' | 'last_run_at' | 'last_run_duration_s' | 'last_run_rows' | 'last_error' | 'created_at' | 'updated_at' | 'sql_file_name' | 'notebook_file_name'>>) =>
+    api.put<TransformJob>(`/transform/jobs/${id}`, data),
+  delete: (id: number) => api.delete(`/transform/jobs/${id}`),
+  run: (id: number) => api.post<TransformJob>(`/transform/jobs/${id}/run`),
+  cancel: (id: number) => api.post<TransformJob>(`/transform/jobs/${id}/cancel`),
+  preview: (data: {
+    source_database?: string
+    source_table: string
+    transform_type: 'sql' | 'notebook'
+    sql_content?: string
+    cells?: NotebookCell[]
+    limit?: number
+  }) => api.post<{ columns: string[]; rows: unknown[][]; row_count: number; duration_ms: number }>('/transform/preview', data),
+}
+
+// ─── ETL Chains ───────────────────────────────────────────────────────────────
+export type ChainStepType = 'pipeline' | 'transform'
+
+export interface ChainStep {
+  type: ChainStepType
+  pipeline_id?: number
+  transform_job_id?: number
+  label?: string
+}
+
+export type ETLChainStatus = 'idle' | 'running' | 'completed' | 'failed'
+
+export interface ETLChain {
+  id: number
+  name: string
+  description?: string
+  steps: ChainStep[]
+  status: ETLChainStatus
+  last_run_at?: string
+  last_run_duration_s?: number
+  last_error?: string
+  created_at: string
+  updated_at: string
+}
+
+export const chainsApi = {
+  list: () => api.get<ETLChain[]>('/transform/chains'),
+  get: (id: number) => api.get<ETLChain>(`/transform/chains/${id}`),
+  create: (data: Pick<ETLChain, 'name' | 'description' | 'steps'>) =>
+    api.post<ETLChain>('/transform/chains', data),
+  update: (id: number, data: Partial<Pick<ETLChain, 'name' | 'description' | 'steps'>>) =>
+    api.put<ETLChain>(`/transform/chains/${id}`, data),
+  delete: (id: number) => api.delete(`/transform/chains/${id}`),
+  run: (id: number) => api.post<ETLChain>(`/transform/chains/${id}/run`),
+}
+
+// ─── Connections ──────────────────────────────────────────────────────────────
+export type ConnectionType = 'jdbc' | 'grpc' | 'rest' | 'other'
+
+export interface Connection {
+  id: number
+  name: string
+  description?: string
+  conn_type: ConnectionType
+  host?: string
+  port?: number
+  database?: string
+  username?: string
+  has_password: boolean
+  extra?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface ConnectionPayload {
+  name: string
+  description?: string
+  conn_type: ConnectionType
+  host?: string
+  port?: number
+  database?: string
+  username?: string
+  password?: string   // plaintext — encrypted server-side
+  extra?: Record<string, unknown>
+}
+
+export interface ConnectionTestResult {
+  success: boolean
+  message: string
+  latency_ms?: number
+}
+
+export const connectionsApi = {
+  list: () => api.get<Connection[]>('/connections'),
+  get: (id: number) => api.get<Connection>(`/connections/${id}`),
+  create: (data: ConnectionPayload) => api.post<Connection>('/connections', data),
+  update: (id: number, data: Partial<ConnectionPayload>) => api.put<Connection>(`/connections/${id}`, data),
+  delete: (id: number) => api.delete(`/connections/${id}`),
+  test: (id: number) => api.post<ConnectionTestResult>(`/connections/${id}/test`),
+}
+
+// ─── Admin ────────────────────────────────────────────────────────────────────
+
+export interface StorageNode {
+  path: string
+  name: string
+  size_bytes: number
+  is_dir: boolean
+  children: StorageNode[]
+}
+
+export interface StorageTree {
+  nodes: StorageNode[]
+  total_bytes: number
+}
+
+export interface AdminResult {
+  ok: boolean
+  message: string
+  affected: number
+}
+
+export const adminApi = {
+  storage: () => api.get<StorageTree>('/admin/storage'),
+  purgePath: (path: string) => api.delete<AdminResult>('/admin/storage/path', { data: { path } }),
+  purgeAll: () => api.delete<AdminResult>('/admin/storage/all'),
+  deleteRuns: (ids?: number[]) =>
+    api.delete<AdminResult>('/admin/runs', { data: { ids: ids ?? null } }),
+  resetStats: () => api.post<AdminResult>('/admin/stats/reset'),
+  clearErrors: () => api.post<AdminResult>('/admin/errors/clear'),
+  restartService: (service: string) =>
+    api.post<{ service: string; ok: boolean; message: string }>('/admin/services/restart', { service }),
 }

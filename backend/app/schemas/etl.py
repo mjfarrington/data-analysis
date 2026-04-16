@@ -31,6 +31,16 @@ class ExtractConfig(BaseModel):
     jdbc_sql: Optional[str] = None            # inline SQL (alternative to file)
     jdbc_table: Optional[str] = None          # simple table name (no SQL needed)
     jdbc_date_column: Optional[str] = None    # column used for date filtering
+    # Application IDs injected as $app_id into the SQL template
+    jdbc_application_ids: list[str] = Field(default_factory=list)
+
+    # SQL variable injection (JDBC)
+    # Placeholders resolved at run time: $business_date, $business_date_from,
+    # $business_date_to, $business_date_range
+    jdbc_date_var_format: str = "YYYYMMDD"   # YYYYMMDD | YYYY-MM-DD | YYYYMM | YYYY/MM/DD | DD/MM/YYYY | MM/DD/YYYY
+    jdbc_date_range_mode: str = "single"     # single | current_month | previous_month | custom
+    jdbc_date_range_from: Optional[str] = None   # YYYY-MM-DD (custom range start)
+    jdbc_date_range_to: Optional[str] = None     # YYYY-MM-DD (custom range end)
 
     # File source (json / csv)
     file_path: Optional[str] = None           # relative to DATA_DIR/sources/
@@ -51,11 +61,7 @@ class TransformConfig(BaseModel):
 class LoadConfig(BaseModel):
     target: str = "parquet"  # parquet | csv | spark_table
     table_name: Optional[str] = None
-    # When True, ignore table_name and use the platform namespace
-    # (namespace_prefix + business_date) as the Spark table name.
-    use_namespace: bool = False
-    # Resolved at run time: the Spark database that acts as the namespace.
-    # e.g. "markets_20260414". Tables are created INSIDE this database.
+    # Resolved at run time from business_date — do not set manually.
     namespace_db: Optional[str] = None
     partition_by: list[str] = Field(default_factory=lambda: ["date", "application_id"])
     mode: str = "overwrite"  # overwrite | append
@@ -64,6 +70,7 @@ class LoadConfig(BaseModel):
 class PipelineBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
     extract_config: ExtractConfig = Field(default_factory=ExtractConfig)
     transform_config: TransformConfig = Field(default_factory=TransformConfig)
     load_config: LoadConfig = Field(default_factory=LoadConfig)
@@ -78,6 +85,7 @@ class PipelineCreate(PipelineBase):
 class PipelineUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = None
+    tags: Optional[list[str]] = None
     status: Optional[str] = None
     extract_config: Optional[ExtractConfig] = None
     transform_config: Optional[TransformConfig] = None
@@ -100,11 +108,8 @@ class PipelineResponse(PipelineBase):
 # Run schemas
 # ─────────────────────────────────────────────────────────────────────────────
 class RunTrigger(BaseModel):
-    extract_config: Optional[ExtractConfig] = None  # override pipeline config
-    # Inline overrides — take precedence over the pipeline's load_config
-    business_date: Optional[str] = None    # YYYY-MM-DD override for this run
-    namespace_prefix: Optional[str] = None # prefix override for this run
-    use_namespace: Optional[bool] = None   # force namespace on/off for this run
+    extract_config: Optional[ExtractConfig] = None  # override pipeline extract config
+    business_date: Optional[str] = None             # YYYY-MM-DD override for this run
 
 
 class RunSummary(BaseModel):
@@ -201,7 +206,8 @@ class DataTable(BaseModel):
 
 class QueryRequest(BaseModel):
     sql: str = Field(..., min_length=1, max_length=10_000)
-    limit: int = Field(default=1000, ge=1, le=10_000)
+    limit: int = Field(default=500, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
     database: Optional[str] = None  # If set, USE this database before executing
 
 
@@ -236,14 +242,17 @@ class ExecutionContextResponse(BaseModel):
     id: int
     business_date: Optional[str]
     namespace_prefix: str
-    # Derived: the full namespace string
-    namespace: Optional[str]  # e.g. "markets_20260414" or None if no date set
+    # Optional direct Spark database name override (takes precedence over derived namespace)
+    db_name: Optional[str]
+    # Resolved Spark database name: db_name if set, else prefix+date, else None
+    namespace: Optional[str]
     updated_at: datetime
 
 
 class ExecutionContextUpdate(BaseModel):
     business_date: Optional[str] = None   # YYYY-MM-DD or null to clear
     namespace_prefix: Optional[str] = None
+    db_name: Optional[str] = None  # direct Spark database name (overrides prefix+date)
 
 
 class ErrorRecord(BaseModel):
@@ -258,22 +267,170 @@ class ErrorRecord(BaseModel):
     timestamp: datetime
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Notebook file schemas
+# ─────────────────────────────────────────────────────────────────────────────
+class NotebookCell(BaseModel):
+    type: str = "code"   # "code" | "markdown"
+    source: str = ""
+
+
+class NotebookFileBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    cells: list[NotebookCell] = Field(default_factory=list)
+
+
+class NotebookFileCreate(NotebookFileBase):
+    pass
+
+
+class NotebookFileUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    cells: Optional[list[NotebookCell]] = None
+
+
+class NotebookFileResponse(NotebookFileBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Transform job schemas
+# ─────────────────────────────────────────────────────────────────────────────
+class TransformJobBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    source_database: Optional[str] = None
+    source_table: str
+    transform_type: str = "sql"    # "sql" | "notebook"
+    sql_content: Optional[str] = None
+    sql_file_id: Optional[int] = None
+    notebook_file_id: Optional[int] = None
+    target_database: Optional[str] = None
+    target_table: str
+    target_mode: str = "overwrite"
+
+
+class TransformJobCreate(TransformJobBase):
+    pass
+
+
+class TransformJobUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[list[str]] = None
+    source_database: Optional[str] = None
+    source_table: Optional[str] = None
+    transform_type: Optional[str] = None
+    sql_content: Optional[str] = None
+    sql_file_id: Optional[int] = None
+    notebook_file_id: Optional[int] = None
+    target_database: Optional[str] = None
+    target_table: Optional[str] = None
+    target_mode: Optional[str] = None
+
+
+class TransformJobResponse(TransformJobBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    status: str
+    last_run_at: Optional[datetime]
+    last_run_duration_s: Optional[float]
+    last_run_rows: Optional[int]
+    last_error: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+    # Resolved names from FK joins
+    sql_file_name: Optional[str] = None
+    notebook_file_name: Optional[str] = None
+
+
 PipelineResponse.model_rebuild()
 RunDetail.model_rebuild()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ETL Chain schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ChainStep(BaseModel):
+    """One step in an ETL chain — either a pipeline run or a transform job."""
+    type: str  # "pipeline" | "transform"
+    pipeline_id: Optional[int] = None
+    transform_job_id: Optional[int] = None
+    # Resolved display names (read-only, populated on response)
+    label: Optional[str] = None
+
+
+class ETLChainBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    steps: list[ChainStep] = Field(default_factory=list)
+
+
+class ETLChainCreate(ETLChainBase):
+    pass
+
+
+class ETLChainUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    steps: Optional[list[ChainStep]] = None
+
+
+class ETLChainResponse(ETLChainBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    status: str
+    last_run_at: Optional[datetime] = None
+    last_run_duration_s: Optional[float] = None
+    last_error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SQL File schemas
 # ─────────────────────────────────────────────────────────────────────────────
+SQL_FILE_TYPES = ("extract", "transform")
+SQL_VERSION_TAGS = ("DRAFT", "REVIEW", "FINAL", "DEPRECATED")
+
+
+class SqlFileVersionCreate(BaseModel):
+    """Snapshot the current content as a new immutable version."""
+    tag: str = Field(default="DRAFT", max_length=50)
+
+
+class SqlFileVersionTagUpdate(BaseModel):
+    tag: str = Field(..., max_length=50)
+
+
+class SqlFileVersionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    sql_file_id: int
+    version: str        # e.g. "v0.3.0"
+    tag: str            # e.g. "DRAFT" / "FINAL"
+    content: str
+    created_at: datetime
+
+
 class SqlFileCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: Optional[str] = None
+    file_type: str = Field(default="extract")
     content: str = Field(..., min_length=1)
 
 
 class SqlFileUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = None
+    file_type: Optional[str] = None
     content: Optional[str] = None
 
 
@@ -282,9 +439,31 @@ class SqlFileResponse(BaseModel):
     id: int
     name: str
     description: Optional[str]
+    file_type: str
     content: str
     created_at: datetime
     updated_at: datetime
+    versions: list[SqlFileVersionResponse] = Field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SQL preview (variable injection)
+# ─────────────────────────────────────────────────────────────────────────────
+class SqlPreviewRequest(BaseModel):
+    """Resolve $business_date* placeholders for a given SQL source and return the
+    fully substituted SQL for review before running a pipeline."""
+    sql: Optional[str] = None           # inline SQL text
+    sql_file_id: Optional[int] = None   # reference to SqlFile.id (alternative to sql)
+    date_var_format: str = "YYYYMMDD"
+    date_range_mode: str = "single"     # single | current_month | previous_month | custom
+    date_range_from: Optional[str] = None  # YYYY-MM-DD (custom range start)
+    date_range_to: Optional[str] = None    # YYYY-MM-DD (custom range end)
+
+
+class SqlPreviewResponse(BaseModel):
+    resolved_sql: str
+    variables: dict[str, str]   # placeholder → resolved value
+    business_date: Optional[str]  # YYYY-MM-DD from platform context
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,3 +501,57 @@ class GraphEdge(BaseModel):
 class PipelineGraph(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Connection schemas
+# ─────────────────────────────────────────────────────────────────────────────
+CONNECTION_TYPES = ("jdbc", "grpc", "rest", "other")
+
+
+class ConnectionCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    conn_type: str = Field(default="jdbc")
+    host: Optional[str] = None
+    port: Optional[int] = None
+    database: Optional[str] = None
+    username: Optional[str] = None
+    # plaintext — encrypted before storage
+    password: Optional[str] = None
+    extra: Optional[dict] = None
+
+
+class ConnectionUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = None
+    conn_type: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    database: Optional[str] = None
+    username: Optional[str] = None
+    # Send None to leave unchanged, send "" to clear, send value to update
+    password: Optional[str] = None
+    extra: Optional[dict] = None
+
+
+class ConnectionResponse(BaseModel):
+    """Connection without the encrypted secret — password is never returned."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    description: Optional[str]
+    conn_type: str
+    host: Optional[str]
+    port: Optional[int]
+    database: Optional[str]
+    username: Optional[str]
+    has_password: bool = False
+    extra: Optional[dict]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConnectionTestResult(BaseModel):
+    success: bool
+    message: str
+    latency_ms: Optional[float] = None

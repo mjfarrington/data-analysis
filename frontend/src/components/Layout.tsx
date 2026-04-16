@@ -1,4 +1,4 @@
-import { useState, ReactNode } from 'react'
+import { useState, useRef, ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   AppBar, Box, Drawer, IconButton, List, ListItem, ListItemButton,
@@ -7,7 +7,6 @@ import {
 } from '@mui/material'
 import {
   Dashboard as DashboardIcon,
-  AccountTree as PipelineIcon,
   PlayCircle as RunsIcon,
   Storage as DataIcon,
   BugReport as ErrorIcon,
@@ -16,23 +15,56 @@ import {
   Circle as DotIcon,
   Share as GraphIcon,
   HealthAndSafety as ServicesIcon,
+  DeveloperBoard as StudioIcon,
+  Code as SqlBrowserIcon,
+  NoteAlt as NotebooksIcon,
+  Settings as SettingsIcon,
+  AdminPanelSettings as AdminIcon,
+  DragIndicator as DragIcon,
 } from '@mui/icons-material'
 import { useQuery } from '@tanstack/react-query'
 import { useThemeMode } from '../App'
 import { servicesApi } from '../api/client'
+import { useAppSettings } from '../hooks/useAppSettings'
 
 const DRAWER_WIDTH = 220
 const DRAWER_MINI = 64
+const NAV_ORDER_KEY = 'sidebar_nav_order'
 
-const navItems = [
+const ALL_NAV_ITEMS = [
   { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon /> },
-  { label: 'ETL Pipelines', path: '/pipelines', icon: <PipelineIcon /> },
+  { label: 'Studio', path: '/studio', icon: <StudioIcon /> },
+  { label: 'SQL Browser', path: '/sql-browser', icon: <SqlBrowserIcon /> },
+  { label: 'Notebooks', path: '/notebooks', icon: <NotebooksIcon /> },
   { label: 'Pipeline Graph', path: '/graph', icon: <GraphIcon /> },
   { label: 'Runs', path: '/runs', icon: <RunsIcon /> },
   { label: 'Data Explorer', path: '/explorer', icon: <DataIcon /> },
   { label: 'Services', path: '/services', icon: <ServicesIcon /> },
   { label: 'Errors', path: '/errors', icon: <ErrorIcon /> },
 ]
+
+function loadNavOrder(): typeof ALL_NAV_ITEMS {
+  try {
+    const saved = localStorage.getItem(NAV_ORDER_KEY)
+    if (saved) {
+      const paths: string[] = JSON.parse(saved)
+      const ordered = paths
+        .map((p) => ALL_NAV_ITEMS.find((n) => n.path === p))
+        .filter(Boolean) as typeof ALL_NAV_ITEMS
+      // append any new items not yet in saved order
+      const extra = ALL_NAV_ITEMS.filter((n) => !paths.includes(n.path))
+      return [...ordered, ...extra]
+    }
+  } catch { /* ignore */ }
+  return ALL_NAV_ITEMS
+}
+
+function saveNavOrder(items: typeof ALL_NAV_ITEMS) {
+  localStorage.setItem(NAV_ORDER_KEY, JSON.stringify(items.map((n) => n.path)))
+}
+
+const settingsItem = { label: 'Settings', path: '/settings', icon: <SettingsIcon /> }
+const adminItem = { label: 'Admin', path: '/admin', icon: <AdminIcon /> }
 
 function OverallDot({ status }: { status: string }) {
   const color = status === 'healthy' ? 'success.main' : status === 'degraded' ? 'warning.main' : 'error.main'
@@ -41,10 +73,38 @@ function OverallDot({ status }: { status: string }) {
 
 export default function Layout({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(true)
+  const [navItems, setNavItems] = useState(loadNavOrder)
   const { toggle, mode } = useThemeMode()
+  const { settings: appSettings } = useAppSettings()
   const location = useLocation()
   const navigate = useNavigate()
   const theme = useTheme()
+
+  // Drag-to-reorder state
+  const dragIndex = useRef<number | null>(null)
+  const dragOverIndex = useRef<number | null>(null)
+
+  const handleDragStart = (index: number) => {
+    dragIndex.current = index
+  }
+  const handleDragEnter = (index: number) => {
+    dragOverIndex.current = index
+  }
+  const handleDragEnd = () => {
+    const from = dragIndex.current
+    const to = dragOverIndex.current
+    if (from !== null && to !== null && from !== to) {
+      setNavItems((prev) => {
+        const updated = [...prev]
+        const [moved] = updated.splice(from, 1)
+        updated.splice(to, 0, moved)
+        saveNavOrder(updated)
+        return updated
+      })
+    }
+    dragIndex.current = null
+    dragOverIndex.current = null
+  }
 
   const { data: status } = useQuery({
     queryKey: ['services-status'],
@@ -105,10 +165,19 @@ export default function Layout({ children }: { children: ReactNode }) {
         )}
 
         <List dense sx={{ px: 1, flex: 1, mt: 0.5 }}>
-          {navItems.map((item) => {
+          {navItems.map((item, index) => {
             const active = location.pathname === item.path
             return (
-              <ListItem key={item.path} disablePadding sx={{ mb: 0.5 }}>
+              <ListItem
+                key={item.path}
+                disablePadding
+                sx={{ mb: 0.5, '&:hover .drag-handle': { opacity: 1 } }}
+                draggable={open}
+                onDragStart={() => handleDragStart(index)}
+                onDragEnter={() => handleDragEnter(index)}
+                onDragEnd={handleDragEnd}
+                onDragOver={(e) => e.preventDefault()}
+              >
                 <Tooltip title={open ? '' : item.label} placement="right">
                   <ListItemButton
                     selected={active}
@@ -125,6 +194,20 @@ export default function Layout({ children }: { children: ReactNode }) {
                       },
                     }}
                   >
+                    {open && (
+                      <DragIcon
+                        className="drag-handle"
+                        sx={{
+                          fontSize: 14,
+                          color: 'text.disabled',
+                          opacity: 0,
+                          transition: 'opacity 0.15s',
+                          cursor: 'grab',
+                          mr: 0.5,
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
                     <ListItemIcon
                       sx={{
                         minWidth: open ? 36 : 'unset',
@@ -152,6 +235,43 @@ export default function Layout({ children }: { children: ReactNode }) {
         </List>
 
         <Divider />
+        <List dense sx={{ px: 1, py: 0.5 }}>
+          {[adminItem, settingsItem].map((item) => {
+            const active = location.pathname === item.path
+            return (
+              <ListItem key={item.path} disablePadding sx={{ mb: 0.5 }}>
+                <Tooltip title={open ? '' : item.label} placement="right">
+                  <ListItemButton
+                    selected={active}
+                    onClick={() => navigate(item.path)}
+                    sx={{
+                      borderRadius: 2,
+                      minHeight: 40,
+                      px: open ? 1.5 : 1,
+                      justifyContent: open ? 'flex-start' : 'center',
+                      '&.Mui-selected': {
+                        bgcolor: alpha(theme.palette.primary.main, 0.15),
+                        color: 'primary.main',
+                        '& .MuiListItemIcon-root': { color: 'primary.main' },
+                      },
+                    }}
+                  >
+                    <ListItemIcon sx={{ minWidth: open ? 36 : 'unset', justifyContent: 'center', color: active ? 'primary.main' : 'text.secondary' }}>
+                      {item.icon}
+                    </ListItemIcon>
+                    {open && (
+                      <ListItemText
+                        primary={item.label}
+                        primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: active ? 600 : 400 }}
+                      />
+                    )}
+                  </ListItemButton>
+                </Tooltip>
+              </ListItem>
+            )
+          })}
+        </List>
+        <Divider />
         <Box sx={{ px: 1, py: 1, display: 'flex', justifyContent: open ? 'flex-end' : 'center' }}>
           <Tooltip title="Toggle theme">
             <IconButton size="small" onClick={toggle}>
@@ -166,7 +286,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         <AppBar position="sticky" elevation={0} sx={{ zIndex: 1 }}>
           <Toolbar variant="dense" sx={{ minHeight: 48 }}>
             <Typography variant="body2" sx={{ color: 'text.secondary', flex: 1 }}>
-              {navItems.find((n) => n.path === location.pathname)?.label ?? 'Data Analysis Platform'}
+              {[...navItems, settingsItem, adminItem].find((n) => n.path === location.pathname)?.label ?? 'Data Analysis Platform'}
             </Typography>
             {status && (
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
@@ -184,7 +304,7 @@ export default function Layout({ children }: { children: ReactNode }) {
             )}
           </Toolbar>
         </AppBar>
-        <Box sx={{ flex: 1, p: 3, overflow: 'auto' }}>{children}</Box>
+        <Box sx={{ flex: 1, p: appSettings.density === 'compact' ? 2 : 3, overflow: 'auto' }}>{children}</Box>
       </Box>
     </Box>
   )

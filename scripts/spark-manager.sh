@@ -19,7 +19,9 @@ SPARK_MASTER_URL="spark://${SPARK_MASTER_HOST}:${SPARK_MASTER_PORT}"
 
 DATA_DIR="${PROJECT_DIR}/data"
 LOG_DIR="${PROJECT_DIR}/logs/spark"
-SPARK_EVENTS_DIR="${DATA_DIR}/spark-events"
+SPARK_EVENTS_DIR="${DATA_DIR}/spark/events"
+SPARK_WAREHOUSE_DIR="${DATA_DIR}/spark/warehouse"
+PIPELINE_DIR="${DATA_DIR}/pipeline"
 
 export SPARK_HOME
 export SPARK_LOG_DIR="${LOG_DIR}"
@@ -56,8 +58,36 @@ check_spark_home() {
 }
 
 init_dirs() {
-    mkdir -p "$LOG_DIR" "$SPARK_PID_DIR" "$SPARK_EVENTS_DIR"
-    mkdir -p "$DATA_DIR/extracts" "$DATA_DIR/parquet" "$DATA_DIR/csv"
+    mkdir -p "$LOG_DIR" "$SPARK_PID_DIR" "$SPARK_EVENTS_DIR" "$SPARK_WAREHOUSE_DIR"
+    mkdir -p "$PIPELINE_DIR/extracts" "$PIPELINE_DIR/parquet" "$PIPELINE_DIR/csv"
+    mkdir -p "$DATA_DIR/static/sources" "$DATA_DIR/static/sql/extract" "$DATA_DIR/static/sql/transform"
+}
+
+# Purge Spark event logs and worker work directories older than SPARK_EVENTS_MAX_DAYS (default: 7).
+cleanup_spark_history() {
+    local max_days="${SPARK_EVENTS_MAX_DAYS:-7}"
+    local deleted=0
+
+    # Event logs
+    if [[ -d "$SPARK_EVENTS_DIR" ]]; then
+        while IFS= read -r -d '' entry; do
+            rm -rf "$entry"
+            (( deleted++ )) || true
+        done < <(find "$SPARK_EVENTS_DIR" -mindepth 1 -maxdepth 1 -mtime "+${max_days}" -print0)
+    fi
+
+    # Worker work dirs (app-* / driver-* under SPARK_HOME/work)
+    local work_dir="${SPARK_HOME}/work"
+    if [[ -d "$work_dir" ]]; then
+        while IFS= read -r -d '' entry; do
+            rm -rf "$entry"
+            (( deleted++ )) || true
+        done < <(find "$work_dir" -mindepth 1 -maxdepth 1 -mtime "+${max_days}" -print0)
+    fi
+
+    if (( deleted > 0 )); then
+        log_info "Cleaned up ${deleted} Spark history/worker entries older than ${max_days} days"
+    fi
 }
 
 check_port() {
@@ -181,7 +211,7 @@ start_thriftserver() {
     "$SPARK_HOME/sbin/start-thriftserver.sh" \
         --master "$SPARK_MASTER_URL" \
         --hiveconf hive.server2.thrift.port="$SPARK_THRIFT_PORT" \
-        --conf spark.sql.warehouse.dir="${DATA_DIR}/spark-warehouse"
+        --conf spark.sql.warehouse.dir="${SPARK_WAREHOUSE_DIR}"
     wait_for_port "ThriftServer" "$SPARK_THRIFT_PORT" 60
     log_success "ThriftServer JDBC: jdbc:hive2://localhost:${SPARK_THRIFT_PORT}"
 }
@@ -425,6 +455,7 @@ main() {
 
     case "$cmd" in
         start)
+            cleanup_spark_history
             install_spark_conf
             case "$target" in
                 all)     start_master; start_worker; start_connect; start_thriftserver; start_history ;;

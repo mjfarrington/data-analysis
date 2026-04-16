@@ -15,8 +15,9 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.database import init_db
-from app.api.routes import etl, services, data
+from app.api.routes import etl, services, data, transform, connections, admin
 from app.services.etl_engine import get_broadcast_queue
+from app.services.spark_service import spark_service
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     logger.info("Starting %s v%s", settings.APP_NAME, settings.APP_VERSION)
     await init_db()
+    # Drop stale session temp views from any previous session that may have
+    # crashed mid-run.  This is a best-effort, non-blocking call: if Spark is
+    # not reachable at startup the application still starts normally.
+    asyncio.create_task(spark_service.drop_all_temp_views())
     # Start log broadcast relay task
     app.state.broadcast_task = asyncio.create_task(_broadcast_relay())
     yield
@@ -95,6 +100,9 @@ app.add_middleware(
 app.include_router(etl.router, prefix=settings.API_PREFIX)
 app.include_router(services.router, prefix=settings.API_PREFIX)
 app.include_router(data.router, prefix=settings.API_PREFIX)
+app.include_router(transform.router, prefix=settings.API_PREFIX)
+app.include_router(connections.router, prefix=settings.API_PREFIX)
+app.include_router(admin.router, prefix=settings.API_PREFIX)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

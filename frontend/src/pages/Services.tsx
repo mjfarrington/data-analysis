@@ -19,6 +19,7 @@ import {
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { servicesApi, type ServiceInfo, type SparkTestItem } from '../api/client'
 import { formatDistanceToNow } from 'date-fns'
+import { parseApiDate } from '../utils/dates'
 
 import { Theme } from '@mui/material/styles'
 
@@ -304,7 +305,7 @@ function OverallBanner({ overall, checkedAt }: { overall: string; checkedAt: str
   const theme = useTheme()
   const color = statusColor(overall, theme)
   const label = overall.charAt(0).toUpperCase() + overall.slice(1)
-  const age = formatDistanceToNow(new Date(checkedAt), { addSuffix: true })
+  const age = formatDistanceToNow(parseApiDate(checkedAt), { addSuffix: true })
 
   return (
     <Box sx={{

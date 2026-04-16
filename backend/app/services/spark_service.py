@@ -6,8 +6,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -15,6 +16,11 @@ from typing import Any, Optional
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# app_ids that are never permitted as extract output destinations.
+# Writing to "default" would pollute the default Spark database / namespace
+# and make data impossible to trace back to a pipeline.
+_RESERVED_APP_IDS: frozenset[str] = frozenset({"default"})
 
 # Spark Connect is imported lazily to avoid hard dependency at startup
 _spark_session: Any = None
@@ -140,6 +146,49 @@ class SparkService:
         except Exception as exc:
             return {"status": "unhealthy", "message": str(exc)}
 
+    async def drop_all_temp_views(self) -> int:
+        """Drop every session-scoped temporary view and reset the suppressed-view
+        registry.  Called at application startup so there is no stale state from
+        a previous session that may have crashed mid-run.
+
+        Returns the count of views dropped (0 if Spark is unreachable).
+        """
+        self._suppressed_views.clear()
+
+        def _drop() -> int:
+            spark = _get_spark()
+            dropped = 0
+            try:
+                rows = spark.sql("SHOW VIEWS").collect()
+            except Exception:
+                # Older Spark versions may not support SHOW VIEWS
+                try:
+                    rows = [
+                        r for r in spark.sql("SHOW TABLES").collect()
+                        if getattr(r, "isTemporary", False)
+                    ]
+                except Exception:
+                    return 0
+            for row in rows:
+                name = getattr(row, "viewName", None) or getattr(row, "tableName", None)
+                if not name:
+                    continue
+                try:
+                    spark.sql(f"DROP VIEW IF EXISTS `{name}`")
+                    dropped += 1
+                    logger.debug("Startup: dropped temp view %s", name)
+                except Exception as exc:
+                    logger.warning("Startup: could not drop view %s: %s", name, exc)
+            if dropped:
+                logger.info("Startup: dropped %d stale temp view(s)", dropped)
+            return dropped
+
+        try:
+            return await asyncio.to_thread(_drop)
+        except Exception as exc:
+            logger.debug("Startup temp-view cleanup skipped (Spark unavailable): %s", exc)
+            return 0
+
     # ─────────────────────────────────────────────────────────────────────
     # Data persistence
     # ─────────────────────────────────────────────────────────────────────
@@ -158,6 +207,11 @@ class SparkService:
         mode: str = "overwrite",
     ) -> str:
         """Persist a list of Record dicts to parquet via Spark."""
+        if app_id.lower() in _RESERVED_APP_IDS:
+            raise ValueError(
+                f"app_id {app_id!r} is reserved and cannot be used as an extract destination. "
+                "Set a meaningful application_id in the pipeline extract config."
+            )
         if not records:
             return ""
 
@@ -179,6 +233,11 @@ class SparkService:
         segment: int,
     ) -> str:
         """Persist records to CSV (fallback when Spark unavailable)."""
+        if app_id.lower() in _RESERVED_APP_IDS:
+            raise ValueError(
+                f"app_id {app_id!r} is reserved and cannot be used as an extract destination. "
+                "Set a meaningful application_id in the pipeline extract config."
+            )
         import pandas as pd  # type: ignore
 
         def _write() -> str:
@@ -206,6 +265,13 @@ class SparkService:
         ``extracts_{app_id}`` (date is already encoded in the database name).
         Without *namespace_db* the old behaviour is preserved.
         """
+        if app_id.lower() in _RESERVED_APP_IDS:
+            raise ValueError(
+                f"app_id {app_id!r} is reserved and cannot be used as a catalog table destination. "
+                "Set a meaningful application_id in the pipeline extract config."
+            )
+        view = _view_name(app_id, date)
+
         def _merge():
             spark = _get_spark()
             base_path = settings.parquet_path / app_id / date
@@ -219,24 +285,38 @@ class SparkService:
             else:
                 raise FileNotFoundError(f"No segment files found under {base_path}")
 
-            if namespace_db:
-                _ensure_namespace_db(spark, namespace_db)
-                # No date in the table name — the database IS the date partition
-                base = table_name or f"extracts_{app_id}"
-                tbl = f"`{namespace_db}`.`{base}`"
-            else:
-                tbl = table_name or f"extracts_{app_id}_{date.replace('-', '_')}"
+            if not namespace_db:
+                raise ValueError(
+                    f"A namespace_db is required to save a Spark catalog table "
+                    f"(app_id={app_id!r}, date={date!r}). "
+                    "Set use_namespace=True on the pipeline or provide an explicit namespace."
+                )
+            _ensure_namespace_db(spark, namespace_db)
+            # No date in the table name — the database IS the date partition
+            base = table_name or f"extracts_{app_id}"
+            tbl = f"`{namespace_db}`.`{base}`"
 
             df.write.mode(mode).saveAsTable(tbl)
             logger.info("Saved catalog table %s (%d rows)", tbl, df.count())
+
+            # Drop the raw file-based temp view so it no longer pollutes default
+            try:
+                spark.sql(f"DROP VIEW IF EXISTS `{view}`")
+                logger.debug("Dropped file temp view: %s", view)
+            except Exception as exc:
+                logger.warning("Could not drop temp view %s: %s", view, exc)
+
             return tbl
 
-        return await asyncio.to_thread(_merge)
+        result = await asyncio.to_thread(_merge)
+        # Suppress this view from being re-registered by _register_file_views
+        self._suppressed_views.add(view)
+        return result
 
     # ─────────────────────────────────────────────────────────────────────
     # Query
     # ─────────────────────────────────────────────────────────────────────
-    async def execute_query(self, sql: str, limit: int = 1000, database: Optional[str] = None) -> dict:
+    async def execute_query(self, sql: str, limit: int = 500, offset: int = 0, database: Optional[str] = None) -> dict:
         """Run SQL on Spark and return results."""
         import time as _time
         suppressed = frozenset(self._suppressed_views)
@@ -259,12 +339,17 @@ class SparkService:
                     spark.sql(f"USE `{database}`")
                 except Exception as exc:
                     logger.warning("Could not USE database %s: %s", database, exc)
+            # Rewrite a bare "SHOW TABLES" to be database-qualified so it only
+            # returns tables in the selected database (not all temp views globally)
+            effective_sql = sql
+            if database and sql.strip().upper() == "SHOW TABLES":
+                effective_sql = f"SHOW TABLES IN `{database}`"
             t0 = _time.perf_counter()
-            df = spark.sql(sql).limit(limit)
+            df = spark.sql(effective_sql).limit(limit + offset)
             rows_collected = df.collect()
             elapsed = (_time.perf_counter() - t0) * 1000
             columns = df.columns
-            rows = [list(row) for row in rows_collected]
+            rows = [list(row) for row in rows_collected[offset:]]
             return {
                 "columns": columns,
                 "rows": rows,
@@ -302,11 +387,49 @@ class SparkService:
                     "columns": [],
                     "partitions": [app_dir.name, date_dir.name],
                     "last_modified": datetime.fromtimestamp(
-                        max(f.stat().st_mtime for f in files)
+                        max(f.stat().st_mtime for f in files), tz=timezone.utc
                     ),
                     "file_count": len(files),
                 })
         return tables
+
+    @staticmethod
+    def _resolve_databases(spark: Any) -> list[tuple[str, str]]:
+        """Return list of (short_name, quoted_sql_ref) for all Spark databases.
+
+        Handles Spark 4.x which may return fully-qualified names like
+        ``spark_catalog.20260416`` from SHOW DATABASES.  The short name is the
+        last component and is used as the ``database`` field in API responses so
+        it stays consistent across all catalog queries.
+        """
+        raw: list[str] = []
+        try:
+            raw = [r.namespace for r in spark.sql("SHOW DATABASES").collect()]
+        except Exception:
+            try:
+                raw = [r.databaseName for r in spark.sql("SHOW DATABASES").collect()]
+            except Exception:
+                raw = ["default"]
+
+        result = []
+        for name in raw:
+            parts = name.split(".")
+            short = parts[-1]
+            # Quote each component individually so numeric-named DBs work
+            quoted = ".".join(f"`{p}`" for p in parts)
+            result.append((short, quoted))
+        return result
+
+    async def list_databases(self) -> list[str]:
+        """Return the short names of all Spark databases (for the UI dropdown)."""
+        def _list():
+            spark = _get_spark()
+            return [short for short, _ in self._resolve_databases(spark)]
+        try:
+            return await asyncio.to_thread(_list)
+        except Exception as exc:
+            logger.warning("Could not list databases: %s", exc)
+            return ["default"]
 
     async def list_catalog_tables(self) -> list[dict]:
         """List all tables registered across ALL Spark databases.
@@ -318,28 +441,33 @@ class SparkService:
             spark = _get_spark()
             _register_file_views(spark, suppress=suppressed)
             result = []
-            try:
-                databases = [r.namespace for r in spark.sql("SHOW DATABASES").collect()]
-            except Exception:
-                # Older Spark / in-memory catalog uses 'databaseName' column
+            # Session-scoped temp views are global — collect them once so they
+            # don't pollute every named database's table list.
+            seen_temp_views: set[str] = set()
+            for short_db, quoted_ref in self._resolve_databases(spark):
                 try:
-                    databases = [r.databaseName for r in spark.sql("SHOW DATABASES").collect()]
-                except Exception:
-                    databases = ["default"]
-            for db in databases:
-                try:
-                    rows = spark.sql(f"SHOW TABLES IN `{db}`").collect()
+                    rows = spark.sql(f"SHOW TABLES IN {quoted_ref}").collect()
                     for r in rows:
-                        # Filter out any views that were explicitly dropped this session
                         if r.tableName in suppressed:
                             continue
-                        result.append({
-                            "database": db,
-                            "name": r.tableName,
-                            "is_temporary": r.isTemporary,
-                        })
+                        if r.isTemporary:
+                            # Only emit each temp view once, under 'default'
+                            if r.tableName in seen_temp_views:
+                                continue
+                            seen_temp_views.add(r.tableName)
+                            result.append({
+                                "database": "default",
+                                "name": r.tableName,
+                                "is_temporary": True,
+                            })
+                        else:
+                            result.append({
+                                "database": short_db,
+                                "name": r.tableName,
+                                "is_temporary": False,
+                            })
                 except Exception as exc:
-                    logger.warning("Could not list tables in database %s: %s", db, exc)
+                    logger.warning("Could not list tables in database %s: %s", short_db, exc)
             return result
 
         return await asyncio.to_thread(_list)
@@ -364,6 +492,240 @@ class SparkService:
             spark.sql(f"DROP DATABASE IF EXISTS `{db}` CASCADE")
             logger.info("Dropped database: %s", db)
         await asyncio.to_thread(_drop)
+
+    async def clear_database_tables(self, db: str) -> int:
+        """Drop all tables in a database without dropping the database itself."""
+        tables = await self.list_catalog_tables()
+        db_tables = [t["name"] for t in tables if (t["database"] or "default") == db]
+        for table in db_tables:
+            await self.drop_table(db, table)
+        logger.info("Cleared %d tables from database: %s", len(db_tables), db)
+        return len(db_tables)
+
+    async def delete_file_table(self, name: str) -> None:
+        """Delete a file store entry (removes the directory on disk)."""
+        base = settings.parquet_path
+        # name is in the form app_id/date — resolve against the base path
+        # and ensure it stays within the parquet root (path traversal guard)
+        resolved = (base / name).resolve()
+        if not str(resolved).startswith(str(base.resolve())):
+            raise ValueError("Invalid table name")
+        if not resolved.exists():
+            raise FileNotFoundError(f"{name} not found")
+        await asyncio.to_thread(shutil.rmtree, resolved)
+        logger.info("Deleted file table: %s", resolved)
+
+    async def run_sql_transform(
+        self,
+        source_db: Optional[str],
+        source_table: str,
+        sql: str,
+        target_db: Optional[str],
+        target_table: str,
+        mode: str = "overwrite",
+    ) -> dict:
+        """Execute a SQL transform: register source as 'source', run sql, write result.
+        The SQL should SELECT from the alias 'source' (the input dataset).
+        Returns dict with row_count and duration_s.
+        """
+        import time as _time
+        suppressed = frozenset(self._suppressed_views)
+
+        def _run():
+            spark = _get_spark()
+            _register_file_views(spark, suppress=suppressed)
+
+            # Snapshot existing temp views before we add any
+            try:
+                views_before: set[str] = {r.tableName for r in spark.sql("SHOW VIEWS").collect()}
+            except Exception:
+                views_before = set()
+
+            # Load source into a temp view called 'source'
+            if source_db:
+                src_df = spark.table(f"`{source_db}`.`{source_table}`")
+            else:
+                src_df = spark.table(f"`{source_table}`")
+            src_df.createOrReplaceTempView("source")
+
+            try:
+                t0 = _time.perf_counter()
+                result_df = spark.sql(sql)
+                row_count = result_df.count()
+
+                # Write output
+                if not target_db:
+                    raise ValueError(
+                        f"A target_db (namespace) is required to save the transform result "
+                        f"(source={source_table!r}, target_table={target_table!r}). "
+                        "Set a target database on the transform job."
+                    )
+                _ensure_namespace_db(spark, target_db)
+                tbl = f"`{target_db}`.`{target_table}`"
+                result_df.write.mode(mode).saveAsTable(tbl)
+
+                duration = _time.perf_counter() - t0
+                logger.info("SQL transform: %s → %s (%d rows, %.2fs)", source_table, tbl, row_count, duration)
+                return {"row_count": row_count, "duration_s": round(duration, 2)}
+            finally:
+                # Drop any temp views created during this run (including 'source')
+                try:
+                    views_after: set[str] = {r.tableName for r in spark.sql("SHOW VIEWS").collect()}
+                    for v in views_after - views_before:
+                        spark.sql(f"DROP VIEW IF EXISTS `{v}`")
+                        logger.debug("Cleaned up temp view: %s", v)
+                except Exception as _exc:
+                    logger.warning("Temp view cleanup failed: %s", _exc)
+
+        return await asyncio.to_thread(_run)
+
+    async def run_notebook_transform(
+        self,
+        source_db: Optional[str],
+        source_table: str,
+        cells: list[dict],
+        target_db: Optional[str],
+        target_table: str,
+        mode: str = "overwrite",
+    ) -> dict:
+        """Execute a notebook transform: run code cells in sequence.
+        The notebook receives a pre-built 'spark' session and 'source_df' DataFrame.
+        The last cell must assign 'result_df' which gets saved to the target table.
+        """
+        import time as _time
+        suppressed = frozenset(self._suppressed_views)
+
+        def _run():
+            spark = _get_spark()
+            _register_file_views(spark, suppress=suppressed)
+
+            # Snapshot existing temp views before notebook execution
+            try:
+                views_before: set[str] = {r.tableName for r in spark.sql("SHOW VIEWS").collect()}
+            except Exception:
+                views_before = set()
+
+            if source_db:
+                source_df = spark.table(f"`{source_db}`.`{source_table}`")
+            else:
+                source_df = spark.table(f"`{source_table}`")
+
+            # Build execution namespace
+            ns: dict = {"spark": spark, "source_df": source_df, "result_df": None}
+
+            try:
+                t0 = _time.perf_counter()
+                for cell in cells:
+                    if cell.get("type") != "code":
+                        continue
+                    src = cell.get("source", "").strip()
+                    if not src:
+                        continue
+                    exec(compile(src, "<notebook_cell>", "exec"), ns)  # noqa: S102
+
+                result_df = ns.get("result_df")
+                if result_df is None:
+                    raise ValueError("Notebook must assign 'result_df' in the last code cell")
+
+                row_count = result_df.count()
+                if not target_db:
+                    raise ValueError(
+                        f"A target_db (namespace) is required to save the notebook result "
+                        f"(source={source_table!r}, target_table={target_table!r}). "
+                        "Set a target database on the transform job."
+                    )
+                _ensure_namespace_db(spark, target_db)
+                tbl = f"`{target_db}`.`{target_table}`"
+                result_df.write.mode(mode).saveAsTable(tbl)
+
+                duration = _time.perf_counter() - t0
+                logger.info("Notebook transform: %s → %s (%d rows, %.2fs)", source_table, tbl, row_count, duration)
+                return {"row_count": row_count, "duration_s": round(duration, 2)}
+            finally:
+                # Drop any temp views created during notebook execution
+                try:
+                    views_after: set[str] = {r.tableName for r in spark.sql("SHOW VIEWS").collect()}
+                    for v in views_after - views_before:
+                        spark.sql(f"DROP VIEW IF EXISTS `{v}`")
+                        logger.debug("Cleaned up temp view: %s", v)
+                except Exception as _exc:
+                    logger.warning("Temp view cleanup failed: %s", _exc)
+
+        return await asyncio.to_thread(_run)
+
+    async def preview_transform(
+        self,
+        source_db: Optional[str],
+        source_table: str,
+        transform_type: str,
+        sql: Optional[str] = None,
+        cells: Optional[list[dict]] = None,
+        limit: int = 100,
+    ) -> dict:
+        """Dry-run a transform and return a preview of the result rows.
+        Nothing is written to any target table.
+        """
+        import time as _time
+        suppressed = frozenset(self._suppressed_views)
+
+        def _run():
+            spark = _get_spark()
+            _register_file_views(spark, suppress=suppressed)
+
+            try:
+                views_before: set[str] = {r.tableName for r in spark.sql("SHOW VIEWS").collect()}
+            except Exception:
+                views_before = set()
+
+            if source_db:
+                src_df = spark.table(f"`{source_db}`.`{source_table}`")
+            else:
+                src_df = spark.table(f"`{source_table}`")
+
+            try:
+                t0 = _time.perf_counter()
+
+                if transform_type == "sql":
+                    if not sql:
+                        raise ValueError("sql is required for SQL transform preview")
+                    src_df.createOrReplaceTempView("source")
+                    result_df = spark.sql(sql)
+                else:
+                    if not cells:
+                        raise ValueError("cells are required for notebook transform preview")
+                    ns: dict = {"spark": spark, "source_df": src_df, "result_df": None}
+                    for cell in cells:
+                        if cell.get("type") != "code":
+                            continue
+                        src = cell.get("source", "").strip()
+                        if not src:
+                            continue
+                        exec(compile(src, "<notebook_cell>", "exec"), ns)  # noqa: S102
+                    result_df = ns.get("result_df")
+                    if result_df is None:
+                        raise ValueError("Notebook must assign 'result_df'")
+
+                preview_df = result_df.limit(limit)
+                rows_collected = preview_df.collect()
+                columns = preview_df.columns
+                duration = _time.perf_counter() - t0
+
+                return {
+                    "columns": columns,
+                    "rows": [list(r) for r in rows_collected],
+                    "row_count": len(rows_collected),
+                    "duration_ms": round(duration * 1000, 2),
+                }
+            finally:
+                try:
+                    views_after: set[str] = {r.tableName for r in spark.sql("SHOW VIEWS").collect()}
+                    for v in views_after - views_before:
+                        spark.sql(f"DROP VIEW IF EXISTS `{v}`")
+                        logger.debug("Cleaned up preview temp view: %s", v)
+                except Exception as _exc:
+                    logger.warning("Preview temp view cleanup failed: %s", _exc)
+
+        return await asyncio.to_thread(_run)
 
 
 spark_service = SparkService()
