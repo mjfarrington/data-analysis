@@ -16,14 +16,20 @@ api.interceptors.response.use(
 export default api
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-export type SourceType = 'grpc' | 'jdbc' | 'json' | 'csv'
+export type SourceType = 'grpc' | 'jdbc' | 'datawarehouse'
 
 export interface ExtractConfig {
   // Source selector
   source_type: SourceType
 
-  // gRPC
-  application_ids: string[]
+  // Unified application list — used by ALL source types.
+  // app_id (id field)   → folder name on disk, gRPC app ID, SQL $app_id
+  // app_name (name field) → SQL $app_name placeholder
+  apps?: DwApplication[]
+
+  // Persisted dictionary picker state for the apps field
+  dw_dict_id?: number
+  dw_dict_name_field?: 'key' | 'value'
 
   // Date range (all sources)
   dates: string[]
@@ -38,24 +44,30 @@ export interface ExtractConfig {
 
   // JDBC
   jdbc_url?: string
+  jdbc_connection_id?: number      // named connection (conn_type=jdbc)
   jdbc_sql_file_id?: number
   jdbc_sql?: string
   jdbc_table?: string
   jdbc_date_column?: string
-  jdbc_application_ids?: string[]  // injected as $app_id into the SQL template
 
-  // SQL variable injection (JDBC)
+  // SQL variable injection (JDBC + DataWarehouse)
   jdbc_date_var_format?: string     // YYYYMMDD | YYYY-MM-DD | YYYYMM | YYYY/MM/DD | DD/MM/YYYY | MM/DD/YYYY
   jdbc_date_range_mode?: string     // single | current_month | previous_month | custom
   jdbc_date_range_from?: string     // YYYY-MM-DD (custom range start)
   jdbc_date_range_to?: string       // YYYY-MM-DD (custom range end)
 
-  // File (json / csv)
-  file_path?: string
-  file_encoding?: string
-  csv_delimiter?: string
-  csv_has_header?: boolean
-  json_lines?: boolean
+  // DataWarehouse
+  dw_connection_id?: number         // named connection (conn_type=datawarehouse)
+
+  // Output directory label — defaults to pipeline name uppercased (e.g. 'My Job' → 'MY_JOB').
+  // Output path: <DATE>/<job_name>/<app_id>/
+  job_name?: string
+
+}
+
+export interface DwApplication {
+  name: string  // display name / $app_name
+  id: string    // $app_id
 }
 
 export interface TransformConfig {
@@ -201,6 +213,16 @@ export interface QueryResult {
   duration_ms: number
 }
 
+export interface FilePreviewResult {
+  columns: string[]
+  rows: unknown[][]
+  row_count: number
+  total_rows: number
+  truncated: boolean
+  file_count: number
+  format: 'parquet' | 'csv'
+}
+
 export interface CatalogTable {
   database: string
   name: string
@@ -218,6 +240,32 @@ export interface ErrorRecord {
   timestamp: string
 }
 
+export interface LoadSparkRequest {
+  date: string           // YYYY-MM-DD
+  namespace_db: string   // Spark database to write into
+  table_name?: string    // override table name (default: job_name)
+  mode?: 'overwrite' | 'append'
+}
+
+export interface LoadSparkResult {
+  table: string
+  rows_loaded: number
+  app_ids_merged: number
+  job_name: string
+  date: string
+}
+
+export interface ParquetDateEntry {
+  date: string
+  app_ids: number
+  file_count: number
+}
+
+export interface ParquetDatesResult {
+  job_name: string
+  dates: ParquetDateEntry[]
+}
+
 // ─── API helpers ─────────────────────────────────────────────────────────────
 export const pipelinesApi = {
   list: (status?: string) => api.get<Pipeline[]>('/etl/pipelines', { params: { status } }),
@@ -227,6 +275,10 @@ export const pipelinesApi = {
   delete: (id: number) => api.delete(`/etl/pipelines/${id}`),
   run: (id: number, trigger?: RunTrigger) =>
     api.post<RunSummary>(`/etl/pipelines/${id}/run`, trigger ?? {}),
+  loadToSpark: (id: number, body: LoadSparkRequest) =>
+    api.post<LoadSparkResult>(`/etl/pipelines/${id}/load-spark`, body),
+  parquetDates: (id: number) =>
+    api.get<ParquetDatesResult>(`/etl/pipelines/${id}/parquet-dates`),
   getContext: () => api.get<ExecutionContext>('/etl/context'),
   updateContext: (data: { business_date?: string | null; namespace_prefix?: string }) =>
     api.put<ExecutionContext>('/etl/context', data),
@@ -253,6 +305,8 @@ export const servicesApi = {
 
 export const dataApi = {
   tables: () => api.get<DataTable[]>('/data/tables'),
+  previewFile: (name: string, limit?: number, offset?: number) =>
+    api.get<FilePreviewResult>(`/data/tables/${name}/preview`, { params: { limit: limit ?? 200, offset: offset ?? 0 } }),
   deleteFileTable: (name: string) => api.delete(`/data/tables/${encodeURIComponent(name)}`),
   catalog: () => api.get<CatalogTable[]>('/data/catalog'),
   databases: () => api.get<string[]>('/data/catalog/databases'),
@@ -324,6 +378,8 @@ export interface SqlPreviewRequest {
   date_range_mode?: string     // single | current_month | previous_month | custom
   date_range_from?: string     // YYYY-MM-DD
   date_range_to?: string       // YYYY-MM-DD
+  app_id?: string              // $app_id placeholder value
+  app_name?: string            // $app_name placeholder value
 }
 
 export interface SqlPreviewResponse {
@@ -340,6 +396,7 @@ export interface GraphNode {
   status: string
   source_type: string
   last_run_status?: string
+  app_names?: string[]
 }
 
 export interface GraphEdge {
@@ -482,7 +539,7 @@ export const chainsApi = {
 }
 
 // ─── Connections ──────────────────────────────────────────────────────────────
-export type ConnectionType = 'jdbc' | 'grpc' | 'rest' | 'other'
+export type ConnectionType = 'jdbc' | 'grpc' | 'rest' | 'other' | 'datawarehouse'
 
 export interface Connection {
   id: number
@@ -557,4 +614,64 @@ export const adminApi = {
   clearErrors: () => api.post<AdminResult>('/admin/errors/clear'),
   restartService: (service: string) =>
     api.post<{ service: string; ok: boolean; message: string }>('/admin/services/restart', { service }),
+}
+
+// ─── Dictionary ───────────────────────────────────────────────────────────────
+
+export interface DictionaryEntry {
+  id: number
+  dictionary_id: number
+  key: string
+  value: string
+  created_at: string
+  updated_at: string
+}
+
+export interface Dictionary {
+  id: number
+  name: string
+  description?: string
+  key_label: string
+  value_label: string
+  entries: DictionaryEntry[]
+  created_at: string
+  updated_at: string
+}
+
+export interface DictionaryCreate {
+  name: string
+  description?: string
+  key_label?: string
+  value_label?: string
+}
+
+export interface DictionaryUpdate {
+  name?: string
+  description?: string
+  key_label?: string
+  value_label?: string
+}
+
+export interface DictionaryEntryCreate {
+  key: string
+  value: string
+}
+
+export interface DictionaryEntryUpdate {
+  key?: string
+  value?: string
+}
+
+export const dictionariesApi = {
+  list: () => api.get<Dictionary[]>('/dictionaries'),
+  get: (id: number) => api.get<Dictionary>(`/dictionaries/${id}`),
+  create: (data: DictionaryCreate) => api.post<Dictionary>('/dictionaries', data),
+  update: (id: number, data: DictionaryUpdate) => api.put<Dictionary>(`/dictionaries/${id}`, data),
+  delete: (id: number) => api.delete(`/dictionaries/${id}`),
+  createEntry: (dictId: number, data: DictionaryEntryCreate) =>
+    api.post<DictionaryEntry>(`/dictionaries/${dictId}/entries`, data),
+  updateEntry: (dictId: number, entryId: number, data: DictionaryEntryUpdate) =>
+    api.put<DictionaryEntry>(`/dictionaries/${dictId}/entries/${entryId}`, data),
+  deleteEntry: (dictId: number, entryId: number) =>
+    api.delete(`/dictionaries/${dictId}/entries/${entryId}`),
 }

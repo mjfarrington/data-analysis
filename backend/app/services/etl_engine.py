@@ -92,16 +92,18 @@ def _apply_transforms(records: list[dict], cfg: TransformConfig) -> list[dict]:
     for col, val in cfg.filters.items():
         records = [r for r in records if str(r.get(col, "")) == str(val)]
 
-    # Deduplication
-    if cfg.dedup and cfg.dedup_keys:
-        seen: set = set()
-        deduped: list[dict] = []
-        for r in records:
-            key = tuple(r.get(k) for k in cfg.dedup_keys)
-            if key not in seen:
-                seen.add(key)
-                deduped.append(r)
-        records = deduped
+    # Deduplication — only if at least one dedup key column is actually present in the data
+    if cfg.dedup and cfg.dedup_keys and records:
+        present_keys = [k for k in cfg.dedup_keys if k in records[0]]
+        if present_keys:
+            seen: set = set()
+            deduped: list[dict] = []
+            for r in records:
+                key = tuple(r.get(k) for k in present_keys)
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(r)
+            records = deduped
 
     return records
 
@@ -132,8 +134,9 @@ def inject_sql_vars(
     date_range_from_iso: Optional[str] = None,
     date_range_to_iso: Optional[str] = None,
     app_id: Optional[str] = None,
+    app_name: Optional[str] = None,
 ) -> tuple[str, dict[str, str]]:
-    """Replace $business_date* and $app_id placeholders in *sql*.
+    """Replace $business_date*, $app_id and $app_name placeholders in *sql*.
 
     Returns (resolved_sql, variables) where *variables* maps each placeholder
     to the value that was (or would be) substituted.
@@ -143,12 +146,15 @@ def inject_sql_vars(
         $business_date_from     – start of the resolved date range
         $business_date_to       – end of the resolved date range
         $business_date_range    – BETWEEN <from> AND <to>
-        $app_id                 – the application ID (JDBC only)
+        $app_id                 – the application ID
+        $app_name               – the application name
     """
     variables: dict[str, str] = {}
 
     if app_id:
         variables["$app_id"] = app_id
+    if app_name:
+        variables["$app_name"] = app_name
 
     if business_date_iso:
         base = _date.fromisoformat(business_date_iso)
@@ -221,9 +227,10 @@ async def _resolve_sql(
     db: AsyncSession,
     business_date: Optional[str] = None,
     app_id: Optional[str] = None,
+    app_name: Optional[str] = None,
 ) -> str:
     """Return the SQL string from inline text or referenced SqlFile, with
-    $business_date* and $app_id placeholders substituted."""
+    $business_date*, $app_id and $app_name placeholders substituted."""
     if cfg.jdbc_sql:
         raw = cfg.jdbc_sql.strip()
     elif cfg.jdbc_sql_file_id:
@@ -239,7 +246,7 @@ async def _resolve_sql(
             "JDBC source requires one of: jdbc_sql, jdbc_sql_file_id, or jdbc_table"
         )
 
-    if business_date or app_id:
+    if business_date or app_id or app_name:
         resolved, _ = inject_sql_vars(
             raw,
             business_date,
@@ -248,6 +255,7 @@ async def _resolve_sql(
             date_range_from_iso=cfg.jdbc_date_range_from,
             date_range_to_iso=cfg.jdbc_date_range_to,
             app_id=app_id,
+            app_name=app_name,
         )
         return resolved
     return raw
@@ -281,6 +289,45 @@ def _read_jdbc_sync(
     return df.to_dict(orient="records")
 
 
+async def _resolve_jdbc_url(cfg: ExtractConfig, db: AsyncSession) -> str:
+    """Return the SQLAlchemy JDBC URL for the extract config.
+
+    Priority:
+      1. Named connection (jdbc_connection_id) — URL assembled server-side (password never sent to UI).
+      2. Inline jdbc_url — used as-is.
+    """
+    if cfg.jdbc_connection_id:
+        from app.models.etl import Connection
+        from app.services.crypto import decrypt_password
+        conn = await db.get(Connection, cfg.jdbc_connection_id)
+        if not conn:
+            raise ValueError(f"Connection ID {cfg.jdbc_connection_id} not found")
+        extra = conn.extra or {}
+        # Prefer a pre-built URL stored in extra (e.g. extra={"url": "postgresql://..."})
+        if "url" in extra:
+            return str(extra["url"])
+        # Assemble from structured fields
+        dialect = extra.get("dialect", "postgresql")
+        password = decrypt_password(conn.password_encrypted) if conn.password_encrypted else None
+        url = f"{dialect}://"
+        if conn.username:
+            url += conn.username
+            if password:
+                url += f":{password}"
+            url += "@"
+        if conn.host:
+            url += conn.host
+            if conn.port:
+                url += f":{conn.port}"
+        if conn.database:
+            url += f"/{conn.database}"
+        return url
+    elif cfg.jdbc_url:
+        return cfg.jdbc_url
+    else:
+        raise ValueError("No JDBC connection configured — set a named connection or provide a JDBC URL.")
+
+
 async def _extract_jdbc(
     cfg: ExtractConfig,
     date_str: Optional[str],
@@ -289,20 +336,215 @@ async def _extract_jdbc(
     business_date: Optional[str] = None,
     app_id: Optional[str] = None,
 ) -> list[dict]:
+    jdbc_url = await _resolve_jdbc_url(cfg, db)
     sql = await _resolve_sql(cfg, db, business_date=business_date, app_id=app_id)
     await log_fn(
-        f"  JDBC: {cfg.jdbc_url!r} — SQL {len(sql)} chars"
+        f"  JDBC: {jdbc_url!r} — SQL {len(sql)} chars"
         + (f" filtered on {cfg.jdbc_date_column}={date_str!r}" if cfg.jdbc_date_column and date_str else "")
         + (f" app_id={app_id!r}" if app_id else ""),
         step="extract",
     )
     return await asyncio.to_thread(
         _read_jdbc_sync,
-        cfg.jdbc_url,
+        jdbc_url,
         sql,
         cfg.jdbc_date_column,
         date_str,
     )
+
+
+async def _extract_datawarehouse(
+    cfg: ExtractConfig,
+    date_str: Optional[str],
+    log_fn,
+    db: AsyncSession,
+    business_date: Optional[str] = None,
+    app_id: Optional[str] = None,
+    app_name: Optional[str] = None,
+    rows_per_segment: int = 100_000,
+) -> tuple[list[dict], float]:
+    """Extract records from a DataWarehouse connection (Impala or Spark).
+
+    Returns (records, segment_delay_s) where segment_delay_s is an optional
+    per-segment sleep injected by the DUMMY datasource for testing.
+    """
+    if not cfg.dw_connection_id:
+        raise ValueError("DataWarehouse source requires a named connection (dw_connection_id).")
+    from app.models.etl import Connection as ConnModel
+    from app.services.crypto import decrypt_password
+
+    conn = await db.get(ConnModel, cfg.dw_connection_id)
+    if not conn:
+        raise ValueError(f"DataWarehouse connection ID {cfg.dw_connection_id} not found.")
+    extra = conn.extra or {}
+    datasource = str(extra.get("datasource", "IMPALA")).upper()
+    timeout_ms = int(extra.get("timeout", 30000))
+    uppercase_columns = bool(extra.get("uppercase_columns", False))
+    extra_params = dict(extra.get("params", {}))
+    segment_delay_s = float(extra_params.get("dummy_segment_delay", 0.0)) if datasource == "DUMMY" else 0.0
+    password = decrypt_password(conn.password_encrypted) if conn.password_encrypted else None
+
+    sql = await _resolve_sql(cfg, db, business_date=business_date, app_id=app_id, app_name=app_name)
+    await log_fn(
+        f"  DataWarehouse ({datasource}) env={extra.get('environment', '?')} "
+        f"user={conn.username!r} — SQL {len(sql)} chars"
+        + (f" [segment_delay={segment_delay_s}s]" if segment_delay_s else ""),
+        step="extract",
+    )
+    records = await asyncio.to_thread(
+        _read_dw_sync,
+        conn.host,
+        conn.port,
+        conn.username,
+        password,
+        datasource,
+        timeout_ms,
+        uppercase_columns,
+        extra_params,
+        sql,
+        rows_per_segment,
+    )
+    return records, segment_delay_s
+
+
+def _read_dw_sync(
+    host: Optional[str],
+    port: Optional[int],
+    username: Optional[str],
+    password: Optional[str],
+    datasource: str,
+    timeout_ms: int,
+    uppercase_columns: bool,
+    extra_params: dict,
+    sql: str,
+    rows_per_segment: int = 100_000,
+) -> list[dict]:
+    """Synchronous DataWarehouse query (runs in a thread pool)."""
+    import pandas as pd
+
+    timeout_s = max(1, timeout_ms // 1000) if timeout_ms else 30
+
+    if datasource == "IMPALA":
+        from impala.dbapi import connect  # type: ignore[import]
+        cx = connect(
+            host=host or "",
+            port=port or 21050,
+            user=username,
+            password=password,
+            timeout=timeout_s,
+            **extra_params,
+        )
+        df = pd.read_sql(sql, cx)
+        cx.close()
+    elif datasource == "SPARK":
+        from pyspark.sql import SparkSession  # type: ignore[import]
+        spark = SparkSession.builder.getOrCreate()
+        df = spark.sql(sql).toPandas()
+    elif datasource == "DUMMY":
+        import hashlib as _hashlib
+        import random as _random
+        import datetime as _dt
+        import re as _re
+
+        num_segs = int(extra_params.get("dummy_num_segments", 0))
+        row_count = (
+            num_segs * rows_per_segment
+            if num_segs > 0
+            else int(extra_params.get("dummy_row_count", 500_000))
+        )
+
+        # Parse column specs from SELECT ... FROM.
+        # Each entry is (col_name, fixed_value_or_None).  A fixed value is set
+        # when the SELECT expression is a literal (e.g. injected $business_date
+        # becomes 20260416) so those columns keep the injected value instead of
+        # having fake data generated for them.
+        col_specs: list[tuple[str, object]] = []
+        select_match = _re.search(r'\bSELECT\b(.*?)\bFROM\b', sql, _re.IGNORECASE | _re.DOTALL)
+        if select_match:
+            select_body = select_match.group(1).strip()
+            if select_body.strip() == '*':
+                col_specs = [(f"col_{i}", None) for i in range(1, 6)]
+            else:
+                for part in _re.split(r',(?![^()]*\))', select_body):
+                    part = part.strip()
+                    alias_m = _re.search(r'\bAS\s+`?(\w+)`?\s*$', part, _re.IGNORECASE)
+                    expr = part[:alias_m.start()].strip() if alias_m else part
+                    col_name = alias_m.group(1) if alias_m else None
+
+                    # Detect literal values produced by $variable injection
+                    fixed_value: object = None
+                    quoted_m = _re.fullmatch(r"""['"](.*?)['"]""", expr)
+                    if quoted_m:
+                        fixed_value = quoted_m.group(1)
+                    elif _re.fullmatch(r'\d{4}-\d{2}-\d{2}', expr):   # YYYY-MM-DD
+                        fixed_value = expr
+                    elif _re.fullmatch(r'\d{4}/\d{2}/\d{2}', expr):   # YYYY/MM/DD
+                        fixed_value = expr
+                    elif _re.fullmatch(r'\d{2}/\d{2}/\d{4}', expr):   # DD/MM/YYYY or MM/DD/YYYY
+                        fixed_value = expr
+                    elif _re.fullmatch(r'\d{6,8}', expr):              # YYYYMMDD / YYYYMM
+                        fixed_value = expr
+                    elif _re.fullmatch(r'-?\d+\.\d+', expr):
+                        fixed_value = float(expr)
+                    elif _re.fullmatch(r'-?\d+', expr):
+                        fixed_value = int(expr)
+
+                    if not col_name:
+                        bare = _re.sub(r'\(.*?\)', '', part).strip()
+                        word = _re.split(r'[\s.]+', bare)[-1].strip('`"\'') if bare else ''
+                        col_name = word if word else None
+
+                    if col_name:
+                        col_specs.append((col_name, fixed_value))
+
+        if not col_specs:
+            col_specs = [(f"col_{i}", None) for i in range(1, 6)]
+
+        columns = [c for c, _ in col_specs]
+
+        # Deterministic RNG seeded from the SQL text so re-runs are consistent
+        seed = int(_hashlib.md5(sql.encode()).hexdigest(), 16) % (2 ** 31)
+        rng = _random.Random(seed)
+
+        _STATUSES = ["ACTIVE", "INACTIVE", "PENDING", "CLOSED", "PROCESSING"]
+        _NAMES = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta"]
+        _REGIONS = ["NORTH", "SOUTH", "EAST", "WEST", "CENTRAL"]
+        _CURRENCIES = ["GBP", "USD", "EUR", "JPY"]
+
+        def _fake(col: str, row_idx: int) -> object:
+            n = col.lower()
+            if _re.search(r'(^id$|_id$|_key$|_ref$)', n):
+                return row_idx + 1
+            if _re.search(r'(date|_dt$)', n):
+                base = _dt.date(2026, 1, 1)
+                return str(base.replace(month=rng.randint(1, 12), day=rng.randint(1, 28)))
+            if _re.search(r'(name|desc|label|title|category)', n):
+                return rng.choice(_NAMES)
+            if _re.search(r'(amount|value|price|rate|total|sum|balance)', n):
+                return round(rng.uniform(10.0, 10000.0), 2)
+            if _re.search(r'(status|state|type|flag)', n):
+                return rng.choice(_STATUSES)
+            if _re.search(r'(region|area|zone)', n):
+                return rng.choice(_REGIONS)
+            if _re.search(r'(currency|ccy)', n):
+                return rng.choice(_CURRENCIES)
+            if _re.search(r'(count|num|qty|quantity|segment)', n):
+                return rng.randint(1, 999)
+            if _re.search(r'(is_|has_|active|enabled)', n):
+                return rng.randint(0, 1)
+            return f"VAL_{rng.randint(1000, 9999)}"
+
+        records = [
+            {col: (fixed if fixed is not None else _fake(col, i)) for col, fixed in col_specs}
+            for i in range(row_count)
+        ]
+        df = pd.DataFrame(records)
+    else:
+        raise ValueError(f"Unsupported DataWarehouse datasource: {datasource!r}")
+
+    if uppercase_columns:
+        df.columns = [c.upper() for c in df.columns]  # type: ignore[assignment]
+    return df.to_dict(orient="records")
 
 
 def _read_file_sync(
@@ -359,7 +601,7 @@ def _chunk_records(records: list[dict], chunk_size: int) -> list[list[dict]]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Date list helper
 # ─────────────────────────────────────────────────────────────────────────────
-def _resolve_dates(cfg: ExtractConfig) -> list[str]:
+def _resolve_dates(cfg: ExtractConfig, business_date: Optional[str] = None) -> list[str]:
     dates: list[str] = list(cfg.dates or [])
     if not dates and cfg.date_from and cfg.date_to:
         from datetime import date, timedelta as td
@@ -369,7 +611,8 @@ def _resolve_dates(cfg: ExtractConfig) -> list[str]:
             dates.append(d.isoformat())
             d += td(days=1)
     if not dates:
-        dates = [datetime.now(timezone.utc).strftime("%Y-%m-%d")]
+        # Prefer the business_date from execution context; fall back to today
+        dates = [business_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")]
     return dates
 
 
@@ -383,17 +626,18 @@ async def _load_segment(
     seg_index: int,
     load_cfg: LoadConfig,
     log_fn,
+    job_name: str = "PIPELINE",
 ) -> str:
     fmt = load_cfg.target if load_cfg.target in ("parquet", "csv") else "parquet"
     try:
         if fmt == "parquet":
             return await spark_service.save_records_parquet(
-                records, app_id, date_str, seg_index, mode=load_cfg.mode
+                records, app_id, date_str, seg_index, mode=load_cfg.mode, job_name=job_name
             )
-        return await spark_service.save_records_csv(records, app_id, date_str, seg_index)
+        return await spark_service.save_records_csv(records, app_id, date_str, seg_index, job_name=job_name)
     except Exception as spark_err:
-        await log_fn(f"  Spark unavailable ({spark_err}), falling back to CSV", level="WARN")
-        return await spark_service.save_records_csv(records, app_id, date_str, seg_index)
+        await log_fn(f"  Write failed ({spark_err}), falling back to CSV", level="WARN")
+        return await spark_service.save_records_csv(records, app_id, date_str, seg_index, job_name=job_name)
 # ─────────────────────────────────────────────────────────────────────────────
 # Core runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,27 +672,19 @@ async def execute_pipeline(
 
         source = extract_cfg.source_type
 
-        # Validate that non-gRPC sources have an explicit application ID.
-        # Writing to 'default' or other reserved names is never permitted.
+        # Validate app IDs in the unified apps list (no reserved names).
         _RESERVED_APP_IDS: frozenset[str] = frozenset({"default"})
-        if source != "grpc":
-            ids = [s.strip() for s in (extract_cfg.application_ids or []) if s.strip()]
-            if not ids:
-                raise ValueError(
-                    f"{source.upper()} source requires at least one application_id. "
-                    "Set 'application_ids' in the extract config to a meaningful "
-                    "identifier (e.g. the pipeline name or data source key). "
-                    "Writing to 'default' is not permitted."
-                )
-            reserved = [i for i in ids if i.lower() in _RESERVED_APP_IDS]
-            if reserved:
-                raise ValueError(
-                    f"application_ids contains reserved name(s): {reserved}. "
-                    "Choose a meaningful identifier instead."
-                )
+        cfg_app_ids = [str(a.get("id", "")).strip() for a in (extract_cfg.apps or []) if str(a.get("id", "")).strip()]
+        reserved = [i for i in cfg_app_ids if i.lower() in _RESERVED_APP_IDS]
+        if reserved:
+            raise ValueError(
+                f"apps contains reserved id(s): {reserved}. "
+                "Choose a meaningful identifier instead."
+            )
 
-        dates = _resolve_dates(extract_cfg)
+        dates = _resolve_dates(extract_cfg, business_date)
         rows_per_seg = extract_cfg.rows_per_segment
+        job_name = (extract_cfg.job_name or "PIPELINE").strip() or "PIPELINE"
 
         total_extracted = 0
         total_loaded = 0
@@ -456,8 +692,13 @@ async def execute_pipeline(
 
         # ── gRPC: server-side segments, iterate apps × dates ─────────────────
         if source == "grpc":
-            app_ids = extract_cfg.application_ids or ["APP001"]
-            for app_id in app_ids:
+            # Build app list from unified apps config; fallback to pipeline_id
+            grpc_app_list = [
+                (str(a.get("id", "")), str(a.get("name", "")))
+                for a in (extract_cfg.apps or [])
+                if str(a.get("id", "")).strip()
+            ] or [(str(run.pipeline_id), "")]
+            for app_id, app_name in grpc_app_list:
                 for date_str in dates:
                     await log(
                         f"Extracting gRPC app={app_id} date={date_str}",
@@ -486,7 +727,7 @@ async def execute_pipeline(
                             output_path = ""
                             if transformed:
                                 output_path = await _load_segment(
-                                    transformed, app_id, date_str, seg, load_cfg, log
+                                    transformed, app_id, date_str, seg, load_cfg, log, job_name=job_name
                                 )
                             total_loaded += len(transformed)
                             run.records_loaded = total_loaded
@@ -525,10 +766,11 @@ async def execute_pipeline(
                             ))
                         await db.commit()
 
-                    if load_cfg.target == "spark_table" or load_cfg.table_name or load_cfg.namespace_db:
+                    if load_cfg.target == "spark_table":
                         try:
                             tbl = await spark_service.merge_and_register_table(
                                 app_id, date_str,
+                                job_name=job_name,
                                 table_name=load_cfg.table_name,
                                 namespace_db=load_cfg.namespace_db,
                                 mode=load_cfg.mode or "overwrite",
@@ -537,24 +779,22 @@ async def execute_pipeline(
                         except Exception as exc:
                             await log(f"  Spark table skipped: {exc}", level="WARN")
 
-        # ── JDBC / JSON / CSV: read all → chunk by rows_per_segment ──────────
+        # ── JDBC / JSON / CSV / DW: read all → chunk by rows_per_segment ──────────
         else:
-            fallback_app_id = (extract_cfg.application_ids or ["default"])[0]
-            # For JDBC, iterate over jdbc_application_ids (if set) so each
-            # gets its own $app_id substitution; otherwise run once.
-            jdbc_app_ids: list[Optional[str]] = (
-                extract_cfg.jdbc_application_ids
-                if source == "jdbc" and extract_cfg.jdbc_application_ids
-                else [None]
-            )
+            # Build app list from unified apps config; fallback to pipeline_id
+            fallback_app_id = str(run.pipeline_id)
+            app_list: list[tuple[Optional[str], Optional[str]]] = [
+                (str(a.get("id", "")), str(a.get("name", "")))
+                for a in (extract_cfg.apps or [])
+                if str(a.get("id", "")).strip()
+            ] or [(fallback_app_id, "")]
 
-            for jdbc_app_id in jdbc_app_ids:
-                app_id = jdbc_app_id or fallback_app_id
+            for app_id, app_name in app_list:
 
                 for date_str in dates:
                     await log(
                         f"Extracting {source.upper()} date={date_str}"
-                        + (f" app={app_id}" if jdbc_app_id else ""),
+                        + (f" app={app_name or app_id}" if app_id or app_name else ""),
                         step="extract",
                         extra={"date": date_str, "source": source},
                     )
@@ -562,10 +802,18 @@ async def execute_pipeline(
                     if source == "jdbc":
                         all_records = await _extract_jdbc(
                             extract_cfg, date_str, log, db,
-                            business_date=business_date, app_id=jdbc_app_id,
+                            business_date=business_date, app_id=app_id,
+                        )
+                        _dw_segment_delay = 0.0
+                    elif source == "datawarehouse":
+                        all_records, _dw_segment_delay = await _extract_datawarehouse(
+                            extract_cfg, date_str, log, db,
+                            business_date=business_date, app_id=app_id, app_name=app_name,
+                            rows_per_segment=rows_per_seg,
                         )
                     else:
                         all_records = await _extract_file(extract_cfg, log)
+                        _dw_segment_delay = 0.0
 
                     total_extracted += len(all_records)
                     run.records_extracted = total_extracted
@@ -584,6 +832,7 @@ async def execute_pipeline(
                         await log("  No records — skipping load", level="WARN", step="load")
                         continue
 
+                    _seg_delay = _dw_segment_delay if source == "datawarehouse" else 0.0
                     for seg_idx, chunk in enumerate(chunks):
                         job = ExtractJob(
                             run_id=run_id,
@@ -595,14 +844,20 @@ async def execute_pipeline(
                             started_at=datetime.now(timezone.utc),
                         )
                         db.add(job)
-                        await db.flush()
+                        await db.commit()  # visible as RUNNING immediately
+                        if _seg_delay:
+                            await log(
+                                f"  Processing segment {seg_idx + 1}/{n_segs}…",
+                                step="load",
+                            )
+                            await asyncio.sleep(_seg_delay)
                         try:
                             transformed = _apply_transforms(chunk, transform_cfg)
                             run.records_transformed = (run.records_transformed or 0) + len(transformed)
                             output_path = ""
                             if transformed:
                                 output_path = await _load_segment(
-                                    transformed, app_id, date_str, seg_idx, load_cfg, log
+                                    transformed, app_id, date_str, seg_idx, load_cfg, log, job_name=job_name
                                 )
                             total_loaded += len(transformed)
                             run.records_loaded = total_loaded
@@ -639,10 +894,11 @@ async def execute_pipeline(
                             ))
                         await db.commit()
 
-                    if load_cfg.target == "spark_table" or load_cfg.table_name or load_cfg.namespace_db:
+                    if load_cfg.target == "spark_table":
                         try:
                             tbl = await spark_service.merge_and_register_table(
                                 app_id, date_str,
+                                job_name=job_name,
                                 table_name=load_cfg.table_name,
                                 namespace_db=load_cfg.namespace_db,
                                 mode=load_cfg.mode or "overwrite",

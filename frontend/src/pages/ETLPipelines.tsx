@@ -4,32 +4,33 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions, TextField, MenuItem,
   Grid, Tooltip, alpha, useTheme, Accordion, AccordionSummary, AccordionDetails,
   FormControlLabel, Switch, Alert, CircularProgress, InputAdornment,
-  Paper, Select, FormControl, InputLabel,
+  Paper, Select, FormControl, InputLabel, Popover,
 } from '@mui/material'
 import {
   Add, PlayArrow, Edit, Delete, ExpandMore, Schedule, ChevronRight,
-  Storage, Description, TableChart, Code, CalendarToday, Tag, OpenInNew,
+  Storage, Code, CalendarToday, Tag, OpenInNew,
+  AccountTree, NoteAlt, Hub,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { useSnackbar } from 'notistack'
-import { pipelinesApi, sqlFilesApi, Pipeline, ExtractConfig, SourceType, ExecutionContext, RunTrigger } from '../api/client'
+import { pipelinesApi, sqlFilesApi, connectionsApi, Pipeline, ExtractConfig, SourceType, ExecutionContext, RunTrigger } from '../api/client'
 import StatusChip from '../components/StatusChip'
 import DateField from '../components/DateField'
 import ExecutionContextBar from '../components/ExecutionContextBar'
+import ExtractConfigWizard from '../components/ExtractConfigWizard'
 import { formatDistanceToNow } from 'date-fns'
 import { parseApiDate } from '../utils/dates'
 
 const SOURCE_ICONS: Record<SourceType, React.ReactNode> = {
   grpc: <Code fontSize="small" />,
   jdbc: <Storage fontSize="small" />,
-  json: <Description fontSize="small" />,
-  csv: <TableChart fontSize="small" />,
+  datawarehouse: <Hub fontSize="small" />,
 }
 
 const defaultExtractConfig = (): ExtractConfig => ({
-  source_type: 'grpc',
-  application_ids: ['APP001'],
+  source_type: 'datawarehouse',
+  apps: [],
   dates: [],
   date_from: '',
   date_to: '',
@@ -40,12 +41,7 @@ const defaultExtractConfig = (): ExtractConfig => ({
   jdbc_sql: '',
   jdbc_table: '',
   jdbc_date_column: '',
-  jdbc_application_ids: [],
-  file_path: '',
-  file_encoding: 'utf-8',
-  csv_delimiter: ',',
-  csv_has_header: true,
-  json_lines: true,
+  dw_connection_id: undefined,
 })
 
 const defaultPipeline = () => ({
@@ -143,27 +139,29 @@ function PipelineCard({ pipeline, onEdit, onDelete, onRun }: {
               <Typography variant="body2" color="text.secondary">extracts_&lt;app_id&gt;</Typography>
             )}
           </Grid>
-          {pipeline.extract_config.source_type === 'grpc' || !pipeline.extract_config.source_type ? (
+          {(pipeline.extract_config.source_type === 'grpc' || !pipeline.extract_config.source_type) && (
             <Grid item xs={12}>
               <Typography variant="caption" color="text.secondary" display="block">Apps</Typography>
               <Typography variant="body2" noWrap>
-                {pipeline.extract_config.application_ids?.slice(0, 3).join(', ')}
-                {(pipeline.extract_config.application_ids?.length ?? 0) > 3 &&
-                  ` +${pipeline.extract_config.application_ids.length - 3}`}
+                {pipeline.extract_config.apps?.slice(0, 3).map((a) => a.name || a.id).join(', ')}
+                {(pipeline.extract_config.apps?.length ?? 0) > 3 &&
+                  ` +${(pipeline.extract_config.apps?.length ?? 0) - 3}`}
               </Typography>
             </Grid>
-          ) : pipeline.extract_config.source_type === 'jdbc' ? (
+          )}
+          {pipeline.extract_config.source_type === 'jdbc' && (
             <Grid item xs={12}>
               <Typography variant="caption" color="text.secondary" display="block">Connection</Typography>
               <Typography variant="body2" noWrap sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.7rem' }}>
                 {pipeline.extract_config.jdbc_url || '—'}
               </Typography>
             </Grid>
-          ) : (
+          )}
+          {pipeline.extract_config.source_type === 'datawarehouse' && (
             <Grid item xs={12}>
-              <Typography variant="caption" color="text.secondary" display="block">File</Typography>
-              <Typography variant="body2" noWrap sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.7rem' }}>
-                {pipeline.extract_config.file_path || '—'}
+              <Typography variant="caption" color="text.secondary" display="block">Connection</Typography>
+              <Typography variant="body2" noWrap>
+                {pipeline.extract_config.dw_connection_id ? `Connection #${pipeline.extract_config.dw_connection_id}` : '—'}
               </Typography>
             </Grid>
           )}
@@ -244,8 +242,10 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
     queryKey: ['sql-files'],
     queryFn: () => sqlFilesApi.list().then((r) => r.data),
   })
-
-  const source = form.extract_config.source_type ?? 'grpc'
+  const { data: connections = [] } = useQuery({
+    queryKey: ['connections'],
+    queryFn: () => connectionsApi.list().then((r) => r.data),
+  })
 
   const setExtract = (key: string, val: unknown) =>
     setForm((f) => ({ ...f, extract_config: { ...f.extract_config, [key]: val } }))
@@ -256,17 +256,16 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle>{initial ? 'Edit Pipeline' : 'New ETL Pipeline'}</DialogTitle>
       <DialogContent dividers>
-        <Grid container spacing={2}>
-          <Grid item xs={12} sm={8}>
-            <TextField label="Name" value={form.name} fullWidth size="small"
-              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-          </Grid>
-          <Grid item xs={12} sm={4}>
-            <TextField label="Description" value={form.description} fullWidth size="small"
-              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} />
-          </Grid>
-          {initial && (
-            <Grid item xs={12} sm={4}>
+        <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
+          <Grid container spacing={1.5} alignItems="center">
+            <Grid item>
+              <AccountTree sx={{ fontSize: 20, color: 'primary.main', display: 'block' }} />
+            </Grid>
+            <Grid item xs>
+              <TextField label="Name" value={form.name} fullWidth size="small"
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
+            </Grid>
+            <Grid item xs={3}>
               <TextField select label="Status" value={form.status} fullWidth size="small"
                 onChange={(e) => setForm((f) => ({ ...f, status: e.target.value as typeof f.status }))}>
                 <MenuItem value="active">Active</MenuItem>
@@ -274,219 +273,24 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
                 <MenuItem value="draft">Draft</MenuItem>
               </TextField>
             </Grid>
-          )}
+          </Grid>
+        </Paper>
+
+        <Grid container spacing={2}>
 
           {/* ── Extract ── */}
           <Grid item xs={12}>
             <Accordion defaultExpanded>
               <AccordionSummary expandIcon={<ExpandMore />}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <Typography variant="subtitle2" fontWeight={600}>Extract Configuration</Typography>
-                  <Chip
-                    label={source.toUpperCase()}
-                    size="small"
-                    icon={<>{SOURCE_ICONS[source as SourceType]}</>}
-                    color="primary"
-                    variant="outlined"
-                  />
-                </Box>
+                <Typography variant="subtitle2" fontWeight={600}>Extract Configuration</Typography>
               </AccordionSummary>
-              <AccordionDetails>
-                <Grid container spacing={2}>
-
-                  {/* Source type */}
-                  <Grid item xs={12} sm={6}>
-                    <TextField select label="Source Type" value={source} fullWidth size="small"
-                      onChange={(e) => setExtract('source_type', e.target.value)}>
-                      <MenuItem value="grpc">gRPC (Data Extract Service)</MenuItem>
-                      <MenuItem value="jdbc">JDBC (SQL Database)</MenuItem>
-                      <MenuItem value="json">JSON File</MenuItem>
-                      <MenuItem value="csv">CSV File</MenuItem>
-                    </TextField>
-                  </Grid>
-
-                  {/* Output format */}
-                  <Grid item xs={12} sm={6}>
-                    <TextField select label="Output Format" value={form.extract_config.output_format} fullWidth size="small"
-                      onChange={(e) => setExtract('output_format', e.target.value)}>
-                      <MenuItem value="parquet">Parquet</MenuItem>
-                      <MenuItem value="csv">CSV</MenuItem>
-                    </TextField>
-                  </Grid>
-
-                  {/* ── gRPC params ── */}
-                  {source === 'grpc' && (
-                    <>
-                      <Grid item xs={12}>
-                        <TextField
-                          label="Application IDs (comma-separated)"
-                          value={form.extract_config.application_ids?.join(', ') ?? ''}
-                          fullWidth size="small"
-                          helperText="e.g. APP001, APP002, APP003"
-                          onChange={(e) => setExtract('application_ids',
-                            e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-                        />
-                      </Grid>
-                      <Grid item xs={12} sm={6}>
-                        <TextField label="Batch Page Size" type="number"
-                          value={form.extract_config.page_size} fullWidth size="small"
-                          helperText="Records per gRPC request"
-                          InputProps={{ inputProps: { min: 100, max: 100000 } }}
-                          onChange={(e) => setExtract('page_size', parseInt(e.target.value))} />
-                      </Grid>
-                    </>
-                  )}
-
-                  {/* ── JDBC params ── */}
-                  {source === 'jdbc' && (
-                    <>
-                      <Grid item xs={12}>
-                        <TextField
-                          label="Connection URL"
-                          value={form.extract_config.jdbc_url ?? ''} fullWidth size="small"
-                          placeholder="sqlite:///data/sources/sample.db  or  postgresql://user:pass@host/db"
-                          helperText="SQLAlchemy connection string"
-                          onChange={(e) => setExtract('jdbc_url', e.target.value)} />
-                      </Grid>
-                      <Grid item xs={12}>
-                        <TextField select label="SQL File"
-                          value={form.extract_config.jdbc_sql_file_id ?? ''}
-                          fullWidth size="small"
-                          helperText="Choose a saved SQL file, or enter SQL below"
-                          onChange={(e) => setExtract('jdbc_sql_file_id', e.target.value ? parseInt(String(e.target.value)) : undefined)}>
-                          <MenuItem value="">— None (use inline SQL or table name) —</MenuItem>
-                          {sqlFiles.map((f) => (
-                            <MenuItem key={f.id} value={f.id}>{f.name}</MenuItem>
-                          ))}
-                        </TextField>
-                      </Grid>
-                      {!form.extract_config.jdbc_sql_file_id && (
-                        <Grid item xs={12}>
-                          <TextField
-                            label="Inline SQL"
-                            value={form.extract_config.jdbc_sql ?? ''} fullWidth size="small"
-                            multiline rows={4}
-                            placeholder="SELECT * FROM transactions WHERE status = 'active'"
-                            helperText="Leave blank to use Table Name below"
-                            inputProps={{ style: { fontFamily: '"JetBrains Mono", monospace', fontSize: '0.8rem' } }}
-                            onChange={(e) => setExtract('jdbc_sql', e.target.value)} />
-                        </Grid>
-                      )}
-                      {!form.extract_config.jdbc_sql_file_id && !form.extract_config.jdbc_sql && (
-                        <Grid item xs={12} sm={6}>
-                          <TextField label="Table Name" value={form.extract_config.jdbc_table ?? ''}
-                            fullWidth size="small" placeholder="transactions"
-                            helperText="Simple table name (no SQL needed)"
-                            onChange={(e) => setExtract('jdbc_table', e.target.value)} />
-                        </Grid>
-                      )}
-                      <Grid item xs={12} sm={6}>
-                        <TextField label="Date Column (optional)"
-                          value={form.extract_config.jdbc_date_column ?? ''} fullWidth size="small"
-                          placeholder="business_date"
-                          helperText="Column used to filter by business date"
-                          onChange={(e) => setExtract('jdbc_date_column', e.target.value)} />
-                      </Grid>
-                      <Grid item xs={12}>
-                        <TextField
-                          label="Application IDs (optional, comma-separated)"
-                          value={form.extract_config.jdbc_application_ids?.join(', ') ?? ''}
-                          fullWidth size="small"
-                          placeholder="APP001, APP002"
-                          helperText="Each ID is injected as $app_id — query runs once per ID"
-                          onChange={(e) => setExtract('jdbc_application_ids',
-                            e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-                        />
-                      </Grid>
-                    </>
-                  )}
-
-                  {/* ── File (JSON/CSV) params ── */}
-                  {(source === 'json' || source === 'csv') && (
-                    <>
-                      <Grid item xs={12}>
-                        <TextField
-                          label="File Path"
-                          value={form.extract_config.file_path ?? ''} fullWidth size="small"
-                          placeholder="transactions.csv"
-                          helperText="Relative to data/sources/ directory"
-                          InputProps={{
-                            startAdornment: (
-                              <InputAdornment position="start">
-                                <Typography variant="caption" color="text.secondary" noWrap>
-                                  data/sources/
-                                </Typography>
-                              </InputAdornment>
-                            ),
-                          }}
-                          onChange={(e) => setExtract('file_path', e.target.value)} />
-                      </Grid>
-                      {source === 'csv' && (
-                        <>
-                          <Grid item xs={6} sm={4}>
-                            <TextField label="Delimiter" value={form.extract_config.csv_delimiter ?? ','}
-                              fullWidth size="small"
-                              onChange={(e) => setExtract('csv_delimiter', e.target.value)} />
-                          </Grid>
-                          <Grid item xs={6} sm={4}>
-                            <FormControlLabel
-                              control={
-                                <Switch
-                                  checked={form.extract_config.csv_has_header ?? true}
-                                  onChange={(e) => setExtract('csv_has_header', e.target.checked)}
-                                />
-                              }
-                              label="Header row"
-                            />
-                          </Grid>
-                        </>
-                      )}
-                      {source === 'json' && (
-                        <Grid item xs={6}>
-                          <FormControlLabel
-                            control={
-                              <Switch
-                                checked={form.extract_config.json_lines ?? true}
-                                onChange={(e) => setExtract('json_lines', e.target.checked)}
-                              />
-                            }
-                            label="JSONL (one object per line)"
-                          />
-                        </Grid>
-                      )}
-                    </>
-                  )}
-
-                  {/* ── Date range (all sources) ── */}
-                  <Grid item xs={12}>
-                    <Divider><Typography variant="caption">Business Date Range</Typography></Divider>
-                  </Grid>
-                  <Grid item xs={12} sm={6}>
-                    <DateField label="Date From"
-                      value={form.extract_config.date_from ?? ''} fullWidth
-                      onChange={(v) => setExtract('date_from', v)} />
-                  </Grid>
-                  <Grid item xs={12} sm={6}>
-                    <DateField label="Date To"
-                      value={form.extract_config.date_to ?? ''} fullWidth
-                      onChange={(v) => setExtract('date_to', v)} />
-                  </Grid>
-
-                  {/* ── Segmentation (all sources) ── */}
-                  <Grid item xs={12}>
-                    <Divider><Typography variant="caption">Segmentation</Typography></Divider>
-                  </Grid>
-                  <Grid item xs={12} sm={6}>
-                    <TextField
-                      label="Rows per Segment"
-                      type="number"
-                      value={form.extract_config.rows_per_segment ?? 100000}
-                      fullWidth size="small"
-                      helperText="Max rows per output file (e.g. 100,000 → 24 files from 2.4M rows)"
-                      InputProps={{ inputProps: { min: 1000 } }}
-                      onChange={(e) => setExtract('rows_per_segment', parseInt(e.target.value))} />
-                  </Grid>
-                </Grid>
+              <AccordionDetails sx={{ pt: 1 }}>
+                <ExtractConfigWizard
+                  config={form.extract_config}
+                  onChange={(key, val) => setExtract(key as string, val)}
+                  sqlFiles={sqlFiles}
+                  connections={connections}
+                />
               </AccordionDetails>
             </Accordion>
           </Grid>
@@ -551,7 +355,6 @@ function PipelineDialog({ open, initial, onClose, onSave }: {
 }
 
 function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; open: boolean; onClose: () => void }) {
-  const [appIds, setAppIds] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [dateOverride, setDateOverride] = useState('')
@@ -582,7 +385,6 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
   const handleRun = () => {
     const trigger: RunTrigger = {}
     const cfg: Partial<ExtractConfig> = {}
-    if (appIds.trim()) cfg.application_ids = appIds.split(',').map((s) => s.trim()).filter(Boolean)
     if (dateFrom) cfg.date_from = dateFrom
     if (dateTo) cfg.date_to = dateTo
     if (Object.keys(cfg).length) trigger.extract_config = cfg
@@ -625,11 +427,6 @@ function RunDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; ope
           Override extract config for this run, or leave blank to use pipeline defaults.
         </Alert>
         <Grid container spacing={2}>
-          <Grid item xs={12}>
-            <TextField label="Application IDs (override)" value={appIds} fullWidth size="small"
-              placeholder="APP001, APP002"
-              onChange={(e) => setAppIds(e.target.value)} />
-          </Grid>
           <Grid item xs={6}>
             <DateField label="Date From (override)" value={dateFrom} fullWidth onChange={setDateFrom} />
           </Grid>

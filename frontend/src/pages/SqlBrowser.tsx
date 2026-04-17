@@ -535,8 +535,13 @@ export default function SqlBrowser() {
   const [previewVersion, setPreviewVersion] = useState<SqlFileVersion | null>(null)
 
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [editTarget, setEditTarget] = useState<SqlFile | null>(null)
   const [snapshotOpen, setSnapshotOpen] = useState(false)
+
+  // Inline edit state
+  const [editMode, setEditMode] = useState(false)
+  const [sqlDraft, setSqlDraft] = useState('')
+  const [nameDraft, setNameDraft] = useState('')
+  const [descDraft, setDescDraft] = useState('')
 
   // Fetch all files (both types)
   const { data: allFiles = [], isLoading } = useQuery({
@@ -557,7 +562,34 @@ export default function SqlBrowser() {
   const handleSelect = (id: number) => {
     setSelectedId(id)
     setPreviewVersion(null)
+    setEditMode(false)
   }
+
+  const startEdit = () => {
+    if (!selected) return
+    setSqlDraft(selected.content)
+    setNameDraft(selected.name)
+    setDescDraft(selected.description ?? '')
+    setEditMode(true)
+  }
+
+  const cancelEdit = () => setEditMode(false)
+
+  const saveMut = useMutation({
+    mutationFn: () =>
+      sqlFilesApi.update(selected!.id, {
+        name: nameDraft.trim(),
+        description: descDraft.trim(),
+        file_type: selected!.file_type,
+        content: sqlDraft,
+      }).then(r => r.data),
+    onSuccess: (f) => {
+      qc.invalidateQueries({ queryKey: ['sql-files'] })
+      enqueueSnackbar(`Saved "${f.name}"`, { variant: 'success' })
+      setEditMode(false)
+    },
+    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
+  })
 
   const deleteMut = useMutation({
     mutationFn: (id: number) => sqlFilesApi.delete(id),
@@ -618,7 +650,7 @@ export default function SqlBrowser() {
             size="small"
             variant="outlined"
             startIcon={<AddIcon />}
-            onClick={() => { setEditTarget(null); setDialogOpen(true) }}
+            onClick={() => setDialogOpen(true)}
           >
             New {activeType === 'extract' ? 'Extract' : 'Transform'} SQL
           </Button>
@@ -706,17 +738,30 @@ export default function SqlBrowser() {
                 flexShrink: 0,
               }}
             >
-              <SqlIcon sx={{ color: 'text.secondary', fontSize: 18 }} />
-              <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                {selected.name}
-              </Typography>
+              <SqlIcon sx={{ color: editMode ? 'primary.main' : 'text.secondary', fontSize: 18 }} />
+
+              {editMode ? (
+                <TextField
+                  value={nameDraft}
+                  onChange={e => setNameDraft(e.target.value)}
+                  size="small"
+                  variant="standard"
+                  inputProps={{ style: { fontWeight: 600, fontSize: '0.875rem' } }}
+                  sx={{ width: 220 }}
+                />
+              ) : (
+                <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                  {selected.name}
+                </Typography>
+              )}
+
               <Chip
                 label={selected.file_type === 'extract' ? 'Extract' : 'Transform'}
                 size="small"
                 variant="outlined"
                 sx={{ height: 20, fontSize: 10 }}
               />
-              {viewingVersion && (
+              {viewingVersion && !editMode && (
                 <Chip
                   label={`Viewing ${previewVersion!.version}`}
                   size="small"
@@ -725,50 +770,95 @@ export default function SqlBrowser() {
                   onDelete={() => setPreviewVersion(null)}
                 />
               )}
+              {editMode && (
+                <Chip label="Editing" size="small" color="warning" sx={{ height: 20, fontSize: 10 }} />
+              )}
 
               <Box sx={{ flex: 1 }} />
 
-              {/* Actions */}
-              <Tooltip title="Snapshot current content as a new version">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={() => setSnapshotOpen(true)}
-                    disabled={viewingVersion}
-                  >
-                    <SnapshotIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Tooltip title="Edit">
-                <IconButton
-                  size="small"
-                  onClick={() => { setEditTarget(selected); setDialogOpen(true) }}
-                  disabled={viewingVersion}
-                >
-                  <EditIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-              <Tooltip title="Delete">
-                <IconButton
-                  size="small"
-                  color="error"
-                  onClick={() => deleteMut.mutate(selected.id)}
-                  disabled={deleteMut.isPending}
-                >
-                  <DeleteIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
+              {editMode ? (
+                <>
+                  <Tooltip title="Format SQL">
+                    <IconButton size="small" onClick={() => setSqlDraft(formatSql(sqlDraft))} disabled={!sqlDraft.trim()}>
+                      <FormatIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title="Cancel">
+                    <IconButton size="small" onClick={cancelEdit}>
+                      <CloseIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title="Save">
+                    <span>
+                      <IconButton
+                        size="small"
+                        color="primary"
+                        onClick={() => saveMut.mutate()}
+                        disabled={saveMut.isPending || !nameDraft.trim() || !sqlDraft.trim()}
+                      >
+                        {saveMut.isPending ? <CircularProgress size={16} /> : <SaveIcon fontSize="small" />}
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                </>
+              ) : (
+                <>
+                  <Tooltip title="Snapshot current content as a new version">
+                    <span>
+                      <IconButton
+                        size="small"
+                        onClick={() => setSnapshotOpen(true)}
+                        disabled={viewingVersion}
+                      >
+                        <SnapshotIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title="Edit">
+                    <span>
+                      <IconButton
+                        size="small"
+                        onClick={startEdit}
+                        disabled={viewingVersion}
+                      >
+                        <EditIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title="Delete">
+                    <IconButton
+                      size="small"
+                      color="error"
+                      onClick={() => deleteMut.mutate(selected.id)}
+                      disabled={deleteMut.isPending}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </>
+              )}
             </Box>
 
             {/* Description */}
-            {selected.description && (
+            {editMode ? (
+              <Box sx={{ px: 2, py: 0.75, borderBottom: `1px solid ${panelBorder}` }}>
+                <TextField
+                  value={descDraft}
+                  onChange={e => setDescDraft(e.target.value)}
+                  placeholder="Description (optional)"
+                  size="small"
+                  variant="standard"
+                  fullWidth
+                  inputProps={{ style: { fontSize: '0.75rem' } }}
+                />
+              </Box>
+            ) : selected.description ? (
               <Box sx={{ px: 2, py: 0.75, borderBottom: `1px solid ${panelBorder}` }}>
                 <Typography variant="caption" color="text.secondary">
                   {selected.description}
                 </Typography>
               </Box>
-            )}
+            ) : null}
 
             {/* Version banner */}
             {viewingVersion && (
@@ -803,46 +893,72 @@ export default function SqlBrowser() {
               </Paper>
             )}
 
-            {/* SQL viewer */}
-            <Box
-              sx={{
-                flex: 1,
-                overflow: 'auto',
-                background: alpha(theme.palette.background.default, 0.5),
-                m: 2,
-                mt: 1,
-                borderRadius: 1,
-                border: `1px solid ${panelBorder}`,
-              }}
-            >
-              {/* Line numbers + content */}
-              <Box sx={{ display: 'flex', height: '100%' }}>
-                {/* Gutter */}
-                <Box
-                  component="pre"
-                  sx={{
-                    m: 0,
-                    px: 1.5,
-                    py: 2,
-                    fontFamily: 'monospace',
+            {/* SQL area — viewer or editor */}
+            {editMode ? (
+              <TextField
+                value={sqlDraft}
+                onChange={e => setSqlDraft(e.target.value)}
+                multiline
+                fullWidth
+                spellCheck={false}
+                placeholder="Enter SQL..."
+                sx={{
+                  flex: 1,
+                  m: 2,
+                  mt: 1,
+                  '& .MuiInputBase-root': {
+                    height: '100%',
+                    alignItems: 'flex-start',
+                    fontFamily: '"JetBrains Mono", "Fira Code", monospace',
                     fontSize: 13,
                     lineHeight: 1.7,
-                    color: 'text.disabled',
-                    textAlign: 'right',
-                    userSelect: 'none',
-                    borderRight: `1px solid ${panelBorder}`,
-                    minWidth: 40,
-                    background: theme.palette.background.paper,
-                    flexShrink: 0,
-                  }}
-                >
-                  {formatSql(displaySql).split('\n').map((_, i) => (
-                    <div key={i}>{i + 1}</div>
-                  ))}
+                    bgcolor: alpha(theme.palette.background.default, 0.5),
+                    borderRadius: 1,
+                  },
+                  '& .MuiInputBase-input': { height: '100% !important', overflow: 'auto !important' },
+                }}
+              />
+            ) : (
+              <Box
+                sx={{
+                  flex: 1,
+                  overflow: 'auto',
+                  background: alpha(theme.palette.background.default, 0.5),
+                  m: 2,
+                  mt: 1,
+                  borderRadius: 1,
+                  border: `1px solid ${panelBorder}`,
+                }}
+              >
+                {/* Line numbers + content */}
+                <Box sx={{ display: 'flex', height: '100%' }}>
+                  {/* Gutter */}
+                  <Box
+                    component="pre"
+                    sx={{
+                      m: 0,
+                      px: 1.5,
+                      py: 2,
+                      fontFamily: 'monospace',
+                      fontSize: 13,
+                      lineHeight: 1.7,
+                      color: 'text.disabled',
+                      textAlign: 'right',
+                      userSelect: 'none',
+                      borderRight: `1px solid ${panelBorder}`,
+                      minWidth: 40,
+                      background: theme.palette.background.paper,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {formatSql(displaySql).split('\n').map((_, i) => (
+                      <div key={i}>{i + 1}</div>
+                    ))}
+                  </Box>
+                  <SqlViewer sql={displaySql} />
                 </Box>
-                <SqlViewer sql={displaySql} />
               </Box>
-            </Box>
+            )}
 
             {/* Metadata footer */}
             <Box
@@ -921,7 +1037,7 @@ export default function SqlBrowser() {
       {/* Dialogs */}
       <FileDialog
         open={dialogOpen}
-        initial={editTarget}
+        initial={null}
         defaultType={activeType}
         onClose={() => setDialogOpen(false)}
         onSaved={(f) => {

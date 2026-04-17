@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider,
-  Grid, IconButton, InputAdornment, MenuItem,
-  Paper, Tab, Tabs, TextField, Tooltip, Typography, alpha, useTheme,
+  FormControlLabel, Grid, IconButton, InputAdornment, MenuItem,
+  Paper, Switch, Tab, Tabs, TextField, Tooltip, Typography, alpha, useTheme,
 } from '@mui/material'
 import {
   Add, Delete, Edit, Visibility, VisibilityOff, CheckCircle, Cancel,
@@ -161,7 +161,7 @@ function AppearancePanel() {
 }
 
 // ─── Connection form dialog ───────────────────────────────────────────────────
-const CONN_TYPES: ConnectionType[] = ['jdbc', 'grpc', 'rest', 'other']
+const CONN_TYPES: ConnectionType[] = ['jdbc', 'grpc', 'rest', 'other', 'datawarehouse']
 
 const emptyForm = (): ConnectionPayload => ({
   name: '', description: '', conn_type: 'jdbc',
@@ -178,6 +178,7 @@ function ConnectionDialog({
   const [form, setForm] = useState<ConnectionPayload>(emptyForm())
   const [showPass, setShowPass] = useState(false)
   const [passwordChanged, setPasswordChanged] = useState(false)
+  const [dwParams, setDwParams] = useState<{ key: string; value: string }[]>([])
   const { enqueueSnackbar } = useSnackbar()
   const qc = useQueryClient()
 
@@ -197,9 +198,14 @@ function ConnectionDialog({
           extra: initial.extra ?? {},
         })
         setPasswordChanged(false)
+        const p = initial.extra?.params
+        setDwParams(p && typeof p === 'object'
+          ? Object.entries(p as Record<string, string>).map(([key, value]) => ({ key, value: String(value) }))
+          : [])
       } else {
         setForm(emptyForm())
         setPasswordChanged(false)
+        setDwParams([])
       }
     }
   }, [open, initial])
@@ -219,15 +225,21 @@ function ConnectionDialog({
   const isPending = createMut.isPending || updateMut.isPending
 
   const set = (k: keyof ConnectionPayload, v: unknown) => setForm((f) => ({ ...f, [k]: v }))
+  const setExtra = (k: string, v: unknown) => setForm((f) => ({ ...f, extra: { ...f.extra, [k]: v } }))
 
   const handleSave = () => {
     if (!form.name.trim()) return
+    const params = Object.fromEntries(dwParams.filter((p) => p.key.trim()).map((p) => [p.key.trim(), p.value]))
+    const extra = form.conn_type === 'datawarehouse'
+      ? { ...form.extra, ...(Object.keys(params).length ? { params } : {}) }
+      : form.extra
+    const base = { ...form, extra }
     if (initial) {
-      const payload: Partial<ConnectionPayload> = { ...form }
+      const payload: Partial<ConnectionPayload> = base
       if (!passwordChanged) delete payload.password
       updateMut.mutate(payload)
     } else {
-      createMut.mutate(form)
+      createMut.mutate(base)
     }
   }
 
@@ -251,24 +263,68 @@ function ConnectionDialog({
               onChange={(e) => set('description', e.target.value)} />
           </Grid>
           <Grid item xs={12}><Divider><Typography variant="caption">Connection Details</Typography></Divider></Grid>
-          <Grid item xs={12} sm={8}>
-            <TextField label="Host / URL" value={form.host ?? ''} fullWidth size="small"
-              placeholder="hostname or IP address"
-              onChange={(e) => set('host', e.target.value)} />
-          </Grid>
-          <Grid item xs={12} sm={4}>
-            <TextField label="Port" type="number" value={form.port ?? ''} fullWidth size="small"
-              onChange={(e) => set('port', e.target.value ? parseInt(e.target.value) : undefined)} />
-          </Grid>
-          <Grid item xs={12} sm={6}>
-            <TextField label="Database / Schema" value={form.database ?? ''} fullWidth size="small"
-              onChange={(e) => set('database', e.target.value)} />
-          </Grid>
-          <Grid item xs={12} sm={6}>
-            <TextField label="Username" value={form.username ?? ''} fullWidth size="small"
-              autoComplete="off"
-              onChange={(e) => set('username', e.target.value)} />
-          </Grid>
+
+          {form.conn_type !== 'datawarehouse' && <>
+            <Grid item xs={12} sm={8}>
+              <TextField label="Host / URL" value={form.host ?? ''} fullWidth size="small"
+                placeholder="hostname or IP address"
+                onChange={(e) => set('host', e.target.value)} />
+            </Grid>
+            <Grid item xs={12} sm={4}>
+              <TextField label="Port" type="number" value={form.port ?? ''} fullWidth size="small"
+                onChange={(e) => set('port', e.target.value ? parseInt(e.target.value) : undefined)} />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField label="Database / Schema" value={form.database ?? ''} fullWidth size="small"
+                onChange={(e) => set('database', e.target.value)} />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField label="Username" value={form.username ?? ''} fullWidth size="small"
+                autoComplete="off"
+                onChange={(e) => set('username', e.target.value)} />
+            </Grid>
+          </>}
+
+          {form.conn_type === 'datawarehouse' && <>
+            <Grid item xs={12} sm={6}>
+              <TextField label="Username" value={form.username ?? ''} fullWidth size="small"
+                autoComplete="off"
+                onChange={(e) => set('username', e.target.value)} />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField select label="Environment" value={(form.extra?.environment as string) ?? ''} fullWidth size="small"
+                onChange={(e) => setExtra('environment', e.target.value)}>
+                <MenuItem value="PROD">PROD</MenuItem>
+                <MenuItem value="UAT">UAT</MenuItem>
+              </TextField>
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField select label="Datasource" value={(form.extra?.datasource as string) ?? ''} fullWidth size="small"
+                onChange={(e) => setExtra('datasource', e.target.value)}>
+                <MenuItem value="IMPALA">IMPALA</MenuItem>
+                <MenuItem value="SPARK">SPARK</MenuItem>
+                <MenuItem value="DUMMY">DUMMY (test / generate)</MenuItem>
+              </TextField>
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField label="Timeout (ms)" type="number" value={(form.extra?.timeout as number) ?? ''} fullWidth size="small"
+                placeholder="e.g. 30000"
+                onChange={(e) => setExtra('timeout', e.target.value ? parseInt(e.target.value) : undefined)} />
+            </Grid>
+            <Grid item xs={12} sm={6} sx={{ display: 'flex', alignItems: 'center' }}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={Boolean(form.extra?.uppercase_columns)}
+                    onChange={(e) => setExtra('uppercase_columns', e.target.checked)}
+                    size="small"
+                  />
+                }
+                label={<Typography variant="body2">Uppercase columns</Typography>}
+              />
+            </Grid>
+          </>}
+
           <Grid item xs={12}>
             <TextField
               label={initial ? 'Password (leave blank to keep existing)' : 'Password'}
@@ -296,6 +352,37 @@ function ConnectionDialog({
               </Alert>
             </Grid>
           )}
+
+          {form.conn_type === 'datawarehouse' && <>
+            <Grid item xs={12}>
+              <Divider><Typography variant="caption">Additional Parameters</Typography></Divider>
+            </Grid>
+            {dwParams.map((p, i) => (
+              <Grid item xs={12} key={i}>
+                <Grid container spacing={1} alignItems="center">
+                  <Grid item xs={5}>
+                    <TextField label="Key" value={p.key} fullWidth size="small"
+                      onChange={(e) => setDwParams((ps) => ps.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} />
+                  </Grid>
+                  <Grid item xs={6}>
+                    <TextField label="Value" value={p.value} fullWidth size="small"
+                      onChange={(e) => setDwParams((ps) => ps.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
+                  </Grid>
+                  <Grid item xs={1}>
+                    <IconButton size="small" onClick={() => setDwParams((ps) => ps.filter((_, j) => j !== i))}>
+                      <Delete fontSize="small" />
+                    </IconButton>
+                  </Grid>
+                </Grid>
+              </Grid>
+            ))}
+            <Grid item xs={12}>
+              <Button size="small" startIcon={<Add />}
+                onClick={() => setDwParams((ps) => [...ps, { key: '', value: '' }])}>
+                Add Parameter
+              </Button>
+            </Grid>
+          </>}
         </Grid>
       </DialogContent>
       <DialogActions>
@@ -348,10 +435,10 @@ function ConnectionsPanel() {
   }
 
   const connTypeColor = (t: ConnectionType) => {
-    const map: Record<ConnectionType, 'primary' | 'secondary' | 'warning' | 'default'> = {
-      jdbc: 'primary', grpc: 'secondary', rest: 'warning', other: 'default',
+    const map: Record<ConnectionType, 'primary' | 'secondary' | 'warning' | 'default' | 'info'> = {
+      jdbc: 'primary', grpc: 'secondary', rest: 'warning', other: 'default', datawarehouse: 'info',
     }
-    return map[t]
+    return map[t] ?? 'default'
   }
 
   return (
@@ -414,9 +501,16 @@ function ConnectionsPanel() {
                         <Typography variant="caption" color="text.secondary" noWrap>{conn.description}</Typography>
                       )}
                       <Box sx={{ display: 'flex', gap: 2, mt: 0.5, flexWrap: 'wrap' }}>
-                        {conn.host && <Typography variant="caption" color="text.secondary" fontFamily="monospace">{conn.host}{conn.port ? `:${conn.port}` : ''}</Typography>}
-                        {conn.database && <Typography variant="caption" color="text.secondary">db: <strong>{conn.database}</strong></Typography>}
-                        {conn.username && <Typography variant="caption" color="text.secondary">user: <strong>{conn.username}</strong></Typography>}
+                        {conn.conn_type === 'datawarehouse' ? <>
+                          {conn.extra?.environment && <Typography variant="caption" color="text.secondary">env: <strong>{String(conn.extra.environment)}</strong></Typography>}
+                          {conn.extra?.datasource && <Typography variant="caption" color="text.secondary">source: <strong>{String(conn.extra.datasource)}</strong></Typography>}
+                          {conn.extra?.timeout && <Typography variant="caption" color="text.secondary">timeout: <strong>{String(conn.extra.timeout)}ms</strong></Typography>}
+                          {conn.username && <Typography variant="caption" color="text.secondary">user: <strong>{conn.username}</strong></Typography>}
+                        </> : <>
+                          {conn.host && <Typography variant="caption" color="text.secondary" fontFamily="monospace">{conn.host}{conn.port ? `:${conn.port}` : ''}</Typography>}
+                          {conn.database && <Typography variant="caption" color="text.secondary">db: <strong>{conn.database}</strong></Typography>}
+                          {conn.username && <Typography variant="caption" color="text.secondary">user: <strong>{conn.username}</strong></Typography>}
+                        </>}
                       </Box>
                     </Box>
                     {testResult && (

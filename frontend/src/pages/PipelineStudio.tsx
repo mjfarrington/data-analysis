@@ -8,33 +8,35 @@ import {
   List, ListItemButton, ListItemIcon, ListItemText, ListSubheader,
   ToggleButton, ToggleButtonGroup,
   Table, TableHead, TableBody, TableRow, TableCell,
-  Badge,
+  Badge, Popover,
 } from '@mui/material'
 import {
   Add, PlayArrow, Save, Delete, ExpandMore, Storage, Code, NoteAlt,
-  Description, TableChart, Tag, CalendarToday, Edit, Refresh,
+  TableChart, Tag, CalendarToday, Edit, Refresh,
   AccountTree, Transform, KeyboardArrowUp, KeyboardArrowDown, DragIndicator,
   ArrowForward, AddCircleOutline, DeleteOutline, FolderOpen, Visibility,
   Close, Schedule, OpenInNew, Search, ContentCopy, Label, FilterList,
   ArrowRightAlt, CheckCircle, Error as ErrorIcon, HourglassEmpty,
-  FiberManualRecord,
+  FiberManualRecord, Dataset, CloudUpload, DataObject,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSnackbar } from 'notistack'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { formatDistanceToNow, format } from 'date-fns'
 import { parseApiDate } from '../utils/dates'
 import {
-  pipelinesApi, transformJobsApi, chainsApi, sqlFilesApi, notebookFilesApi, dataApi,
+  pipelinesApi, transformJobsApi, chainsApi, sqlFilesApi, notebookFilesApi, dataApi, connectionsApi,
   Pipeline, ExtractConfig, SourceType, ExecutionContext, RunTrigger,
   TransformJob, TransformType, WriteMode,
   ETLChain, ChainStep,
   NotebookFile, NotebookCell,
   SqlPreviewRequest, SqlPreviewResponse,
+  Connection, LoadSparkRequest, LoadSparkResult, ParquetDatesResult,
 } from '../api/client'
 import StatusChip from '../components/StatusChip'
 import DateField from '../components/DateField'
 import ExecutionContextBar from '../components/ExecutionContextBar'
+import ExtractConfigWizard from '../components/ExtractConfigWizard'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -43,13 +45,12 @@ const MONO = '"JetBrains Mono", "Fira Code", monospace'
 const SOURCE_ICONS: Record<SourceType, React.ReactNode> = {
   grpc: <Code fontSize="small" />,
   jdbc: <Storage fontSize="small" />,
-  json: <Description fontSize="small" />,
-  csv: <TableChart fontSize="small" />,
+  datawarehouse: <Dataset fontSize="small" />,
 }
 
 const defaultExtractConfig = (): ExtractConfig => ({
-  source_type: 'grpc',
-  application_ids: ['APP001'],
+  source_type: 'datawarehouse',
+  apps: [],
   dates: [],
   date_from: '',
   date_to: '',
@@ -57,6 +58,7 @@ const defaultExtractConfig = (): ExtractConfig => ({
   page_size: 10000,
   output_format: 'parquet',
   jdbc_url: '',
+  jdbc_connection_id: undefined as number | undefined,
   jdbc_sql: '',
   jdbc_table: '',
   jdbc_date_column: '',
@@ -64,18 +66,13 @@ const defaultExtractConfig = (): ExtractConfig => ({
   jdbc_date_range_mode: 'single',
   jdbc_date_range_from: '',
   jdbc_date_range_to: '',
-  jdbc_application_ids: [] as string[],
-  file_path: '',
-  file_encoding: 'utf-8',
-  csv_delimiter: ',',
-  csv_has_header: true,
-  json_lines: true,
 })
 
 const defaultPipeline = () => ({
   name: '',
   description: '',
   tags: [] as string[],
+  status: 'active' as 'active' | 'inactive' | 'draft',
   extract_config: defaultExtractConfig(),
   transform_config: {
     filters: {} as Record<string, string>,
@@ -85,7 +82,7 @@ const defaultPipeline = () => ({
     dedup_keys: ['id'] as string[],
   },
   load_config: {
-    target: 'spark_table' as 'parquet' | 'csv' | 'spark_table',
+    target: 'parquet' as 'parquet' | 'csv' | 'spark_table',
     table_name: undefined as string | undefined,
     partition_by: ['date', 'application_id'] as string[],
     mode: 'overwrite' as 'overwrite' | 'append',
@@ -103,6 +100,7 @@ function pipelineToForm(p: Pipeline): PipelineFormData {
     name: p.name,
     description: p.description || '',
     tags: p.tags ?? [],
+    status: (p.status ?? 'active') as 'active' | 'inactive' | 'draft',
     extract_config: { ...defaultExtractConfig(), ...p.extract_config, date_from: p.extract_config.date_from ?? '', date_to: p.extract_config.date_to ?? '' },
     transform_config: {
       filters: p.transform_config?.filters ?? {},
@@ -112,7 +110,7 @@ function pipelineToForm(p: Pipeline): PipelineFormData {
       dedup_keys: p.transform_config?.dedup_keys ?? ['id'],
     },
     load_config: {
-      target: (p.load_config?.target ?? 'spark_table') as 'parquet' | 'csv' | 'spark_table',
+      target: (p.load_config?.target ?? 'parquet') as 'parquet' | 'csv' | 'spark_table',
       table_name: p.load_config?.table_name,
       partition_by: p.load_config?.partition_by ?? ['date', 'application_id'],
       mode: (p.load_config?.mode ?? 'overwrite') as 'overwrite' | 'append',
@@ -213,7 +211,7 @@ function SqlEditor({ value, onChange }: { value: string; onChange: (v: string) =
         fullWidth multiline minRows={12} maxRows={40} value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={'SELECT *\nFROM source\nWHERE ...'}
-        InputProps={{ sx: { fontFamily: MONO, fontSize: '0.82rem', flex: 1, alignItems: 'flex-start' } }}
+        InputProps={{ sx: { fontFamily: MONO, fontSize: '0.8rem', flex: 1, alignItems: 'flex-start' } }}
         sx={{ flex: 1 }}
       />
     </Box>
@@ -223,7 +221,6 @@ function SqlEditor({ value, onChange }: { value: string; onChange: (v: string) =
 // ─── Run Pipeline Dialog ──────────────────────────────────────────────────────
 
 function RunPipelineDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; open: boolean; onClose: () => void }) {
-  const [appIds, setAppIds] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [dateOverride, setDateOverride] = useState('')
@@ -239,6 +236,11 @@ function RunPipelineDialog({ pipeline, open, onClose }: { pipeline: Pipeline | n
   const resolvedDate = dateOverride || ctx?.business_date || ''
   const nsPrefix = ctx?.namespace_prefix || 'data_'
   const resolvedDb = resolvedDate ? `${nsPrefix}${resolvedDate.replace(/-/g, '')}` : null
+  const jobName = pipeline?.extract_config?.job_name
+    || pipeline?.name?.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '') || ''
+  const outputPath = resolvedDate && jobName
+    ? `${resolvedDate}/${jobName}/<app_id>/segment_NNNN.${pipeline?.load_config?.target === 'csv' ? 'csv' : 'parquet'}`
+    : null
 
   const mutation = useMutation({
     mutationFn: (trigger: RunTrigger) => pipelinesApi.run(pipeline!.id, trigger).then((r) => r.data),
@@ -254,7 +256,6 @@ function RunPipelineDialog({ pipeline, open, onClose }: { pipeline: Pipeline | n
   const handleRun = () => {
     const trigger: RunTrigger = {}
     const cfg: Partial<ExtractConfig> = {}
-    if (appIds.trim()) cfg.application_ids = appIds.split(',').map((s) => s.trim()).filter(Boolean)
     if (dateFrom) cfg.date_from = dateFrom
     if (dateTo) cfg.date_to = dateTo
     if (Object.keys(cfg).length) trigger.extract_config = cfg
@@ -280,10 +281,10 @@ function RunPipelineDialog({ pipeline, open, onClose }: { pipeline: Pipeline | n
           <DateField label="Business date override" value={dateOverride} fullWidth
             onChange={setDateOverride}
             helperText="Leave blank to use the platform business date" />
-          {resolvedDb ? (
+          {outputPath ? (
             <Alert severity="success" sx={{ py: 0.5, mt: 1.5 }}>
               <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>
-                <strong>{resolvedDb}</strong>.<strong>{pipeline?.load_config?.table_name || 'extracts_<app_id>'}</strong>
+                {outputPath}
               </Typography>
             </Alert>
           ) : (
@@ -292,9 +293,6 @@ function RunPipelineDialog({ pipeline, open, onClose }: { pipeline: Pipeline | n
         </Paper>
         <Alert severity="info" sx={{ mb: 2 }}>Override extract config for this run, or leave blank to use pipeline defaults.</Alert>
         <Grid container spacing={2}>
-          <Grid item xs={12}>
-            <TextField label="Application IDs (override)" value={appIds} fullWidth size="small" placeholder="APP001, APP002" onChange={(e) => setAppIds(e.target.value)} />
-          </Grid>
           <Grid item xs={6}>
             <DateField label="Date From (override)" value={dateFrom} fullWidth onChange={setDateFrom} />
           </Grid>
@@ -307,6 +305,230 @@ function RunPipelineDialog({ pipeline, open, onClose }: { pipeline: Pipeline | n
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="contained" startIcon={mutation.isPending ? <CircularProgress size={14} color="inherit" /> : <PlayArrow />} onClick={handleRun} disabled={mutation.isPending}>
           Run Now
+        </Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+// ─── JSON Config Dialog ──────────────────────────────────────────────────────
+
+function JsonConfigDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; open: boolean; onClose: () => void }) {
+  const { enqueueSnackbar } = useSnackbar()
+  const json = pipeline ? JSON.stringify({
+    extract_config: pipeline.extract_config,
+    transform_config: pipeline.transform_config,
+    load_config: pipeline.load_config,
+  }, null, 2) : ''
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(json)
+    enqueueSnackbar('Copied to clipboard', { variant: 'success', autoHideDuration: 1500 })
+  }
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth
+      PaperProps={{ sx: { height: '80vh', display: 'flex', flexDirection: 'column' } }}>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pb: 1 }}>
+        <DataObject fontSize="small" color="primary" />
+        <Typography variant="h6" sx={{ flex: 1, fontSize: '0.95rem' }}>
+          JSON Config — {pipeline?.name}
+        </Typography>
+        <Tooltip title="Copy to clipboard">
+          <IconButton size="small" onClick={handleCopy}><ContentCopy sx={{ fontSize: 16 }} /></IconButton>
+        </Tooltip>
+        <IconButton size="small" onClick={onClose}><Close sx={{ fontSize: 16 }} /></IconButton>
+      </DialogTitle>
+      <DialogContent dividers sx={{ p: 0, overflow: 'hidden', flex: 1 }}>
+        <Box
+          component="pre"
+          sx={{
+            m: 0,
+            p: 2,
+            height: '100%',
+            overflowY: 'auto',
+            fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+            fontSize: '0.78rem',
+            lineHeight: 1.6,
+            color: 'text.primary',
+            bgcolor: 'background.default',
+            whiteSpace: 'pre',
+            wordBreak: 'normal',
+          }}
+        >
+          {json}
+        </Box>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Close</Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+// ─── Load to Spark Dialog ─────────────────────────────────────────────────────
+
+function LoadToSparkDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; open: boolean; onClose: () => void }) {
+  const { enqueueSnackbar } = useSnackbar()
+  const qc = useQueryClient()
+
+  const { data: ctx } = useQuery<ExecutionContext>({
+    queryKey: ['execution-context'],
+    queryFn: () => pipelinesApi.getContext().then((r) => r.data),
+    enabled: open,
+  })
+
+  const { data: parquetInfo } = useQuery<ParquetDatesResult>({
+    queryKey: ['parquet-dates', pipeline?.id],
+    queryFn: () => pipelinesApi.parquetDates(pipeline!.id).then((r) => r.data),
+    enabled: open && !!pipeline,
+  })
+
+  const nsPrefix = ctx?.namespace_prefix || 'data_'
+  const derivedDate = ctx?.business_date || ''
+
+  const [date, setDate] = useState('')
+  const [namespaceDb, setNamespaceDb] = useState('')
+  const [tableName, setTableName] = useState('')
+  const [mode, setMode] = useState<'overwrite' | 'append'>('overwrite')
+  const [result, setResult] = useState<LoadSparkResult | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  const derivedNs = (date || derivedDate)
+    ? `${nsPrefix}${(date || derivedDate).replace(/-/g, '')}`
+    : ''
+
+  // Sync from context when dialog opens
+  useEffect(() => {
+    if (open) {
+      setDate(ctx?.business_date || '')
+      setResult(null)
+      setErrorMsg(null)
+    }
+  }, [open, ctx])
+
+  // Keep namespaceDb in sync when date changes
+  useEffect(() => {
+    const d = date || derivedDate
+    if (d) setNamespaceDb(`${nsPrefix}${d.replace(/-/g, '')}`)
+  }, [date, derivedDate, nsPrefix])
+
+  const jobName = pipeline?.extract_config?.job_name
+    || pipeline?.name?.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '') || ''
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      const body: LoadSparkRequest = {
+        date: date || derivedDate,
+        namespace_db: namespaceDb || derivedNs,
+        table_name: tableName || undefined,
+        mode,
+      }
+      return pipelinesApi.loadToSpark(pipeline!.id, body).then((r) => r.data)
+    },
+    onSuccess: (data) => {
+      setResult(data)
+      setErrorMsg(null)
+      enqueueSnackbar(`Loaded ${data.rows_loaded.toLocaleString()} rows into ${data.table}`, { variant: 'success' })
+      qc.invalidateQueries({ queryKey: ['catalog'] })
+    },
+    onError: (e: unknown) => {
+      // Extract the backend detail message from axios errors
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        || (e as Error).message
+        || 'Unknown error'
+      setErrorMsg(detail)
+      setResult(null)
+    },
+  })
+
+  const availableDates = parquetInfo?.dates ?? []
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <CloudUpload fontSize="small" color="primary" />
+        Load to Spark: {pipeline?.name}
+      </DialogTitle>
+      <DialogContent dividers>
+        <Alert severity="info" sx={{ mb: 2, fontSize: '0.78rem' }}>
+          Reads all saved <strong>{jobName}</strong> output files for the selected date and consolidates every app_id into one Spark table.
+        </Alert>
+
+        {/* Available dates quick-pick */}
+        {availableDates.length > 0 && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block' }}>
+              Available dates with data:
+            </Typography>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+              {availableDates.map((d) => (
+                <Chip
+                  key={d.date}
+                  label={`${d.date} (${d.app_ids} app${d.app_ids !== 1 ? 's' : ''}, ${d.file_count} files)`}
+                  size="small"
+                  variant={date === d.date ? 'filled' : 'outlined'}
+                  color={date === d.date ? 'primary' : 'default'}
+                  onClick={() => { setDate(d.date); setResult(null); setErrorMsg(null) }}
+                  sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.72rem', cursor: 'pointer' }}
+                />
+              ))}
+            </Box>
+          </Box>
+        )}
+
+        {availableDates.length === 0 && parquetInfo && (
+          <Alert severity="warning" sx={{ mb: 2, fontSize: '0.78rem' }}>
+            No parquet/CSV output found for job <strong>{parquetInfo.job_name}</strong>. Run the pipeline first.
+          </Alert>
+        )}
+
+        <Grid container spacing={2}>
+          <Grid item xs={6}>
+            <DateField label="Date" value={date || derivedDate} fullWidth onChange={(v) => { setDate(v); setResult(null); setErrorMsg(null) }}
+              helperText="Business date to load" />
+          </Grid>
+          <Grid item xs={6}>
+            <TextField label="Spark database" value={namespaceDb} fullWidth size="small"
+              placeholder={derivedNs || 'e.g. data_20260417'}
+              helperText="Spark catalog database (namespace)"
+              onChange={(e) => setNamespaceDb(e.target.value)} />
+          </Grid>
+          <Grid item xs={6}>
+            <TextField label="Table name" value={tableName} fullWidth size="small"
+              placeholder={jobName.toLowerCase() || 'default: job_name'}
+              helperText="Override table name (default: job name)"
+              onChange={(e) => setTableName(e.target.value)} />
+          </Grid>
+          <Grid item xs={6}>
+            <TextField select label="Write mode" value={mode} fullWidth size="small"
+              onChange={(e) => setMode(e.target.value as 'overwrite' | 'append')}>
+              <MenuItem value="overwrite">Overwrite</MenuItem>
+              <MenuItem value="append">Append</MenuItem>
+            </TextField>
+          </Grid>
+        </Grid>
+
+        {result && (
+          <Alert severity="success" sx={{ mt: 2, fontSize: '0.78rem' }}>
+            Loaded <strong>{result.rows_loaded.toLocaleString()}</strong> rows from{' '}
+            <strong>{result.app_ids_merged}</strong> app_id(s) into{' '}
+            <code>{result.table}</code>
+          </Alert>
+        )}
+        {errorMsg && (
+          <Alert severity="error" sx={{ mt: 2, fontSize: '0.78rem', wordBreak: 'break-word' }}>
+            {errorMsg}
+          </Alert>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Close</Button>
+        <Button variant="contained" color="primary"
+          startIcon={mutation.isPending ? <CircularProgress size={14} color="inherit" /> : <CloudUpload />}
+          onClick={() => mutation.mutate()}
+          disabled={mutation.isPending}>
+          Load to Spark
         </Button>
       </DialogActions>
     </Dialog>
@@ -351,6 +573,12 @@ function SqlPreviewDialog({
       date_range_mode: extractConfig.jdbc_date_range_mode ?? 'single',
       date_range_from: extractConfig.jdbc_date_range_from || undefined,
       date_range_to: extractConfig.jdbc_date_range_to || undefined,
+    }
+    // DataWarehouse uses apps (name+id pairs)
+    const firstApp = extractConfig.apps?.[0]
+    if (firstApp) {
+      req.app_id = firstApp.id || undefined
+      req.app_name = firstApp.name || undefined
     }
     if (extractConfig.jdbc_sql_file_id) {
       req.sql_file_id = extractConfig.jdbc_sql_file_id
@@ -469,8 +697,7 @@ function TagEditor({ tags, onChange }: { tags: string[]; onChange: (tags: string
         size="small" value={input} placeholder="add tag…"
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add() } }}
-        sx={{ width: 100, '& .MuiInputBase-input': { fontSize: '0.75rem', py: 0.4, px: 0.8 } }}
-        InputProps={{ sx: { borderRadius: 3 } }}
+        sx={{ width: 100 }}
       />
     </Box>
   )
@@ -478,6 +705,118 @@ function TagEditor({ tags, onChange }: { tags: string[]; onChange: (tags: string
 
 // ─── Pipeline Config Form (inline) ───────────────────────────────────────────
 
+// ─── Cron helpers ─────────────────────────────────────────────────────────────
+const CRON_PRESETS = [
+  { label: 'Daily at midnight', value: '0 0 * * *' },
+  { label: 'Daily at 2 AM', value: '0 2 * * *' },
+  { label: 'Daily at 6 AM', value: '0 6 * * *' },
+  { label: 'Daily at 8 AM', value: '0 8 * * *' },
+  { label: 'Every hour', value: '0 * * * *' },
+  { label: 'Weekly (Sun midnight)', value: '0 0 * * 0' },
+  { label: 'Monthly (1st)', value: '0 0 1 * *' },
+  { label: 'Custom', value: '__custom__' },
+]
+
+function parseCronParts(expr: string): [string, string, string, string, string] {
+  const parts = (expr || '0 0 * * *').trim().split(/\s+/)
+  while (parts.length < 5) parts.push('*')
+  return [parts[0], parts[1], parts[2], parts[3], parts[4]]
+}
+
+function buildCronExpr(min: string, hour: string, day: string, month: string, wday: string) {
+  return [min || '*', hour || '*', day || '*', month || '*', wday || '*'].join(' ')
+}
+
+function getPresetValue(expr: string): string {
+  const match = CRON_PRESETS.find((p) => p.value !== '__custom__' && p.value === expr)
+  return match ? match.value : '__custom__'
+}
+
+// ─── CronScheduleEditor — embedded in PipelineConfigForm ─────────────────────
+function CronScheduleEditor({
+  schedule,
+  scheduleEnabled,
+  onChange,
+}: {
+  schedule: string
+  scheduleEnabled: boolean
+  onChange: (schedule: string, scheduleEnabled: boolean) => void
+}) {
+  const preset = getPresetValue(schedule)
+  const isCustom = preset === '__custom__'
+  const [min, hour, day, month, wday] = parseCronParts(schedule)
+
+  const handlePreset = (val: string) => {
+    if (val === '__custom__') {
+      // keep the current expression as-is when switching to custom
+      onChange(schedule || '0 0 * * *', scheduleEnabled)
+    } else {
+      onChange(val, scheduleEnabled)
+    }
+  }
+
+  const handlePart = (index: number, val: string) => {
+    const parts: [string, string, string, string, string] = [min, hour, day, month, wday]
+    parts[index] = val
+    onChange(buildCronExpr(...parts), scheduleEnabled)
+  }
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+      {/* Preset + Enabled row */}
+      <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center', flexWrap: 'wrap' }}>
+        <TextField
+          select label="Schedule" value={preset} size="small"
+          sx={{ flex: '1 1 200px' }}
+          onChange={(e) => handlePreset(e.target.value)}
+        >
+          {CRON_PRESETS.map((p) => (
+            <MenuItem key={p.value} value={p.value}>{p.label}</MenuItem>
+          ))}
+        </TextField>
+        <FormControlLabel
+          control={<Switch checked={scheduleEnabled} onChange={(e) => onChange(schedule, e.target.checked)} />}
+          label={<Typography variant="body2">Enabled</Typography>}
+        />
+      </Box>
+
+      {/* Custom fields */}
+      {isCustom && (
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          {[
+            { label: 'Minute', val: min, idx: 0, placeholder: '0-59 or *' },
+            { label: 'Hour', val: hour, idx: 1, placeholder: '0-23 or *' },
+            { label: 'Day', val: day, idx: 2, placeholder: '1-31 or *' },
+            { label: 'Month', val: month, idx: 3, placeholder: '1-12 or *' },
+            { label: 'Weekday', val: wday, idx: 4, placeholder: '0-6 or *' },
+          ].map(({ label, val, idx, placeholder }) => (
+            <TextField
+              key={label} label={label} value={val} size="small"
+              sx={{ flex: '1 1 80px', minWidth: 70 }}
+              placeholder={placeholder}
+              onChange={(e) => handlePart(idx, e.target.value)}
+            />
+          ))}
+        </Box>
+      )}
+
+      {/* Resulting expression */}
+      {schedule && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Schedule sx={{ fontSize: 14, color: 'text.secondary' }} />
+          <Typography variant="caption" color="text.secondary">Expression:</Typography>
+          <Chip
+            label={buildCronExpr(min, hour, day, month, wday)}
+            size="small" variant="outlined"
+            sx={{ fontFamily: MONO, fontSize: '0.72rem' }}
+          />
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+// ─── PipelineConfigForm ───────────────────────────────────────────────────────
 function PipelineConfigForm({
   initial,
   onSave,
@@ -495,267 +834,128 @@ function PipelineConfigForm({
     queryKey: ['sql-files', 'extract'],
     queryFn: () => sqlFilesApi.list('extract').then((r) => r.data),
   })
+  const { data: connections = [] } = useQuery({
+    queryKey: ['connections'],
+    queryFn: () => connectionsApi.list().then((r) => r.data),
+  })
   useEffect(() => {
     setForm(initial ? pipelineToForm(initial) : defaultPipeline())
     setDirty(false)
   }, [initial?.id])
 
+  const theme = useTheme()
   const update = (patch: Partial<PipelineFormData>) => { setForm((f) => ({ ...f, ...patch })); setDirty(true) }
   const setExtract = (key: string, val: unknown) => { setForm((f) => ({ ...f, extract_config: { ...f.extract_config, [key]: val } })); setDirty(true) }
   const setLoad = (key: string, val: unknown) => { setForm((f) => ({ ...f, load_config: { ...f.load_config, [key]: val } })); setDirty(true) }
 
-  const source = form.extract_config.source_type ?? 'grpc'
-
   return (
-    <Box sx={{ flex: 1, overflow: 'auto', p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
-      {/* Name / description / tags */}
-      <Grid container spacing={2}>
-        <Grid item xs={12} sm={7}>
-          <TextField label="Name" value={form.name} fullWidth size="small" onChange={(e) => update({ name: e.target.value })} />
-        </Grid>
-        <Grid item xs={12} sm={5}>
-          <TextField label="Description" value={form.description} fullWidth size="small" onChange={(e) => update({ description: e.target.value })} />
-        </Grid>
-        <Grid item xs={12}>
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>Tags</Typography>
-          <TagEditor tags={form.tags ?? []} onChange={(tags) => update({ tags })} />
-        </Grid>
-      </Grid>
+    <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-      {/* Extract config */}
-      <Accordion defaultExpanded>
-        <AccordionSummary expandIcon={<ExpandMore />}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="subtitle2" fontWeight={600}>Extract Configuration</Typography>
-            <Chip label={source.toUpperCase()} size="small" icon={<>{SOURCE_ICONS[source as SourceType]}</>} color="primary" variant="outlined" />
-          </Box>
-        </AccordionSummary>
-        <AccordionDetails>
-          <Grid container spacing={2}>
-            <Grid item xs={12} sm={6}>
-              <TextField select label="Source Type" value={source} fullWidth size="small" onChange={(e) => setExtract('source_type', e.target.value)}>
-                <MenuItem value="grpc">gRPC (Data Extract Service)</MenuItem>
-                <MenuItem value="jdbc">JDBC (SQL Database)</MenuItem>
-                <MenuItem value="json">JSON File</MenuItem>
-                <MenuItem value="csv">CSV File</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField select label="Output Format" value={form.extract_config.output_format} fullWidth size="small" onChange={(e) => setExtract('output_format', e.target.value)}>
-                <MenuItem value="parquet">Parquet</MenuItem>
-                <MenuItem value="csv">CSV</MenuItem>
-              </TextField>
-            </Grid>
-
-            {source === 'grpc' && (
-              <>
-                <Grid item xs={12}>
-                  <TextField label="Application IDs (comma-separated)" value={form.extract_config.application_ids?.join(', ') ?? ''} fullWidth size="small"
-                    helperText="e.g. APP001, APP002, APP003"
-                    onChange={(e) => setExtract('application_ids', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))} />
-                </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField label="Batch Page Size" type="number" value={form.extract_config.page_size} fullWidth size="small"
-                    helperText="Records per gRPC request" InputProps={{ inputProps: { min: 100, max: 100000 } }}
-                    onChange={(e) => setExtract('page_size', parseInt(e.target.value))} />
-                </Grid>
-              </>
-            )}
-
-            {source === 'jdbc' && (
-              <>
-                <Grid item xs={12}>
-                  <TextField label="Connection URL" value={form.extract_config.jdbc_url ?? ''} fullWidth size="small"
-                    placeholder="sqlite:///data/sources/sample.db" helperText="SQLAlchemy connection string"
-                    onChange={(e) => setExtract('jdbc_url', e.target.value)} />
-                </Grid>
-                <Grid item xs={12}>
-                  <TextField select label="SQL File" value={form.extract_config.jdbc_sql_file_id ?? ''} fullWidth size="small"
-                    helperText="Choose a saved SQL file, or enter SQL below"
-                    onChange={(e) => setExtract('jdbc_sql_file_id', e.target.value ? parseInt(String(e.target.value)) : undefined)}>
-                    <MenuItem value="">— None (use inline SQL or table name) —</MenuItem>
-                    {sqlFiles.map((f) => <MenuItem key={f.id} value={f.id}>{f.name}</MenuItem>)}
-                  </TextField>
-                </Grid>
-                {!form.extract_config.jdbc_sql_file_id && (
-                  <Grid item xs={12}>
-                    <TextField label="Inline SQL" value={form.extract_config.jdbc_sql ?? ''} fullWidth size="small" multiline rows={4}
-                      placeholder="SELECT * FROM transactions WHERE status = 'active'" helperText="Leave blank to use Table Name below"
-                      inputProps={{ style: { fontFamily: MONO, fontSize: '0.8rem' } }}
-                      onChange={(e) => setExtract('jdbc_sql', e.target.value)} />
-                  </Grid>
-                )}
-                {!form.extract_config.jdbc_sql_file_id && !form.extract_config.jdbc_sql && (
-                  <Grid item xs={12} sm={6}>
-                    <TextField label="Table Name" value={form.extract_config.jdbc_table ?? ''} fullWidth size="small" placeholder="transactions"
-                      helperText="Simple table name (no SQL needed)" onChange={(e) => setExtract('jdbc_table', e.target.value)} />
-                  </Grid>
-                )}
-                <Grid item xs={12} sm={6}>
-                  <TextField label="Date Column (optional)" value={form.extract_config.jdbc_date_column ?? ''} fullWidth size="small"
-                    placeholder="business_date" helperText="Column used to filter by business date"
-                    onChange={(e) => setExtract('jdbc_date_column', e.target.value)} />
-                </Grid>
-                <Grid item xs={12}>
-                  <TextField label="Application IDs (comma-separated)" value={form.extract_config.jdbc_application_ids?.join(', ') ?? ''} fullWidth size="small"
-                    placeholder="APP001, APP002" helperText="Injected as $app_id — pipeline runs once per ID"
-                    onChange={(e) => setExtract('jdbc_application_ids', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))} />
-                </Grid>
-
-                {/* SQL variable injection */}
-                <Grid item xs={12}><Divider><Typography variant="caption">SQL Variable Injection</Typography></Divider></Grid>
-                <Grid item xs={12}>
-                  <Typography variant="caption" color="text.secondary">
-                    Use <code style={{ fontFamily: MONO }}>$business_date</code>, <code style={{ fontFamily: MONO }}>$business_date_from</code>,{' '}
-                    <code style={{ fontFamily: MONO }}>$business_date_to</code>, <code style={{ fontFamily: MONO }}>$business_date_range</code>, or <code style={{ fontFamily: MONO }}>$app_id</code> in your SQL.
-                    These are substituted from the global execution context at run time.
-                  </Typography>
-                </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField select label="Date Format" value={form.extract_config.jdbc_date_var_format ?? 'YYYYMMDD'} fullWidth size="small"
-                    helperText="Format applied to $business_date* placeholders"
-                    onChange={(e) => setExtract('jdbc_date_var_format', e.target.value)}>
-                    {DATE_VAR_FORMATS.map((f) => <MenuItem key={f} value={f}>{f}</MenuItem>)}
-                  </TextField>
-                </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField select label="Date Range" value={form.extract_config.jdbc_date_range_mode ?? 'single'} fullWidth size="small"
-                    helperText="$business_date_range → BETWEEN from AND to"
-                    onChange={(e) => setExtract('jdbc_date_range_mode', e.target.value)}>
-                    {DATE_RANGE_MODES.map((m) => <MenuItem key={m.value} value={m.value}>{m.label}</MenuItem>)}
-                  </TextField>
-                </Grid>
-                {form.extract_config.jdbc_date_range_mode === 'custom' && (
-                  <>
-                    <Grid item xs={12} sm={6}>
-                      <DateField label="Range From" value={form.extract_config.jdbc_date_range_from ?? ''} fullWidth
-                        helperText="Custom range start"
-                        onChange={(v) => setExtract('jdbc_date_range_from', v)} />
-                    </Grid>
-                    <Grid item xs={12} sm={6}>
-                      <DateField label="Range To" value={form.extract_config.jdbc_date_range_to ?? ''} fullWidth
-                        helperText="Custom range end"
-                        onChange={(v) => setExtract('jdbc_date_range_to', v)} />
-                    </Grid>
-                  </>
-                )}
-                <Grid item xs={12}>
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    startIcon={<Visibility />}
-                    onClick={() => setPreviewOpen(true)}
-                    disabled={!form.extract_config.jdbc_sql_file_id && !form.extract_config.jdbc_sql?.trim() && !form.extract_config.jdbc_table?.trim()}
-                  >
-                    Preview SQL with Variables
-                  </Button>
-                </Grid>
-              </>
-            )}
-
-            {(source === 'json' || source === 'csv') && (
-              <>
-                <Grid item xs={12}>
-                  <TextField label="File Path" value={form.extract_config.file_path ?? ''} fullWidth size="small"
-                    placeholder="transactions.csv" helperText="Relative to data/sources/ directory"
-                    InputProps={{ startAdornment: <InputAdornment position="start"><Typography variant="caption" color="text.secondary" noWrap>data/sources/</Typography></InputAdornment> }}
-                    onChange={(e) => setExtract('file_path', e.target.value)} />
-                </Grid>
-                {source === 'csv' && (
-                  <>
-                    <Grid item xs={6} sm={4}>
-                      <TextField label="Delimiter" value={form.extract_config.csv_delimiter ?? ','} fullWidth size="small" onChange={(e) => setExtract('csv_delimiter', e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <FormControlLabel control={<Switch checked={form.extract_config.csv_has_header ?? true} onChange={(e) => setExtract('csv_has_header', e.target.checked)} />} label="Header row" />
-                    </Grid>
-                  </>
-                )}
-                {source === 'json' && (
-                  <Grid item xs={6}>
-                    <FormControlLabel control={<Switch checked={form.extract_config.json_lines ?? true} onChange={(e) => setExtract('json_lines', e.target.checked)} />} label="JSONL (one object per line)" />
-                  </Grid>
-                )}
-              </>
-            )}
-
-            <Grid item xs={12}><Divider><Typography variant="caption">Business Date Range</Typography></Divider></Grid>
-            <Grid item xs={12} sm={6}>
-              <DateField label="Date From" value={form.extract_config.date_from ?? ''} fullWidth
-                onChange={(v) => setExtract('date_from', v)} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <DateField label="Date To" value={form.extract_config.date_to ?? ''} fullWidth
-                onChange={(v) => setExtract('date_to', v)} />
-            </Grid>
-
-            <Grid item xs={12}><Divider><Typography variant="caption">Segmentation</Typography></Divider></Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField label="Rows per Segment" type="number" value={form.extract_config.rows_per_segment ?? 100000} fullWidth size="small"
-                helperText="Max rows per output file" InputProps={{ inputProps: { min: 1000 } }}
-                onChange={(e) => setExtract('rows_per_segment', parseInt(e.target.value))} />
-            </Grid>
-          </Grid>
-        </AccordionDetails>
-      </Accordion>
-
-      {/* Load config */}
-      <Accordion>
-        <AccordionSummary expandIcon={<ExpandMore />}>
-          <Typography variant="subtitle2" fontWeight={600}>Load Configuration</Typography>
-        </AccordionSummary>
-        <AccordionDetails>
-          <Grid container spacing={2}>
-            <Grid item xs={6}>
-              <TextField select label="Write Mode" value={form.load_config.mode} fullWidth size="small" onChange={(e) => setLoad('mode', e.target.value)}>
-                <MenuItem value="overwrite">Overwrite</MenuItem>
-                <MenuItem value="append">Append</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={6}>
-              <TextField label="Table Name" value={form.load_config.table_name || ''} fullWidth size="small"
-                placeholder="e.g. transactions"
-                helperText="Saved to <prefix><date>.<table_name> in Spark"
-                onChange={(e) => setLoad('table_name', e.target.value)} />
-            </Grid>
-          </Grid>
-        </AccordionDetails>
-      </Accordion>
-
-      {/* Schedule */}
-      <Accordion>
-        <AccordionSummary expandIcon={<ExpandMore />}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="subtitle2" fontWeight={600}>Schedule</Typography>
-            {form.schedule_enabled && form.schedule && (
-              <Chip label={form.schedule} size="small" variant="outlined" icon={<Schedule sx={{ fontSize: 12 }} />} sx={{ fontFamily: MONO, fontSize: '0.72rem' }} />
-            )}
-          </Box>
-        </AccordionSummary>
-        <AccordionDetails>
-          <Grid container spacing={2} alignItems="center">
-            <Grid item xs={8}>
-              <TextField label="Cron Expression" value={form.schedule} fullWidth size="small" placeholder="0 2 * * *" helperText="Cron: minute hour day month weekday" onChange={(e) => update({ schedule: e.target.value })} />
-            </Grid>
-            <Grid item xs={4}>
-              <FormControlLabel control={<Switch checked={form.schedule_enabled} onChange={(e) => update({ schedule_enabled: e.target.checked })} />} label="Enabled" />
-            </Grid>
-          </Grid>
-        </AccordionDetails>
-      </Accordion>
-
-      {/* Save bar */}
-      {dirty && (
-        <Box sx={{ display: 'flex', gap: 1, pt: 1 }}>
-          <Button variant="contained" startIcon={saving ? <CircularProgress size={14} color="inherit" /> : <Save />}
-            onClick={() => onSave(form)} disabled={saving || !form.name.trim()}>
-            {initial ? 'Save Changes' : 'Create Pipeline'}
-          </Button>
-          <Button variant="outlined" onClick={() => { setForm(initial ? pipelineToForm(initial) : defaultPipeline()); setDirty(false) }}>
+      {/* ── Sticky header: name / status / save ── */}
+      <Box sx={{
+        px: 2, py: 1.25,
+        borderBottom: '1px solid',
+        borderColor: 'divider',
+        flexShrink: 0,
+        bgcolor: 'background.paper',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 1.5,
+      }}>
+        <Box sx={{ fontSize: 20, color: 'primary.main', flexShrink: 0, display: 'flex' }}>
+          {SOURCE_ICONS[form.extract_config.source_type ?? 'datawarehouse']}
+        </Box>
+        <TextField label="Name" value={form.name} size="small"
+          sx={{ flex: 1 }}
+          onChange={(e) => update({ name: e.target.value })} />
+        <TextField select label="Status" value={form.status} size="small"
+          sx={{ width: 130 }}
+          onChange={(e) => update({ status: e.target.value as typeof form.status })}>
+          <MenuItem value="active">Active</MenuItem>
+          <MenuItem value="inactive">Inactive</MenuItem>
+          <MenuItem value="draft">Draft</MenuItem>
+        </TextField>
+        <Button variant="contained" size="small"
+          startIcon={saving ? <CircularProgress size={13} color="inherit" /> : <Save />}
+          onClick={() => onSave(form)}
+          disabled={saving || !form.name.trim() || !dirty}
+          sx={{ flexShrink: 0 }}>
+          {initial ? 'Save' : 'Create'}
+        </Button>
+        {dirty && (
+          <Button variant="outlined" size="small" sx={{ flexShrink: 0 }}
+            onClick={() => { setForm(initial ? pipelineToForm(initial) : defaultPipeline()); setDirty(false) }}>
             Reset
           </Button>
-        </Box>
-      )}
+        )}
+      </Box>
+
+      {/* ── Scrollable content ── */}
+      <Box sx={{ flex: 1, overflow: 'auto', p: 2, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+
+        {/* Extract config wizard */}
+        <Accordion defaultExpanded>
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <Typography variant="subtitle2" fontWeight={600}>Extract Configuration</Typography>
+          </AccordionSummary>
+          <AccordionDetails sx={{ pt: 1 }}>
+            <ExtractConfigWizard
+              config={form.extract_config}
+              onChange={(key, val) => setExtract(key as string, val)}
+              sqlFiles={sqlFiles}
+              connections={connections}
+              onPreview={() => setPreviewOpen(true)}
+            />
+          </AccordionDetails>
+        </Accordion>
+
+        {/* Load + Schedule side by side */}
+        <Grid container spacing={1.5}>
+          <Grid item xs={12} md={6}>
+            <Accordion>
+              <AccordionSummary expandIcon={<ExpandMore />}>
+                <Typography variant="subtitle2" fontWeight={600}>Load Configuration</Typography>
+              </AccordionSummary>
+              <AccordionDetails>
+                <Grid container spacing={1.5}>
+                  <Grid item xs={6}>
+                    <TextField select label="Write Mode" value={form.load_config.mode} fullWidth size="small" onChange={(e) => setLoad('mode', e.target.value)}>
+                      <MenuItem value="overwrite">Overwrite</MenuItem>
+                      <MenuItem value="append">Append</MenuItem>
+                    </TextField>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <TextField label="Table Name" value={form.load_config.table_name || ''} fullWidth size="small"
+                      placeholder="e.g. transactions"
+                      helperText="Spark target table"
+                      onChange={(e) => setLoad('table_name', e.target.value)} />
+                  </Grid>
+                </Grid>
+              </AccordionDetails>
+            </Accordion>
+          </Grid>
+          <Grid item xs={12} md={6}>
+            <Accordion>
+              <AccordionSummary expandIcon={<ExpandMore />}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Typography variant="subtitle2" fontWeight={600}>Schedule</Typography>
+                  {form.schedule_enabled && form.schedule && (
+                    <Chip label={form.schedule} size="small" variant="outlined" icon={<Schedule sx={{ fontSize: 12 }} />} sx={{ fontFamily: MONO, fontSize: '0.72rem' }} />
+                  )}
+                </Box>
+              </AccordionSummary>
+              <AccordionDetails>
+                <CronScheduleEditor
+                  schedule={form.schedule}
+                  scheduleEnabled={form.schedule_enabled}
+                  onChange={(schedule, schedule_enabled) => update({ schedule, schedule_enabled })}
+                />
+              </AccordionDetails>
+            </Accordion>
+          </Grid>
+        </Grid>
+
+      </Box>
 
       {/* SQL variable preview dialog */}
       <SqlPreviewDialog
@@ -1133,6 +1333,7 @@ export default function PipelineStudio() {
   const qc = useQueryClient()
   const { enqueueSnackbar } = useSnackbar()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
 
   // ── Top-level tab: 0=Extracts, 1=Transformations, 2=Pipelines ──
   const [mainTab, setMainTab] = useState(0)
@@ -1145,6 +1346,8 @@ export default function PipelineStudio() {
   type ExtractSelection = { id: number; isNew: false } | { id: null; isNew: true } | null
   const [extractSel, setExtractSel] = useState<ExtractSelection>(null)
   const [runPipelineTarget, setRunPipelineTarget] = useState<Pipeline | null>(null)
+  const [loadSparkTarget, setLoadSparkTarget] = useState<Pipeline | null>(null)
+  const [jsonConfigOpen, setJsonConfigOpen] = useState(false)
   const [deletePipelineId, setDeletePipelineId] = useState<number | null>(null)
   const [clonePipelineTarget, setClonePipelineTarget] = useState<Pipeline | null>(null)
   const [cloneName, setCloneName] = useState('')
@@ -1219,6 +1422,17 @@ export default function PipelineStudio() {
     jobs.forEach((j) => (j.tags ?? []).forEach((t) => set.add(t)))
     return [...set].sort()
   }, [pipelines, jobs])
+
+  // ── Open pipeline from URL param ?id=X ──
+  useEffect(() => {
+    const idParam = searchParams.get('id')
+    if (!idParam || pipelines.length === 0) return
+    const id = Number(idParam)
+    if (isNaN(id)) return
+    if (pipelines.some((p) => p.id === id)) {
+      setExtractSel({ id, isNew: false })
+    }
+  }, [searchParams, pipelines])
 
   const matchesSearch = (name: string, tags: string[] = []) => {
     if (activeTagFilter && !tags.includes(activeTagFilter)) return false
@@ -1537,6 +1751,7 @@ export default function PipelineStudio() {
               <StatusChip status={selectedPipeline.status} />
             </Box>
             <Button variant="contained" color="success" fullWidth startIcon={<PlayArrow />} onClick={() => setRunPipelineTarget(selectedPipeline)}>Run Pipeline</Button>
+            <Button variant="outlined" color="primary" fullWidth startIcon={<CloudUpload />} onClick={() => setLoadSparkTarget(selectedPipeline)}>Load to Spark</Button>
             <Tooltip title="Clone with a different name — reuses all config">
               <Button variant="outlined" fullWidth startIcon={<ContentCopy />} onClick={() => { setClonePipelineTarget(selectedPipeline); setCloneName(`${selectedPipeline.name} (copy)`) }}>Clone</Button>
             </Tooltip>
@@ -1571,6 +1786,15 @@ export default function PipelineStudio() {
                 </Box>
               </>
             )}
+            <Divider />
+            <Button
+              size="small"
+              startIcon={<DataObject sx={{ fontSize: 13 }} />}
+              onClick={() => setJsonConfigOpen(true)}
+              sx={{ alignSelf: 'flex-start', fontSize: '0.72rem', color: 'text.secondary', textTransform: 'none', px: 0 }}
+            >
+              View JSON Config
+            </Button>
           </Box>
         ) : (
           <Box sx={{ p: 2, color: 'text.disabled', display: 'flex', flexDirection: 'column', alignItems: 'center', pt: 6, gap: 1 }}>
@@ -2013,6 +2237,8 @@ export default function PipelineStudio() {
 
       {/* ── Dialogs ── */}
       <RunPipelineDialog pipeline={runPipelineTarget} open={runPipelineTarget !== null} onClose={() => setRunPipelineTarget(null)} />
+      <LoadToSparkDialog pipeline={loadSparkTarget} open={loadSparkTarget !== null} onClose={() => setLoadSparkTarget(null)} />
+      <JsonConfigDialog pipeline={selectedPipeline} open={jsonConfigOpen} onClose={() => setJsonConfigOpen(false)} />
 
       <JobFormDialog open={jobDialogOpen} onClose={() => setJobDialogOpen(false)} initial={editingJob ?? undefined} onSave={handleJobSave} saving={createJob.isPending || updateJob.isPending} />
 

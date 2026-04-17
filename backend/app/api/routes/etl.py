@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -21,12 +22,22 @@ from app.schemas.etl import (
     SqlPreviewRequest, SqlPreviewResponse,
     DependencyCreate, DependencyResponse, GraphNode, GraphEdge, PipelineGraph,
     ExecutionContextResponse, ExecutionContextUpdate,
+    LoadSparkRequest,
 )
 from app.services.etl_engine import execute_pipeline, cancel_run, get_active_run_ids, inject_sql_vars
 from app.services.grpc_client import grpc_client
 
 router = APIRouter(prefix="/etl", tags=["ETL"])
 logger = logging.getLogger(__name__)
+
+
+def _pipeline_to_job_name(name: str) -> str:
+    """Derive a filesystem-safe job name from a pipeline name.
+
+    'My Market Data' -> 'MY_MARKET_DATA'
+    'Report v2.1'    -> 'REPORT_V2_1'
+    """
+    return re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "PIPELINE"
 
 
 def _sql_dir(file_type: str) -> Path:
@@ -167,20 +178,23 @@ async def trigger_run(
     transform_cfg = TransformConfig(**(pipeline.transform_config or {}))
     load_cfg = LoadConfig(**(pipeline.load_config or {}))
 
-    # Always resolve namespace from business_date
     ctx = await db.get(ExecutionContext, 1)
     platform_date = ctx.business_date if ctx else None
     resolved_date = body.business_date or platform_date
 
-    if resolved_date:
-        date_compact = resolved_date.replace("-", "")
-        namespace_db = f"{_resolve_ns_prefix(ctx)}{date_compact}"
-        load_cfg = load_cfg.model_copy(update={
-            "namespace_db": namespace_db,
-            "target": "spark_table",
-        })
-    else:
+    if not resolved_date:
         raise HTTPException(status_code=400, detail="No business date set. Set one on the execution context bar before running.")
+
+    # Make namespace_db available for any spark_table target, but do NOT force
+    # the target to spark_table — respect the pipeline's configured load target.
+    date_compact = resolved_date.replace("-", "")
+    namespace_db = f"{_resolve_ns_prefix(ctx)}{date_compact}"
+    if load_cfg.namespace_db is None:
+        load_cfg = load_cfg.model_copy(update={"namespace_db": namespace_db})
+
+    # Populate job_name from the pipeline name if not already set in extract config.
+    if not extract_cfg.job_name:
+        extract_cfg = extract_cfg.model_copy(update={"job_name": _pipeline_to_job_name(pipeline.name)})
 
     run = ETLRun(
         pipeline_id=pid,
@@ -202,6 +216,86 @@ async def trigger_run(
 
     asyncio.create_task(_bg())
     return RunSummary.model_validate(run)
+
+
+@router.get("/pipelines/{pid}/parquet-dates")
+async def list_parquet_dates(pid: int, db: AsyncSession = Depends(get_db)):
+    """Return all dates that have parquet/CSV output for this pipeline's job_name.
+
+    Scans <parquet_root>/<date>/<job_name>/ and returns dates (descending) that
+    have at least one non-empty app_id sub-directory.
+    """
+    from app.schemas.etl import ExtractConfig as EC
+
+    pipeline = await db.get(ETLPipeline, pid)
+    if not pipeline:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    extract_cfg = EC(**(pipeline.extract_config or {}))
+    job_name = extract_cfg.job_name or _pipeline_to_job_name(pipeline.name)
+
+    base = settings.parquet_path
+    dates: list[dict] = []
+    if base.exists():
+        for date_dir in sorted(base.iterdir(), reverse=True):
+            if not date_dir.is_dir():
+                continue
+            job_dir = date_dir / job_name
+            if not job_dir.is_dir():
+                continue
+            app_dirs = [d for d in job_dir.iterdir() if d.is_dir()]
+            if not app_dirs:
+                continue
+            total_files = sum(
+                len(list(d.glob("*.parquet")) + list(d.glob("*.csv")))
+                for d in app_dirs
+            )
+            if total_files == 0:
+                continue
+            dates.append({
+                "date": date_dir.name,
+                "app_ids": len(app_dirs),
+                "file_count": total_files,
+            })
+    return {"job_name": job_name, "dates": dates}
+
+
+@router.post("/pipelines/{pid}/load-spark")
+async def load_pipeline_to_spark(
+    pid: int,
+    body: LoadSparkRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Load all saved parquet/CSV files for a pipeline+date into a consolidated Spark table.
+
+    Reads every <app_id> directory under <parquet_root>/<date>/<job_name>/,
+    adds an *application_id* column to each shard, unions them, and writes the
+    result to ``<namespace_db>.<table_name>`` (defaults to job_name).
+    """
+    from app.services.spark_service import spark_service as svc
+    from app.schemas.etl import ExtractConfig as EC
+
+    pipeline = await db.get(ETLPipeline, pid)
+    if not pipeline:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    extract_cfg = EC(**(pipeline.extract_config or {}))
+    job_name = extract_cfg.job_name or _pipeline_to_job_name(pipeline.name)
+
+    try:
+        result = await svc.load_to_spark_table(
+            date=body.date,
+            job_name=job_name,
+            namespace_db=body.namespace_db,
+            table_name=body.table_name,
+            mode=body.mode,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return result
 
 
 @router.get("/pipelines/{pid}/runs", response_model=list[RunSummary])
@@ -359,6 +453,8 @@ async def preview_sql(
         date_range_mode=body.date_range_mode,
         date_range_from_iso=body.date_range_from,
         date_range_to_iso=body.date_range_to,
+        app_id=body.app_id,
+        app_name=body.app_name,
     )
 
     return SqlPreviewResponse(
@@ -538,6 +634,17 @@ async def get_pipeline_graph(db: AsyncSession = Depends(get_db)):
         if last_run:
             last_run_by_pipeline[p.id] = last_run.status
 
+    def _app_names(ec: dict) -> list[str]:
+        result = []
+        for a in (ec.get("apps") or []):
+            name = a.get("name") or ""
+            app_id = a.get("id") or ""
+            # Prefer name unless it's blank or purely numeric (then id is more readable)
+            label = name if (name and not name.strip().isdigit()) else app_id
+            if label:
+                result.append(label)
+        return result
+
     nodes = [
         GraphNode(
             id=p.id,
@@ -546,6 +653,7 @@ async def get_pipeline_graph(db: AsyncSession = Depends(get_db)):
             status=p.status,
             source_type=(p.extract_config or {}).get("source_type", "grpc"),
             last_run_status=last_run_by_pipeline.get(p.id),
+            app_names=_app_names(p.extract_config or {}),
         )
         for p in pipelines
     ]

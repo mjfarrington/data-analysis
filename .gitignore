@@ -14,6 +14,8 @@ data/csv/
 data/spark-events/
 data/spark-warehouse/
 data/sources/
+data/pipeline/
+data/metadata.db
 metastore_db/
 derby.log
 

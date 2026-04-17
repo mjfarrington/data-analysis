@@ -200,7 +200,7 @@ function StorageSection() {
             disabled={purgeAllMutation.isPending}
             onClick={() => setConfirm('purge-all')}
           >
-            Purge All Data
+            Purge Pipeline Data
           </Button>
         </Box>
       </Box>
@@ -238,7 +238,7 @@ function StorageSection() {
         title={confirm === 'purge-all' ? 'Purge all data?' : `Purge ${selected.size} item(s)?`}
         body={
           confirm === 'purge-all'
-            ? 'This will delete ALL extract and parquet data from disk. This cannot be undone.'
+            ? 'This will delete all pipeline extract and parquet data from disk. The static directory will not be touched. This cannot be undone.'
             : `Delete the ${selected.size} selected path(s) from disk? This cannot be undone.`
         }
         onConfirm={handleConfirm}
@@ -252,6 +252,7 @@ function StorageSection() {
 
 function RunsSection() {
   const { enqueueSnackbar } = useSnackbar()
+  const qc = useQueryClient()
   const [confirm, setConfirm] = useState(false)
 
   const clearRunsMutation = useMutation({
@@ -259,6 +260,7 @@ function RunsSection() {
     onSuccess: (d) => {
       enqueueSnackbar(d.message, { variant: 'success' })
       setConfirm(false)
+      qc.invalidateQueries({ queryKey: ['pipeline-graph'] })
     },
     onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
   })

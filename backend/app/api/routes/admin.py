@@ -93,12 +93,15 @@ async def get_storage_tree():
 async def purge_storage_path(path: str = Body(..., embed=True)):
     """
     Delete a single file or directory under DATA_DIR.
-    Path must be inside DATA_DIR to prevent traversal.
+    Path must be inside DATA_DIR (but not inside STATIC_DIR) to prevent traversal.
     """
     data_root = Path(settings.DATA_DIR).resolve()
+    static_root = Path(settings.STATIC_DIR).resolve()
     target = Path(path).resolve()
     if not str(target).startswith(str(data_root)):
         raise HTTPException(status_code=400, detail="Path is outside DATA_DIR")
+    if str(target).startswith(str(static_root)):
+        raise HTTPException(status_code=400, detail="Cannot delete paths inside the static directory")
     if not target.exists():
         raise HTTPException(status_code=404, detail="Path not found")
 

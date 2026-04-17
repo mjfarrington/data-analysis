@@ -18,6 +18,7 @@ import {
   useTheme, alpha, Tooltip, LinearProgress,
   Dialog, DialogTitle, DialogContent, DialogActions,
   Tab, Tabs, TextField, Menu as MuiMenu, InputAdornment,
+  Switch, FormControlLabel, Grid,
 } from '@mui/material'
 import {
   Delete, Add, Refresh, AccountTree, Storage, Info,
@@ -25,7 +26,7 @@ import {
   ZoomIn as ZoomInIcon, ZoomOut as ZoomOutIcon,
   FitScreen as FitScreenIcon, RestartAlt as ResetIcon,
   Edit as EditIcon, OpenInNew as OpenInNewIcon,
-  PlayArrow, Schedule,
+  PlayArrow, Schedule, CloudUpload,
   Search as SearchIcon, ViewModule as SnapGridIcon,
 } from '@mui/icons-material'
 import { useAppSettings } from '../hooks/useAppSettings'
@@ -33,7 +34,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSnackbar } from 'notistack'
 import { formatDistanceToNow } from 'date-fns'
 import { parseApiDate } from '../utils/dates'
-import { graphApi, pipelinesApi, GraphNode as ApiNode, GraphEdge as ApiEdge } from '../api/client'
+import { graphApi, pipelinesApi, sqlFilesApi, connectionsApi, GraphNode as ApiNode, GraphEdge as ApiEdge, ExecutionContext, ExtractConfig, Pipeline, LoadSparkRequest, LoadSparkResult, ParquetDatesResult } from '../api/client'
+import ExtractConfigWizard from '../components/ExtractConfigWizard'
+import DateField from '../components/DateField'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const NODE_W = 240
@@ -67,8 +70,7 @@ const RUN_STATUS_ICON: Record<string, React.ReactNode> = {
 const SOURCE_LABEL: Record<string, string> = {
   grpc: 'gRPC',
   jdbc: 'JDBC',
-  json: 'JSON',
-  csv: 'CSV',
+  datawarehouse: 'DW',
 }
 
 // ─── Module-level action registry (singleton for this page) ─────────────────
@@ -77,14 +79,19 @@ const nodeActions = {
   onTrigger: (_id: number) => {},
   onViewDeps: (_id: number) => {},
   onOpenPipelines: (_id: number) => {},
+  onLoadSpark: (_id: number) => {},
 }
+
+// Module-level context passed down to nodes (avoids prop-drilling through ReactFlow)
+const nodeContext = { businessDate: null as string | null }
 
 // ─── Custom node component ────────────────────────────────────────────────────
 function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean }) {
   const isRunning = data.last_run_status === 'running'
-  const isFailed = data.last_run_status === 'failed'
-  const borderColor = selected ? '#3b82f6' : (STATUS_COLOUR[data.status] ?? '#2a3550')
-  const runColor = data.last_run_status ? (RUN_STATUS_COLOUR[data.last_run_status] ?? '#6b7280') : undefined
+  const runColor = data.last_run_status ? (RUN_STATUS_COLOUR[data.last_run_status] ?? '#6b7280') : '#2a3550'
+  const borderColor = selected ? '#3b82f6' : runColor
+  const statusColor = STATUS_COLOUR[data.status] ?? '#94a3b8'
+  const appNames = data.app_names ?? []
 
   return (
     <>
@@ -120,6 +127,12 @@ function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean })
               <OpenInNewIcon sx={{ fontSize: 14 }} />
             </IconButton>
           </Tooltip>
+          <Tooltip title="Load to Spark">
+            <IconButton size="small" onClick={() => nodeActions.onLoadSpark(data.id)}
+              sx={{ color: '#94a3b8', p: 0.5, '&:hover': { color: '#a78bfa', bgcolor: '#1e293b' } }}>
+              <CloudUpload sx={{ fontSize: 14 }} />
+            </IconButton>
+          </Tooltip>
         </Box>
       </NodeToolbar>
 
@@ -127,23 +140,16 @@ function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean })
       <Box
         sx={{
           width: NODE_W,
-          height: NODE_H,
           borderRadius: '10px',
           border: `2px solid ${borderColor}`,
           bgcolor: '#111827',
           boxShadow: selected
             ? `0 0 0 3px ${alpha('#3b82f6', 0.25)}, 0 4px 16px rgba(0,0,0,0.5)`
-            : isFailed
-              ? `0 0 0 2px ${alpha(RUN_STATUS_COLOUR.failed, 0.4)}`
-              : '0 2px 8px rgba(0,0,0,0.4)',
+            : '0 2px 8px rgba(0,0,0,0.4)',
           display: 'flex',
           flexDirection: 'column',
-          justifyContent: 'space-between',
-          px: 1.5,
-          py: 1,
           cursor: 'pointer',
           transition: 'box-shadow 0.15s, border-color 0.15s',
-          position: 'relative',
           overflow: 'hidden',
           ...(isRunning && {
             '@keyframes borderPulse': {
@@ -154,33 +160,43 @@ function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean })
           }),
         }}
       >
-        {/* Animated status bar at top */}
-        {runColor && (
-          <Box sx={{
-            position: 'absolute', top: 0, left: 0, right: 0, height: 3, bgcolor: runColor,
-            ...(isRunning && {
-              '@keyframes shimmer': {
-                '0%': { backgroundPosition: '-200% 0' },
-                '100%': { backgroundPosition: '200% 0' },
-              },
-              background: `linear-gradient(90deg, ${RUN_STATUS_COLOUR.running} 0%, #60a5fa 50%, ${RUN_STATUS_COLOUR.running} 100%)`,
-              backgroundSize: '200% 100%',
-              animation: 'shimmer 1.4s linear infinite',
-            }),
-          }} />
-        )}
-
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-          <Storage sx={{ fontSize: 15, color: '#3b82f6', flexShrink: 0 }} />
+        {/* Solid status header */}
+        <Box sx={{
+          bgcolor: alpha(statusColor, 0.18),
+          borderBottom: `1px solid ${alpha(statusColor, 0.25)}`,
+          px: 1.25, py: 0.5,
+          display: 'flex', alignItems: 'center', gap: 0.75,
+        }}>
+          <Storage sx={{ fontSize: 13, color: statusColor, flexShrink: 0 }} />
           <Typography sx={{
-            fontSize: '0.8rem', fontWeight: 700, color: '#e2e8f0',
-            lineHeight: 1.2, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            fontSize: '0.78rem', fontWeight: 700, color: '#e2e8f0',
+            flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           }}>
             {data.name}
           </Typography>
+          <Typography sx={{ fontSize: '0.6rem', fontWeight: 600, color: statusColor, textTransform: 'uppercase', letterSpacing: '0.06em', flexShrink: 0 }}>
+            {data.status}
+          </Typography>
         </Box>
 
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+        {/* App names */}
+        {appNames.length > 0 && (
+          <Box sx={{ px: 1.25, pt: 0.5, pb: 0.25, display: 'flex', flexWrap: 'wrap', gap: 0.4 }}>
+            {appNames.slice(0, 3).map((n) => (
+              <Typography key={n} sx={{
+                fontSize: '0.6rem', color: '#94a3b8', bgcolor: '#1e293b',
+                px: 0.6, py: 0.1, borderRadius: 0.5,
+                maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{n}</Typography>
+            ))}
+            {appNames.length > 3 && (
+              <Typography sx={{ fontSize: '0.6rem', color: '#64748b' }}>+{appNames.length - 3}</Typography>
+            )}
+          </Box>
+        )}
+
+        {/* Footer */}
+        <Box sx={{ display: 'flex', alignItems: 'center', px: 1.25, py: 0.5, gap: 0.5 }}>
           <Chip
             label={SOURCE_LABEL[data.source_type] ?? data.source_type.toUpperCase()}
             size="small"
@@ -193,11 +209,11 @@ function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean })
             </Box>
           )}
           <Box sx={{ flex: 1 }} />
-          <Chip
-            label={data.status}
-            size="small"
-            sx={{ height: 16, fontSize: '0.62rem', bgcolor: alpha(STATUS_COLOUR[data.status] ?? '#2a3550', 0.15), color: STATUS_COLOUR[data.status] ?? '#94a3b8' }}
-          />
+          {nodeContext.businessDate && (
+            <Typography sx={{ fontSize: '0.58rem', color: '#64748b', fontFamily: 'monospace' }}>
+              {nodeContext.businessDate}
+            </Typography>
+          )}
         </Box>
       </Box>
 
@@ -565,50 +581,89 @@ function EditPipelineDialog({ pipelineId, open, onClose }: EditDialogProps) {
     queryFn: () => pipelinesApi.get(pipelineId!).then((r) => r.data),
     enabled: !!pipelineId && open,
   })
+  const { data: sqlFiles = [] } = useQuery({
+    queryKey: ['sql-files', 'extract'],
+    queryFn: () => sqlFilesApi.list('extract').then((r) => r.data),
+    enabled: open,
+  })
+  const { data: connections = [] } = useQuery({
+    queryKey: ['connections'],
+    queryFn: () => connectionsApi.list().then((r) => r.data),
+    enabled: open,
+  })
+
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [status, setStatus] = useState<'active' | 'inactive' | 'draft'>('active')
+  const [extractConfig, setExtractConfig] = useState<ExtractConfig | null>(null)
+
   useEffect(() => {
     if (pipeline) {
       setName(pipeline.name)
       setDescription(pipeline.description ?? '')
       setStatus(pipeline.status)
+      setExtractConfig(pipeline.extract_config)
     }
   }, [pipeline])
+
+  const setExtract = (key: string, val: unknown) =>
+    setExtractConfig((prev) => prev ? { ...prev, [key]: val } : prev)
+
   const mut = useMutation({
-    mutationFn: () => pipelinesApi.update(pipelineId!, { name, description, status }),
+    mutationFn: () => pipelinesApi.update(pipelineId!, {
+      name,
+      description,
+      status,
+      ...(extractConfig && { extract_config: extractConfig }),
+    }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['pipeline-graph'] })
       qc.invalidateQueries({ queryKey: ['pipeline', pipelineId] })
       onClose()
     },
   })
+
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ pb: 1 }}>Edit Pipeline</DialogTitle>
-      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
-        <TextField
-          label="Name" value={name} onChange={(e) => setName(e.target.value)}
-          size="small" fullWidth autoFocus
-        />
+      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '20px !important' }}>
+        {/* Identity fields */}
+        <Box sx={{ display: 'flex', gap: 1.5 }}>
+          <TextField
+            label="Name" value={name} onChange={(e) => setName(e.target.value)}
+            size="small" sx={{ flex: 1 }} autoFocus
+          />
+          <FormControl size="small" sx={{ width: 140 }}>
+            <InputLabel>Status</InputLabel>
+            <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
+              <MenuItem value="active">Active</MenuItem>
+              <MenuItem value="inactive">Inactive</MenuItem>
+              <MenuItem value="draft">Draft</MenuItem>
+            </Select>
+          </FormControl>
+        </Box>
         <TextField
           label="Description" value={description} onChange={(e) => setDescription(e.target.value)}
-          size="small" fullWidth multiline rows={3}
+          size="small" fullWidth multiline rows={2}
         />
-        <FormControl size="small" fullWidth>
-          <InputLabel>Status</InputLabel>
-          <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
-            <MenuItem value="active">Active</MenuItem>
-            <MenuItem value="inactive">Inactive</MenuItem>
-            <MenuItem value="draft">Draft</MenuItem>
-          </Select>
-        </FormControl>
+
+        {/* Extract configuration */}
+        {extractConfig ? (
+          <ExtractConfigWizard
+            config={extractConfig}
+            onChange={setExtract}
+            sqlFiles={sqlFiles}
+            connections={connections}
+          />
+        ) : (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}><CircularProgress size={20} /></Box>
+        )}
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} size="small">Cancel</Button>
         <Button
           variant="contained" size="small"
-          disabled={!name.trim() || mut.isPending}
+          disabled={!name.trim() || mut.isPending || !extractConfig}
           onClick={() => mut.mutate()}
         >
           {mut.isPending ? 'Saving…' : 'Save'}
@@ -731,6 +786,170 @@ function NodeDetailPanel({ selectedNode, onEdit }: NodeDetailPanelProps) {
   )
 }
 
+// ─── Load to Spark dialog ──────────────────────────────────────────────────────
+function LoadToSparkDialog({ pipeline, open, onClose }: { pipeline: Pipeline | null; open: boolean; onClose: () => void }) {
+  const { enqueueSnackbar } = useSnackbar()
+  const qc = useQueryClient()
+
+  const { data: ctx } = useQuery<ExecutionContext>({
+    queryKey: ['execution-context'],
+    queryFn: () => pipelinesApi.getContext().then((r) => r.data),
+    enabled: open,
+  })
+
+  const { data: parquetInfo } = useQuery<ParquetDatesResult>({
+    queryKey: ['parquet-dates', pipeline?.id],
+    queryFn: () => pipelinesApi.parquetDates(pipeline!.id).then((r) => r.data),
+    enabled: open && !!pipeline,
+  })
+
+  const nsPrefix = ctx?.namespace_prefix || 'data_'
+  const derivedDate = ctx?.business_date || ''
+
+  const [date, setDate] = useState('')
+  const [namespaceDb, setNamespaceDb] = useState('')
+  const [tableName, setTableName] = useState('')
+  const [mode, setMode] = useState<'overwrite' | 'append'>('overwrite')
+  const [result, setResult] = useState<LoadSparkResult | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  const derivedNs = (date || derivedDate)
+    ? `${nsPrefix}${(date || derivedDate).replace(/-/g, '')}`
+    : ''
+
+  useEffect(() => {
+    if (open) {
+      setDate(ctx?.business_date || '')
+      setResult(null)
+      setErrorMsg(null)
+    }
+  }, [open, ctx])
+
+  useEffect(() => {
+    const d = date || derivedDate
+    if (d) setNamespaceDb(`${nsPrefix}${d.replace(/-/g, '')}`)
+  }, [date, derivedDate, nsPrefix])
+
+  const jobName = pipeline?.extract_config?.job_name
+    || pipeline?.name?.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '') || ''
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      const body: LoadSparkRequest = {
+        date: date || derivedDate,
+        namespace_db: namespaceDb || derivedNs,
+        table_name: tableName || undefined,
+        mode,
+      }
+      return pipelinesApi.loadToSpark(pipeline!.id, body).then((r) => r.data)
+    },
+    onSuccess: (data: LoadSparkResult) => {
+      setResult(data)
+      setErrorMsg(null)
+      enqueueSnackbar(`Loaded ${data.rows_loaded.toLocaleString()} rows into ${data.table}`, { variant: 'success' })
+      qc.invalidateQueries({ queryKey: ['catalog'] })
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        || (e as Error).message || 'Unknown error'
+      setErrorMsg(detail)
+      setResult(null)
+    },
+  })
+
+  const availableDates = parquetInfo?.dates ?? []
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <CloudUpload fontSize="small" color="primary" />
+        Load to Spark: {pipeline?.name}
+      </DialogTitle>
+      <DialogContent dividers>
+        <Alert severity="info" sx={{ mb: 2, fontSize: '0.78rem' }}>
+          Reads all saved <strong>{jobName}</strong> output files for the selected date and consolidates every app_id into one Spark table.
+        </Alert>
+
+        {availableDates.length > 0 && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block' }}>
+              Available dates with data:
+            </Typography>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+              {availableDates.map((d) => (
+                <Chip
+                  key={d.date}
+                  label={`${d.date} (${d.app_ids} app${d.app_ids !== 1 ? 's' : ''}, ${d.file_count} files)`}
+                  size="small"
+                  variant={date === d.date ? 'filled' : 'outlined'}
+                  color={date === d.date ? 'primary' : 'default'}
+                  onClick={() => { setDate(d.date); setResult(null); setErrorMsg(null) }}
+                  sx={{ fontFamily: '"JetBrains Mono", monospace', fontSize: '0.72rem', cursor: 'pointer' }}
+                />
+              ))}
+            </Box>
+          </Box>
+        )}
+
+        {availableDates.length === 0 && parquetInfo && (
+          <Alert severity="warning" sx={{ mb: 2, fontSize: '0.78rem' }}>
+            No parquet/CSV output found for job <strong>{parquetInfo.job_name}</strong>. Run the pipeline first.
+          </Alert>
+        )}
+
+        <Grid container spacing={2}>
+          <Grid item xs={6}>
+            <DateField label="Date" value={date || derivedDate} fullWidth
+              onChange={(v) => { setDate(v); setResult(null); setErrorMsg(null) }}
+              helperText="Business date to load" />
+          </Grid>
+          <Grid item xs={6}>
+            <TextField label="Spark database" value={namespaceDb} fullWidth size="small"
+              placeholder={derivedNs || 'e.g. data_20260417'}
+              helperText="Spark catalog database (namespace)"
+              onChange={(e) => setNamespaceDb(e.target.value)} />
+          </Grid>
+          <Grid item xs={6}>
+            <TextField label="Table name" value={tableName} fullWidth size="small"
+              placeholder={jobName.toLowerCase() || 'default: job_name'}
+              helperText="Override table name (default: job name)"
+              onChange={(e) => setTableName(e.target.value)} />
+          </Grid>
+          <Grid item xs={6}>
+            <TextField select label="Write mode" value={mode} fullWidth size="small"
+              onChange={(e) => setMode(e.target.value as 'overwrite' | 'append')}>
+              <MenuItem value="overwrite">Overwrite</MenuItem>
+              <MenuItem value="append">Append</MenuItem>
+            </TextField>
+          </Grid>
+        </Grid>
+
+        {result && (
+          <Alert severity="success" sx={{ mt: 2, fontSize: '0.78rem' }}>
+            Loaded <strong>{result.rows_loaded.toLocaleString()}</strong> rows from{' '}
+            <strong>{result.app_ids_merged}</strong> app_id(s) into{' '}
+            <code>{result.table}</code>
+          </Alert>
+        )}
+        {errorMsg && (
+          <Alert severity="error" sx={{ mt: 2, fontSize: '0.78rem', wordBreak: 'break-word' }}>
+            {errorMsg}
+          </Alert>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Close</Button>
+        <Button variant="contained" color="primary"
+          startIcon={mutation.isPending ? <CircularProgress size={14} color="inherit" /> : <CloudUpload />}
+          onClick={() => mutation.mutate()}
+          disabled={mutation.isPending}>
+          Load to Spark
+        </Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function PipelineGraph() {
   const theme = useTheme()
@@ -745,12 +964,21 @@ export default function PipelineGraph() {
   const [snapGrid, setSnapGrid] = useState(false)
   const [search, setSearch] = useState('')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
+  const [loadSparkPipeline, setLoadSparkPipeline] = useState<Pipeline | null>(null)
 
   const { data: graph, isLoading, refetch } = useQuery({
     queryKey: ['pipeline-graph'],
     queryFn: () => graphApi.graph().then((r) => r.data),
     refetchInterval: 30_000,
   })
+
+  const { data: execCtx } = useQuery<ExecutionContext>({
+    queryKey: ['execution-context'],
+    queryFn: () => pipelinesApi.getContext().then((r) => r.data),
+    refetchInterval: 60_000,
+  })
+  // Keep module-level context in sync so PipelineNode can read it without props
+  nodeContext.businessDate = execCtx?.business_date ?? null
 
   // ── Mutations ────────────────────────────────────────────────────────────────
   const runMut = useMutation({
@@ -788,11 +1016,17 @@ export default function PipelineGraph() {
   const handleEdit = useCallback((id: number) => { setSelectedId(id); setEditOpen(true) }, [])
   const handleTrigger = useCallback((id: number) => { runMut.mutate(id) }, [runMut])
   const handleViewDeps = useCallback((id: number) => { setSelectedId(id); setSideTab(1) }, [])
-  const handleOpenPipelines = useCallback((_id: number) => { navigate('/studio') }, [navigate])
+  const handleOpenPipelines = useCallback((id: number) => { navigate(`/studio?id=${id}`) }, [navigate])
+  const handleLoadSpark = useCallback((id: number) => {
+    const pl = graph?.nodes.find((n) => n.id === id) as unknown as Pipeline | undefined
+    // graph nodes don't carry full Pipeline; fetch it
+    pipelinesApi.get(id).then((r) => setLoadSparkPipeline(r.data))
+  }, [graph])
   nodeActions.onEdit = handleEdit
   nodeActions.onTrigger = handleTrigger
   nodeActions.onViewDeps = handleViewDeps
   nodeActions.onOpenPipelines = handleOpenPipelines
+  nodeActions.onLoadSpark = handleLoadSpark
 
   // ── Graph layout ─────────────────────────────────────────────────────────────
   const { nodes: initNodes, edges: initEdges } = useMemo(
@@ -1143,6 +1377,13 @@ export default function PipelineGraph() {
         pipelineId={selectedId}
         open={editOpen}
         onClose={() => setEditOpen(false)}
+      />
+
+      {/* ── Load to Spark dialog ── */}
+      <LoadToSparkDialog
+        pipeline={loadSparkPipeline}
+        open={loadSparkPipeline !== null}
+        onClose={() => setLoadSparkPipeline(null)}
       />
     </Box>
   )

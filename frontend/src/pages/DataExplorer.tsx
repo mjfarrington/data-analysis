@@ -15,7 +15,7 @@ import {
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { dataApi, DataTable, CatalogTable } from '../api/client'
+import { dataApi, DataTable, CatalogTable, FilePreviewResult } from '../api/client'
 import { formatDistanceToNow } from 'date-fns'
 import { parseApiDate } from '../utils/dates'
 import { useSnackbar } from 'notistack'
@@ -90,6 +90,8 @@ function CatalogTree({
   onDeleteTable,
   onDeleteDb,
   onClearDb,
+  expandedNodes,
+  onToggleNode,
 }: {
   tables: CatalogTable[]
   loading: boolean
@@ -98,28 +100,10 @@ function CatalogTree({
   onDeleteTable: (db: string, table: string) => void
   onDeleteDb: (db: string) => void
   onClearDb: (db: string) => void
+  expandedNodes: Set<string>
+  onToggleNode: (key: string) => void
 }) {
   const theme = useTheme()
-  const [expandedDbs, setExpandedDbs] = useState<Set<string>>(new Set())
-
-  // Auto-expand all databases when data arrives
-  useEffect(() => {
-    const dbs = new Set<string>()
-    for (const t of tables) dbs.add(t.database || 'default')
-    setExpandedDbs((prev) => {
-      const merged = new Set(prev)
-      dbs.forEach((db) => merged.add(db))
-      return merged
-    })
-  }, [tables.length])
-
-  const toggleDb = (db: string) =>
-    setExpandedDbs((prev) => {
-      const next = new Set(prev)
-      if (next.has(db)) next.delete(db)
-      else next.add(db)
-      return next
-    })
 
   const grouped: Record<string, CatalogTable[]> = {}
   for (const t of tables) {
@@ -140,17 +124,49 @@ function CatalogTree({
     )
   }
 
+  const SectionNode = ({ nodeKey, label, count, icon, children }: { nodeKey: string; label: string; count: number; icon: React.ReactNode; children: React.ReactNode }) => {
+    const isOpen = expandedNodes.has(nodeKey)
+    return (
+      <Box>
+        <Box
+          onClick={() => onToggleNode(nodeKey)}
+          sx={{
+            display: 'flex', alignItems: 'center',
+            py: 0.375, pl: 2.5, pr: 0.5,
+            cursor: 'pointer',
+            borderBottom: `1px solid ${theme.palette.divider}`,
+            '&:hover': { bgcolor: 'action.hover' },
+          }}
+        >
+          <ExpandMore sx={{
+            fontSize: 13, mr: 0.25, flexShrink: 0, color: 'text.disabled',
+            transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
+            transition: 'transform 0.15s',
+          }} />
+          {icon}
+          <Typography variant="caption" sx={{ flex: 1, fontSize: '0.7rem', fontWeight: 600, color: 'text.secondary', ml: 0.5 }}>
+            {label}
+          </Typography>
+          <Chip label={count} size="small" sx={{ fontSize: '0.58rem', height: 13, mr: 0.25, flexShrink: 0 }} />
+        </Box>
+        <Collapse in={isOpen}>
+          {children}
+        </Collapse>
+      </Box>
+    )
+  }
+
   return (
     <Box>
       {Object.entries(grouped).sort(([a], [b]) => a.localeCompare(b)).map(([db, items]) => {
-        const isExpanded = expandedDbs.has(db)
+        const isExpanded = expandedNodes.has(`db:${db}`)
         const permanentTables = items.filter((t) => !t.is_temporary)
         const views = items.filter((t) => t.is_temporary)
         return (
           <Box key={db}>
             {/* Database row */}
             <Box
-              onClick={() => toggleDb(db)}
+              onClick={() => onToggleNode(`db:${db}`)}
               sx={{
                 display: 'flex', alignItems: 'center',
                 py: 0.5, px: 0.75,
@@ -191,22 +207,22 @@ function CatalogTree({
 
             <Collapse in={isExpanded}>
               {permanentTables.length > 0 && (
-                <Box>
-                  <Box sx={{ px: 3.5, py: 0.375, borderBottom: `1px solid ${theme.palette.divider}`, bgcolor: 'action.hover' }}>
-                    <Typography variant="caption" sx={{ fontSize: '0.6rem', fontWeight: 700, color: 'text.disabled', letterSpacing: '0.06em' }}>
-                      TABLES ({permanentTables.length})
-                    </Typography>
-                  </Box>
+                <SectionNode
+                  nodeKey={`sec:${db}:tables`}
+                  label="Tables"
+                  count={permanentTables.length}
+                  icon={<TableView sx={{ fontSize: 12, color: 'primary.main', flexShrink: 0 }} />}
+                >
                   {permanentTables.map((t) => (
                     <ListItemButton
                       key={t.name}
                       selected={selected?.name === t.name && selected?.database === t.database}
                       onClick={() => onSelect(t)}
-                      sx={{ py: 0.375, pl: 3.5, pr: 0.5, '&:hover .del-btn': { opacity: 1 } }}
+                      sx={{ py: 0.375, pl: 4.5, pr: 0.5, '&:hover .del-btn': { opacity: 1 } }}
                     >
-                      <TableView sx={{ fontSize: 14, color: 'primary.main', mr: 0.75, flexShrink: 0 }} />
+                      <TableView sx={{ fontSize: 13, color: 'primary.main', mr: 0.75, flexShrink: 0 }} />
                       <Typography variant="caption" noWrap
-                        sx={{ flex: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.75rem' }}>
+                        sx={{ flex: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.74rem' }}>
                         {t.name}
                       </Typography>
                       <IconButton size="small" className="del-btn" color="error"
@@ -216,25 +232,25 @@ function CatalogTree({
                       </IconButton>
                     </ListItemButton>
                   ))}
-                </Box>
+                </SectionNode>
               )}
               {views.length > 0 && (
-                <Box>
-                  <Box sx={{ px: 3.5, py: 0.375, borderBottom: `1px solid ${theme.palette.divider}`, bgcolor: 'action.hover' }}>
-                    <Typography variant="caption" sx={{ fontSize: '0.6rem', fontWeight: 700, color: 'text.disabled', letterSpacing: '0.06em' }}>
-                      VIEWS ({views.length})
-                    </Typography>
-                  </Box>
+                <SectionNode
+                  nodeKey={`sec:${db}:views`}
+                  label="Views"
+                  count={views.length}
+                  icon={<Visibility sx={{ fontSize: 12, color: 'warning.main', flexShrink: 0 }} />}
+                >
                   {views.map((t) => (
                     <ListItemButton
                       key={t.name}
                       selected={selected?.name === t.name && selected?.database === t.database}
                       onClick={() => onSelect(t)}
-                      sx={{ py: 0.375, pl: 3.5, pr: 0.5, '&:hover .del-btn': { opacity: 1 } }}
+                      sx={{ py: 0.375, pl: 4.5, pr: 0.5, '&:hover .del-btn': { opacity: 1 } }}
                     >
-                      <Visibility sx={{ fontSize: 14, color: 'warning.main', mr: 0.75, flexShrink: 0 }} />
+                      <Visibility sx={{ fontSize: 13, color: 'warning.main', mr: 0.75, flexShrink: 0 }} />
                       <Typography variant="caption" noWrap
-                        sx={{ flex: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.75rem' }}>
+                        sx={{ flex: 1, fontFamily: '"JetBrains Mono", monospace', fontSize: '0.74rem' }}>
                         {t.name}
                       </Typography>
                       <IconButton size="small" className="del-btn" color="error"
@@ -244,7 +260,7 @@ function CatalogTree({
                       </IconButton>
                     </ListItemButton>
                   ))}
-                </Box>
+                </SectionNode>
               )}
             </Collapse>
           </Box>
@@ -419,6 +435,21 @@ export default function DataExplorer() {
   const [browserOpen, setBrowserOpen] = useState(() => localStorage.getItem('data_browser_open') !== 'false')
   const [editorOpen, setEditorOpen] = useState(true)
   const [tableFilter, setTableFilter] = useState('')
+  const [fileFilter, setFileFilter] = useState('')
+  const [expandedCatalogNodes, setExpandedCatalogNodes] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('de_catalog_expanded')
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set()
+    } catch { return new Set() }
+  })
+  const toggleCatalogNode = useCallback((key: string) => {
+    setExpandedCatalogNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      localStorage.setItem('de_catalog_expanded', JSON.stringify([...next]))
+      return next
+    })
+  }, [])
   // Results sort/search/filter
   const [sortCol, setSortCol] = useState<number | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
@@ -502,6 +533,22 @@ export default function DataExplorer() {
       dataApi.query(sql, limit, offset, database).then((r) => r.data),
   })
 
+  const [resultSource, setResultSource] = useState<'query' | 'file'>('query')
+  const [lastFileName, setLastFileName] = useState<string | null>(null)
+
+  const filePreviewMutation = useMutation({
+    mutationFn: ({ name, offset }: { name: string; offset: number }) =>
+      dataApi.previewFile(name, 200, offset).then((r) => r.data),
+  })
+
+  // Unified result regardless of source
+  const activeResult = resultSource === 'file'
+    ? (filePreviewMutation.data ? { ...filePreviewMutation.data, duration_ms: null as null } : undefined)
+    : (queryMutation.data ? { ...queryMutation.data, total_rows: null as null, file_count: null as null, format: null as null } : undefined)
+  const activeIsPending = resultSource === 'file' ? filePreviewMutation.isPending : queryMutation.isPending
+  const activeIsError   = resultSource === 'file' ? filePreviewMutation.isError   : queryMutation.isError
+  const activeError     = resultSource === 'file' ? filePreviewMutation.error     : queryMutation.error
+
   const dropTableMutation = useMutation({
     mutationFn: ({ db, table }: { db: string; table: string }) =>
       dataApi.dropTable(db, table),
@@ -560,13 +607,17 @@ export default function DataExplorer() {
     setResultPage(0)
     setSortCol(null); setSortDir('asc'); setRowSearch(''); setColFilters({})
     setLastQuery({ sql, database: activeDb || undefined })
+    setResultSource('query')
     queryMutation.mutate({ sql, offset: 0, database: activeDb || undefined })
   }
 
   const handlePageChange = (newPage: number) => {
-    if (!lastQuery) return
     setResultPage(newPage)
-    queryMutation.mutate({ sql: lastQuery.sql, offset: newPage * limit, database: lastQuery.database })
+    if (resultSource === 'file' && lastFileName) {
+      filePreviewMutation.mutate({ name: lastFileName, offset: newPage * 200 })
+    } else if (lastQuery) {
+      queryMutation.mutate({ sql: lastQuery.sql, offset: newPage * limit, database: lastQuery.database })
+    }
   }
 
   const handlePreviewTable = (t: CatalogTable) => {
@@ -577,19 +628,18 @@ export default function DataExplorer() {
     setActiveDb(db)
     setResultPage(0)
     setSortCol(null); setSortDir('asc'); setRowSearch(''); setColFilters({})
+    setResultSource('query')
     const previewSql = `SELECT * FROM ${fullName} LIMIT 100`
     setLastQuery({ sql: previewSql, database: db })
     queryMutation.mutate({ sql: previewSql, offset: 0, database: db })
   }
 
   const handlePreviewFile = (t: DataTable) => {
-    const parts = t.name.split('/')
-    const viewName = (parts[0] + '__' + parts.slice(1).join('/')).replace(/[^0-9a-zA-Z_]/g, '_')
-    const previewSql = `SELECT * FROM \`${viewName}\``
     setResultPage(0)
     setSortCol(null); setSortDir('asc'); setRowSearch(''); setColFilters({})
-    setLastQuery({ sql: previewSql })
-    queryMutation.mutate({ sql: previewSql, offset: 0 })
+    setResultSource('file')
+    setLastFileName(t.name)
+    filePreviewMutation.mutate({ name: t.name, offset: 0 })
   }
 
   const handleUseTable = (t: CatalogTable) => {
@@ -637,16 +687,16 @@ export default function DataExplorer() {
   }
 
   const filterColValues = useMemo(() => {
-    if (filterAnchor === null || !queryMutation.data) return []
+    if (filterAnchor === null || !activeResult) return []
     const col = filterAnchor.col
     const seen = new Set<string>()
     const vals: string[] = []
-    for (const row of queryMutation.data.rows) {
+    for (const row of activeResult.rows) {
       const v = row[col] === null ? '(null)' : String(row[col])
       if (!seen.has(v)) { seen.add(v); vals.push(v) }
     }
     return vals.sort((a, b) => a.localeCompare(b))
-  }, [filterAnchor, queryMutation.data])
+  }, [filterAnchor, activeResult])
 
   const visibleFilterValues = useMemo(() =>
     filterSearch ? filterColValues.filter((v) => v.toLowerCase().includes(filterSearch.toLowerCase())) : filterColValues,
@@ -654,8 +704,8 @@ export default function DataExplorer() {
   )
 
   const displayRows = useMemo(() => {
-    if (!queryMutation.data) return []
-    let rows = queryMutation.data.rows
+    if (!activeResult) return []
+    let rows = activeResult.rows
     if (rowSearch) {
       const q = rowSearch.toLowerCase()
       rows = rows.filter((row) => row.some((cell) => cell !== null && String(cell).toLowerCase().includes(q)))
@@ -682,7 +732,7 @@ export default function DataExplorer() {
       })
     }
     return rows
-  }, [queryMutation.data, rowSearch, colFilters, sortCol, sortDir])
+  }, [activeResult, rowSearch, colFilters, sortCol, sortDir])
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 96px)', overflow: 'hidden' }}>
@@ -746,8 +796,8 @@ export default function DataExplorer() {
                 Ctrl/⌘+Enter to run · SELECT, SHOW, DESCRIBE only
                 {activeDb && <> · db: <strong style={{ fontFamily: 'monospace' }}>{activeDb}</strong></>}
               </Typography>
-              {queryMutation.isError && (
-                <Alert severity="error" sx={{ mt: 0.75, py: 0.375, fontSize: '0.78rem' }}>{(queryMutation.error as Error).message}</Alert>
+              {activeIsError && (
+                <Alert severity="error" sx={{ mt: 0.75, py: 0.375, fontSize: '0.78rem' }}>{(activeError as Error).message}</Alert>
               )}
             </Box>
           </Collapse>
@@ -795,10 +845,7 @@ export default function DataExplorer() {
                 TabIndicatorProps={{ style: { height: 2 } }}
               >
                 <Tab label={
-                  <Badge badgeContent={catalogTables?.length ?? 0} color="primary" max={99}
-                    sx={{ '& .MuiBadge-badge': { fontSize: '0.58rem', height: 15, minWidth: 15 } }}>
-                    <Typography variant="caption" fontWeight={600} sx={{ fontSize: '0.72rem' }}>Catalog</Typography>
-                  </Badge>
+                  <Typography variant="caption" fontWeight={600} sx={{ fontSize: '0.72rem' }}>Catalog</Typography>
                 } sx={{ minHeight: 32, py: 0, px: 1 }} />
                 <Tab label={
                   <Badge badgeContent={fileTables?.length ?? 0} color="default" max={99}
@@ -812,10 +859,7 @@ export default function DataExplorer() {
                 <Tooltip title="Catalog" placement="left">
                   <IconButton size="small" onClick={() => { setBrowserTab(0); toggleBrowser() }}
                     sx={{ color: browserTab === 0 ? 'primary.main' : 'text.secondary', p: 0.5 }}>
-                    <Badge badgeContent={catalogTables?.length ?? 0} color="primary" max={99}
-                      sx={{ '& .MuiBadge-badge': { fontSize: '0.55rem', height: 14, minWidth: 14 } }}>
-                      <TableView sx={{ fontSize: 17 }} />
-                    </Badge>
+                    <TableView sx={{ fontSize: 17 }} />
                   </IconButton>
                 </Tooltip>
                 <Tooltip title="Files" placement="left">
@@ -861,6 +905,8 @@ export default function DataExplorer() {
                       onDeleteTable={(db, table) => setDeleteConfirm({ type: 'table', db, table })}
                       onDeleteDb={(db) => setDeleteConfirm({ type: 'database', db })}
                       onClearDb={(db) => setDeleteConfirm({ type: 'clear-tables', db })}
+                      expandedNodes={expandedCatalogNodes}
+                      onToggleNode={toggleCatalogNode}
                     />
                   </Box>
                   {selectedCatalogTable && (
@@ -888,7 +934,9 @@ export default function DataExplorer() {
 
               {/* ── File store tab ── */}
               {browserTab === 1 && (() => {
-                const files = fileTables ?? []
+                const files = (fileTables ?? []).filter((t) =>
+                  !fileFilter || t.name.toLowerCase().includes(fileFilter.toLowerCase())
+                )
                 const cutoff = new Date(Date.now() - olderThanDays * 86400_000)
                 const oldFiles = files.filter((t) => t.last_modified && parseApiDate(t.last_modified) < cutoff)
                 const allSelected = files.length > 0 && files.every((t) => selectedFiles.has(t.name))
@@ -898,6 +946,14 @@ export default function DataExplorer() {
                 const selectedSize = files.filter((t) => selectedFiles.has(t.name)).reduce((s, t) => s + t.size_bytes, 0)
                 return (
                   <Box sx={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                    <Box sx={{ px: 0.75, py: 0.5, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
+                      <TextField
+                        size="small" placeholder="Filter…" value={fileFilter}
+                        onChange={(e) => setFileFilter(e.target.value)}
+                        sx={{ flex: 1, '& .MuiInputBase-root': { fontSize: '0.75rem' } }}
+                        inputProps={{ style: { fontSize: '0.75rem', paddingTop: 4, paddingBottom: 4 } }}
+                      />
+                    </Box>
                     <Box sx={{ px: 0.75, py: 0.5, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
                       <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
                         if (allSelected) setSelectedFiles(new Set())
@@ -1004,11 +1060,11 @@ export default function DataExplorer() {
 
       {/* ── RESULTS — truly full width ── */}
       <Box sx={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        {queryMutation.isPending ? (
+        {activeIsPending ? (
           <Paper variant="outlined" sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <CircularProgress size={28} />
           </Paper>
-        ) : queryMutation.data ? (
+        ) : activeResult ? (
           <Paper variant="outlined" sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <Box sx={{
               display: 'flex', alignItems: 'center', gap: 1,
@@ -1020,12 +1076,16 @@ export default function DataExplorer() {
               <Typography variant="subtitle2" fontWeight={600} sx={{ fontSize: '0.83rem' }}>Results</Typography>
               <Typography variant="caption" color="text.secondary">
                 {(() => {
-                  const base = resultPage * limit
-                  const filtered = displayRows.length !== queryMutation.data.row_count
-                  const showing = `${(base + 1).toLocaleString()}–${(base + queryMutation.data.row_count).toLocaleString()}`
+                  const pageSize = resultSource === 'file' ? 200 : limit
+                  const base = resultPage * pageSize
+                  const filtered = displayRows.length !== activeResult.row_count
+                  const showing = `${(base + 1).toLocaleString()}–${(base + activeResult.row_count).toLocaleString()}`
+                  const suffix = resultSource === 'file'
+                    ? `pandas · ${(activeResult as FilePreviewResult).file_count} file(s)`
+                    : `${(activeResult as { duration_ms: number }).duration_ms.toFixed(0)}ms`
                   return filtered
-                    ? `${displayRows.length} / ${queryMutation.data.row_count.toLocaleString()} filtered · ${queryMutation.data.duration_ms.toFixed(0)}ms`
-                    : `rows ${showing} · ${queryMutation.data.duration_ms.toFixed(0)}ms`
+                    ? `${displayRows.length} / ${activeResult.row_count.toLocaleString()} filtered · ${suffix}`
+                    : `rows ${showing} · ${suffix}`
                 })()}
               </Typography>
               {hasColFilters && (
@@ -1038,7 +1098,7 @@ export default function DataExplorer() {
               <Box sx={{ flex: 1 }} />
               <Tooltip title="Previous page">
                 <span>
-                  <IconButton size="small" disabled={resultPage === 0 || queryMutation.isPending} onClick={() => handlePageChange(resultPage - 1)} sx={{ p: 0.375 }}>
+                  <IconButton size="small" disabled={resultPage === 0 || activeIsPending} onClick={() => handlePageChange(resultPage - 1)} sx={{ p: 0.375 }}>
                     <ChevronLeft sx={{ fontSize: 16 }} />
                   </IconButton>
                 </span>
@@ -1048,7 +1108,7 @@ export default function DataExplorer() {
               </Typography>
               <Tooltip title="Next page">
                 <span>
-                  <IconButton size="small" disabled={!queryMutation.data.truncated || queryMutation.isPending} onClick={() => handlePageChange(resultPage + 1)} sx={{ p: 0.375 }}>
+                  <IconButton size="small" disabled={!activeResult.truncated || activeIsPending} onClick={() => handlePageChange(resultPage + 1)} sx={{ p: 0.375 }}>
                     <ChevronRight sx={{ fontSize: 16 }} />
                   </IconButton>
                 </span>
@@ -1076,7 +1136,7 @@ export default function DataExplorer() {
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ whiteSpace: 'nowrap', fontSize: '0.7rem', fontWeight: 600, color: 'text.disabled', width: 44, minWidth: 44, py: 0.625 }}>#</TableCell>
-                    {queryMutation.data.columns.map((col, i) => {
+                    {activeResult.columns.map((col, i) => {
                       const active = sortCol === i
                       const filtered = !!colFilters[i]
                       return (

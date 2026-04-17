@@ -21,6 +21,7 @@ import {
   Settings as SettingsIcon,
   AdminPanelSettings as AdminIcon,
   DragIndicator as DragIcon,
+  MenuBook as DictIcon,
 } from '@mui/icons-material'
 import { useQuery } from '@tanstack/react-query'
 import { useThemeMode } from '../App'
@@ -39,6 +40,7 @@ const ALL_NAV_ITEMS = [
   { label: 'Pipeline Graph', path: '/graph', icon: <GraphIcon /> },
   { label: 'Runs', path: '/runs', icon: <RunsIcon /> },
   { label: 'Data Explorer', path: '/explorer', icon: <DataIcon /> },
+  { label: 'Dictionaries', path: '/dictionaries', icon: <DictIcon /> },
   { label: 'Services', path: '/services', icon: <ServicesIcon /> },
   { label: 'Errors', path: '/errors', icon: <ErrorIcon /> },
 ]

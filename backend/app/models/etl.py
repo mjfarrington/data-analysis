@@ -389,6 +389,7 @@ class ConnectionType(str, enum.Enum):
     GRPC = "grpc"
     REST = "rest"
     OTHER = "other"
+    DATAWAREHOUSE = "datawarehouse"
 
 
 class Connection(Base):
@@ -420,3 +421,47 @@ class Connection(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dictionary — key/value lookup tables (e.g. App Name → App ID)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Dictionary(Base):
+    __tablename__ = "dictionaries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    key_label: Mapped[str] = mapped_column(String(100), nullable=False, default="Key")
+    value_label: Mapped[str] = mapped_column(String(100), nullable=False, default="Value")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    entries: Mapped[list["DictionaryEntry"]] = relationship(
+        "DictionaryEntry", back_populates="dictionary",
+        cascade="all, delete-orphan", order_by="DictionaryEntry.key",
+    )
+
+
+class DictionaryEntry(Base):
+    __tablename__ = "dictionary_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dictionary_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("dictionaries.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    key: Mapped[str] = mapped_column(String(500), nullable=False)
+    value: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    dictionary: Mapped["Dictionary"] = relationship("Dictionary", back_populates="entries")

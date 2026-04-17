@@ -111,6 +111,41 @@ function buildTheme(cfg: ThemeConfig): Theme {
       MuiLinearProgress: {
         styleOverrides: { root: { borderRadius: 4, backgroundColor: cfg.border } },
       },
+      MuiInputBase: {
+        styleOverrides: {
+          input: { fontSize: '0.8rem' },
+          inputSizeSmall: { fontSize: '0.8rem' },
+        },
+      },
+      MuiInputLabel: {
+        styleOverrides: {
+          root: { fontSize: '0.8rem' },
+          sizeSmall: { fontSize: '0.8rem' },
+        },
+      },
+      MuiMenuItem: {
+        styleOverrides: {
+          root: { fontSize: '0.8rem' },
+        },
+      },
+      MuiSelect: {
+        styleOverrides: {
+          select: { fontSize: '0.8rem' },
+        },
+      },
+      MuiFormHelperText: {
+        styleOverrides: {
+          root: { fontSize: '0.7rem' },
+        },
+      },
+      MuiAutocomplete: {
+        styleOverrides: {
+          option: { fontSize: '0.8rem' },
+          noOptions: { fontSize: '0.8rem' },
+          loading: { fontSize: '0.8rem' },
+          groupLabel: { fontSize: '0.75rem' },
+        },
+      },
       MuiTextField: {
         styleOverrides: {
           root: {

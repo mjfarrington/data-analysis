@@ -9,10 +9,17 @@ from pydantic import BaseModel, Field, ConfigDict
 # ─────────────────────────────────────────────────────────────────────────────
 class ExtractConfig(BaseModel):
     # Source selector
-    source_type: str = "grpc"  # grpc | jdbc | json | csv
+    source_type: str = "grpc"  # grpc | jdbc | datawarehouse | json | csv
 
-    # gRPC source
-    application_ids: list[str] = Field(default_factory=list)
+    # Unified application list — used by ALL source types.
+    # Each entry: {"name": "<display name>", "id": "<app_id>"}
+    # app_id  → folder name on disk, passed to gRPC, substituted as $app_id in SQL
+    # app_name (name field) → substituted as $app_name in SQL
+    apps: list[dict] = Field(default_factory=list)
+
+    # Persisted dictionary picker state for the apps chip field
+    dw_dict_id: Optional[int] = None        # which dictionary to pick apps from
+    dw_dict_name_field: Optional[str] = None  # 'key' | 'value'  — which column = $app_name
 
     # Date range (all sources)
     dates: list[str] = Field(default_factory=list)   # explicit list of YYYY-MM-DD
@@ -27,14 +34,13 @@ class ExtractConfig(BaseModel):
 
     # JDBC source
     jdbc_url: Optional[str] = None            # SQLAlchemy connection string
+    jdbc_connection_id: Optional[int] = None  # named Connection (conn_type=jdbc)
     jdbc_sql_file_id: Optional[int] = None    # reference to SqlFile.id
     jdbc_sql: Optional[str] = None            # inline SQL (alternative to file)
     jdbc_table: Optional[str] = None          # simple table name (no SQL needed)
     jdbc_date_column: Optional[str] = None    # column used for date filtering
-    # Application IDs injected as $app_id into the SQL template
-    jdbc_application_ids: list[str] = Field(default_factory=list)
 
-    # SQL variable injection (JDBC)
+    # SQL variable injection (JDBC + DataWarehouse)
     # Placeholders resolved at run time: $business_date, $business_date_from,
     # $business_date_to, $business_date_range
     jdbc_date_var_format: str = "YYYYMMDD"   # YYYYMMDD | YYYY-MM-DD | YYYYMM | YYYY/MM/DD | DD/MM/YYYY | MM/DD/YYYY
@@ -42,12 +48,20 @@ class ExtractConfig(BaseModel):
     jdbc_date_range_from: Optional[str] = None   # YYYY-MM-DD (custom range start)
     jdbc_date_range_to: Optional[str] = None     # YYYY-MM-DD (custom range end)
 
+    # DataWarehouse source
+    dw_connection_id: Optional[int] = None   # named Connection (conn_type=datawarehouse)
+
     # File source (json / csv)
     file_path: Optional[str] = None           # relative to DATA_DIR/sources/
     file_encoding: str = "utf-8"
     csv_delimiter: str = ","
     csv_has_header: bool = True
     json_lines: bool = True                   # True = JSONL, False = JSON array
+
+    # Output directory label — auto-derived from pipeline name if not set.
+    # Rendered as uppercase-with-underscores, e.g. "My Job" → "MY_JOB".
+    # Output path: <DATE>/<job_name>/<app_id>/
+    job_name: Optional[str] = None
 
 
 class TransformConfig(BaseModel):
@@ -65,6 +79,14 @@ class LoadConfig(BaseModel):
     namespace_db: Optional[str] = None
     partition_by: list[str] = Field(default_factory=lambda: ["date", "application_id"])
     mode: str = "overwrite"  # overwrite | append
+
+
+class LoadSparkRequest(BaseModel):
+    """Request body for the manual load-to-Spark endpoint."""
+    date: str                            # YYYY-MM-DD business date to load
+    namespace_db: str                    # Spark database to write into
+    table_name: Optional[str] = None     # Override table name (default: <job_name>)
+    mode: str = "overwrite"              # overwrite | append
 
 
 class PipelineBase(BaseModel):
@@ -458,6 +480,9 @@ class SqlPreviewRequest(BaseModel):
     date_range_mode: str = "single"     # single | current_month | previous_month | custom
     date_range_from: Optional[str] = None  # YYYY-MM-DD (custom range start)
     date_range_to: Optional[str] = None    # YYYY-MM-DD (custom range end)
+    app_id: Optional[str] = None           # $app_id placeholder value
+    app_name: Optional[str] = None         # $app_name placeholder value
+    app_name: Optional[str] = None         # $app_name placeholder value
 
 
 class SqlPreviewResponse(BaseModel):
@@ -489,6 +514,7 @@ class GraphNode(BaseModel):
     status: str
     source_type: str
     last_run_status: Optional[str] = None
+    app_names: list[str] = []
 
 
 class GraphEdge(BaseModel):
@@ -505,7 +531,7 @@ class PipelineGraph(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 # Connection schemas
 # ─────────────────────────────────────────────────────────────────────────────
-CONNECTION_TYPES = ("jdbc", "grpc", "rest", "other")
+CONNECTION_TYPES = ("jdbc", "grpc", "rest", "other", "datawarehouse")
 
 
 class ConnectionCreate(BaseModel):
@@ -555,3 +581,55 @@ class ConnectionTestResult(BaseModel):
     success: bool
     message: str
     latency_ms: Optional[float] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dictionary schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DictionaryEntryBase(BaseModel):
+    key: str
+    value: str
+
+
+class DictionaryEntryCreate(DictionaryEntryBase):
+    pass
+
+
+class DictionaryEntryUpdate(BaseModel):
+    key: Optional[str] = None
+    value: Optional[str] = None
+
+
+class DictionaryEntryOut(DictionaryEntryBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    dictionary_id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class DictionaryBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    key_label: str = "Key"
+    value_label: str = "Value"
+
+
+class DictionaryCreate(DictionaryBase):
+    pass
+
+
+class DictionaryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    key_label: Optional[str] = None
+    value_label: Optional[str] = None
+
+
+class DictionaryOut(DictionaryBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    entries: list[DictionaryEntryOut] = []

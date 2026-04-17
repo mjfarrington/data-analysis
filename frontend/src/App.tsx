@@ -16,6 +16,7 @@ import SqlBrowser from './pages/SqlBrowser'
 import Notebooks from './pages/Notebooks'
 import Settings from './pages/Settings'
 import Admin from './pages/Admin'
+import Dictionaries from './pages/Dictionaries'
 import { AppSettingsProvider } from './hooks/useAppSettings'
 
 const STORAGE_KEY = 'app-theme-v1'
@@ -75,6 +76,7 @@ export default function App() {
                   <Route path="/services" element={<Services />} />
                   <Route path="/settings" element={<Settings />} />
                   <Route path="/admin" element={<Admin />} />
+                  <Route path="/dictionaries" element={<Dictionaries />} />
                 </Routes>
               </Layout>
             </BrowserRouter>
