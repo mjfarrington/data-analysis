@@ -155,6 +155,7 @@ class RunDetail(RunSummary):
     run_metadata: Optional[dict]
     logs: list["RunLogEntry"] = Field(default_factory=list)
     extract_jobs: list["ExtractJobSummary"] = Field(default_factory=list)
+    steps: list["RunStepSummary"] = Field(default_factory=list)
 
 
 class RunLogEntry(BaseModel):
@@ -180,6 +181,22 @@ class ExtractJobSummary(BaseModel):
     output_format: str
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
+    error_message: Optional[str]
+
+
+class RunStepSummary(BaseModel):
+    """Per-step execution summary within a single ETL run."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    run_id: int
+    step_order: int
+    step_type: str           # extract | transform | load
+    status: str              # pending | running | completed | failed | cancelled | skipped
+    started_at: Optional[datetime]
+    finished_at: Optional[datetime]
+    duration_seconds: Optional[float]
+    records_in: int
+    records_out: int
     error_message: Optional[str]
 
 
@@ -374,6 +391,7 @@ class TransformJobResponse(TransformJobBase):
 
 PipelineResponse.model_rebuild()
 RunDetail.model_rebuild()
+RunStepSummary.model_rebuild()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -515,6 +533,10 @@ class GraphNode(BaseModel):
     source_type: str
     last_run_status: Optional[str] = None
     app_names: list[str] = []
+    load_target: str = "parquet"
+    load_table_name: Optional[str] = None
+    # Per-step status of the most recent run (keyed by step_type)
+    last_run_step_statuses: dict[str, str] = Field(default_factory=dict)
 
 
 class GraphEdge(BaseModel):

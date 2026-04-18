@@ -146,6 +146,21 @@ export interface RunDetail extends RunSummary {
   run_metadata?: Record<string, unknown>
   logs: RunLog[]
   extract_jobs: ExtractJob[]
+  steps: RunStep[]
+}
+
+export interface RunStep {
+  id: number
+  run_id: number
+  step_order: number
+  step_type: 'extract' | 'transform' | 'load'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'skipped'
+  started_at?: string
+  finished_at?: string
+  duration_seconds?: number
+  records_in: number
+  records_out: number
+  error_message?: string
 }
 
 export interface ExtractJob {
@@ -397,6 +412,9 @@ export interface GraphNode {
   source_type: string
   last_run_status?: string
   app_names?: string[]
+  load_target: string
+  load_table_name?: string
+  last_run_step_statuses: Record<string, string>
 }
 
 export interface GraphEdge {

@@ -15,7 +15,7 @@ from typing import Any, AsyncIterator, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.etl import ETLRun, ETLRunLog, ExtractJob, RunStatus, ServiceError
+from app.models.etl import ETLRun, ETLRunLog, ExtractJob, RunStatus, RunStep, StepType, ServiceError
 from app.schemas.etl import ExtractConfig, TransformConfig, LoadConfig
 from app.services.grpc_client import grpc_client
 from app.services.spark_service import spark_service
@@ -670,6 +670,61 @@ async def execute_pipeline(
         await log("Pipeline started", step="init")
         await log(f"Source: {extract_cfg.source_type.upper()}", step="init")
 
+        # ── Initialise per-step run tracking rows ─────────────────────────────
+        step_rows: dict[StepType, RunStep] = {}
+        for order, stype in enumerate([StepType.EXTRACT, StepType.TRANSFORM, StepType.LOAD]):
+            rs = RunStep(
+                run_id=run_id,
+                step_order=order,
+                step_type=stype,
+                status=RunStatus.PENDING,
+            )
+            db.add(rs)
+            step_rows[stype] = rs
+        await db.commit()
+
+        # Helpers to transition step status (idempotent for RUNNING transition)
+        _step_started: set[StepType] = set()
+
+        async def _begin_step(stype: StepType) -> None:
+            if stype in _step_started:
+                return
+            _step_started.add(stype)
+            rs = step_rows[stype]
+            rs.status = RunStatus.RUNNING
+            rs.started_at = datetime.now(timezone.utc)
+            await db.commit()
+            # Broadcast step status change via log broadcast so live consumers see it
+            try:
+                _log_broadcast.put_nowait({
+                    "run_id": run_id,
+                    "step_update": {
+                        "step_type": stype.value,
+                        "status": RunStatus.RUNNING.value,
+                        "started_at": rs.started_at.isoformat(),
+                    },
+                })
+            except asyncio.QueueFull:
+                pass
+
+        async def _finish_step(
+            stype: StepType,
+            status: RunStatus,
+            records_in: int = 0,
+            records_out: int = 0,
+            error_message: Optional[str] = None,
+        ) -> None:
+            rs = step_rows[stype]
+            rs.status = status
+            rs.finished_at = datetime.now(timezone.utc)
+            if rs.started_at:
+                rs.duration_seconds = (rs.finished_at - rs.started_at).total_seconds()
+            rs.records_in = records_in
+            rs.records_out = records_out
+            if error_message:
+                rs.error_message = error_message
+            await db.commit()
+
         source = extract_cfg.source_type
 
         # Validate app IDs in the unified apps list (no reserved names).
@@ -687,6 +742,7 @@ async def execute_pipeline(
         job_name = (extract_cfg.job_name or "PIPELINE").strip() or "PIPELINE"
 
         total_extracted = 0
+        total_transformed = 0
         total_loaded = 0
         total_segs = 0
 
@@ -705,6 +761,7 @@ async def execute_pipeline(
                         step="extract",
                         extra={"app_id": app_id, "date": date_str},
                     )
+                    await _begin_step(StepType.EXTRACT)
                     async for grpc_recs, seg, n_segs in _extract_grpc(
                         extract_cfg, app_id, date_str, log
                     ):
@@ -722,10 +779,13 @@ async def execute_pipeline(
                         try:
                             total_extracted += len(grpc_recs)
                             run.records_extracted = total_extracted
+                            await _begin_step(StepType.TRANSFORM)
                             transformed = _apply_transforms(grpc_recs, transform_cfg)
-                            run.records_transformed = (run.records_transformed or 0) + len(transformed)
+                            total_transformed += len(transformed)
+                            run.records_transformed = total_transformed
                             output_path = ""
                             if transformed:
+                                await _begin_step(StepType.LOAD)
                                 output_path = await _load_segment(
                                     transformed, app_id, date_str, seg, load_cfg, log, job_name=job_name
                                 )
@@ -798,6 +858,7 @@ async def execute_pipeline(
                         step="extract",
                         extra={"date": date_str, "source": source},
                     )
+                    await _begin_step(StepType.EXTRACT)
 
                     if source == "jdbc":
                         all_records = await _extract_jdbc(
@@ -852,10 +913,13 @@ async def execute_pipeline(
                             )
                             await asyncio.sleep(_seg_delay)
                         try:
+                            await _begin_step(StepType.TRANSFORM)
                             transformed = _apply_transforms(chunk, transform_cfg)
-                            run.records_transformed = (run.records_transformed or 0) + len(transformed)
+                            total_transformed += len(transformed)
+                            run.records_transformed = total_transformed
                             output_path = ""
                             if transformed:
+                                await _begin_step(StepType.LOAD)
                                 output_path = await _load_segment(
                                     transformed, app_id, date_str, seg_idx, load_cfg, log, job_name=job_name
                                 )
@@ -913,14 +977,37 @@ async def execute_pipeline(
             run.duration_seconds = (run.finished_at - run.started_at).total_seconds()
         await log(
             f"Pipeline complete — extracted={total_extracted:,} "
+            f"transformed={total_transformed:,} "
             f"loaded={total_loaded:,} segments={total_segs}",
             step="done",
         )
+        # Finalise step statuses — any step not yet started is skipped (e.g. empty source)
+        for stype, records_in, records_out in [
+            (StepType.EXTRACT, 0, total_extracted),
+            (StepType.TRANSFORM, total_extracted, total_transformed),
+            (StepType.LOAD, total_transformed, total_loaded),
+        ]:
+            rs = step_rows[stype]
+            if rs.status in (RunStatus.RUNNING,):
+                await _finish_step(stype, RunStatus.COMPLETED, records_in=records_in, records_out=records_out)
+            elif rs.status == RunStatus.PENDING:
+                # Never started (e.g. no data)
+                rs.status = RunStatus.SKIPPED
+        await db.commit()
 
     except asyncio.CancelledError:
         run.status = RunStatus.CANCELLED
         run.finished_at = datetime.now(timezone.utc)
         await log("Pipeline cancelled", level="WARN", step="done")
+        # Mark all in-progress or pending steps as cancelled
+        for stype in [StepType.EXTRACT, StepType.TRANSFORM, StepType.LOAD]:
+            rs = step_rows.get(stype)
+            if rs and rs.status in (RunStatus.RUNNING, RunStatus.PENDING):
+                rs.status = RunStatus.CANCELLED
+                if rs.status == RunStatus.RUNNING and rs.started_at:
+                    rs.finished_at = datetime.now(timezone.utc)
+                    rs.duration_seconds = (rs.finished_at - rs.started_at).total_seconds()
+        await db.commit()
         raise
 
     except Exception as exc:
@@ -930,6 +1017,14 @@ async def execute_pipeline(
         run.error_message = str(exc)
         run.error_traceback = tb
         await log(f"Pipeline FAILED: {exc}", level="ERROR", step="done")
+        # Mark the currently-running step as failed; pending steps as skipped
+        for stype in [StepType.EXTRACT, StepType.TRANSFORM, StepType.LOAD]:
+            rs = step_rows.get(stype)
+            if rs:
+                if rs.status == RunStatus.RUNNING:
+                    await _finish_step(stype, RunStatus.FAILED, error_message=str(exc))
+                elif rs.status == RunStatus.PENDING:
+                    rs.status = RunStatus.SKIPPED
         db.add(ServiceError(
             service="etl_engine",
             level="ERROR",

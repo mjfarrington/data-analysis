@@ -26,7 +26,7 @@ import {
   ZoomIn as ZoomInIcon, ZoomOut as ZoomOutIcon,
   FitScreen as FitScreenIcon, RestartAlt as ResetIcon,
   Edit as EditIcon, OpenInNew as OpenInNewIcon,
-  PlayArrow, Schedule, CloudUpload,
+  PlayArrow, Schedule, CloudUpload, SaveAlt,
   Search as SearchIcon, ViewModule as SnapGridIcon,
 } from '@mui/icons-material'
 import { useAppSettings } from '../hooks/useAppSettings'
@@ -34,14 +34,16 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSnackbar } from 'notistack'
 import { formatDistanceToNow } from 'date-fns'
 import { parseApiDate } from '../utils/dates'
-import { graphApi, pipelinesApi, sqlFilesApi, connectionsApi, GraphNode as ApiNode, GraphEdge as ApiEdge, ExecutionContext, ExtractConfig, Pipeline, LoadSparkRequest, LoadSparkResult, ParquetDatesResult } from '../api/client'
+import { graphApi, pipelinesApi, sqlFilesApi, connectionsApi, GraphNode as ApiNode, GraphEdge as ApiEdge, ExecutionContext, ExtractConfig, LoadConfig, Pipeline, LoadSparkRequest, LoadSparkResult, ParquetDatesResult } from '../api/client'
 import ExtractConfigWizard from '../components/ExtractConfigWizard'
 import DateField from '../components/DateField'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const NODE_W = 240
-const NODE_H = 96
+const STEP_W = 200
+const STEP_H = 96
+const STEP_GAP = 50
 const SNAP_GRID: [number, number] = [20, 20]
+const LAYOUT_KEY = 'pipeline-step-layout-v2'
 const VIEWPORT_KEY = 'pipeline-graph-viewport-v1'
 
 // ─── Colour helpers ───────────────────────────────────────────────────────────
@@ -73,9 +75,37 @@ const SOURCE_LABEL: Record<string, string> = {
   datawarehouse: 'DW',
 }
 
+const LOAD_TARGET_LABEL: Record<string, string> = {
+  parquet: 'Parquet',
+  csv: 'CSV',
+  spark_table: 'Spark',
+}
+
+const LOAD_TARGET_COLOR: Record<string, string> = {
+  parquet: '#a78bfa',
+  csv: '#60a5fa',
+  spark_table: '#f97316',
+}
+
+// ─── Step node data type ───────────────────────────────────────────────────────
+interface StepNodeData {
+  pipelineId: number
+  pipelineName: string
+  pipelineStatus: string
+  lastRunStatus?: string
+  lastRunStepStatuses: Record<string, string>
+  description?: string
+  sourceType: string
+  appNames: string[]
+  loadTarget: string
+  loadTableName?: string
+  [key: string]: unknown
+}
+
 // ─── Module-level action registry (singleton for this page) ─────────────────
 const nodeActions = {
-  onEdit: (_id: number) => {},
+  onEditExtract: (_id: number) => {},
+  onEditLoad: (_id: number) => {},
   onTrigger: (_id: number) => {},
   onViewDeps: (_id: number) => {},
   onOpenPipelines: (_id: number) => {},
@@ -85,17 +115,23 @@ const nodeActions = {
 // Module-level context passed down to nodes (avoids prop-drilling through ReactFlow)
 const nodeContext = { businessDate: null as string | null }
 
-// ─── Custom node component ────────────────────────────────────────────────────
-function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean }) {
-  const isRunning = data.last_run_status === 'running'
-  const runColor = data.last_run_status ? (RUN_STATUS_COLOUR[data.last_run_status] ?? '#6b7280') : '#2a3550'
+// ─── Helper: parse step node ID ───────────────────────────────────────────────
+function parseStepId(nodeId: string): { pipelineId: number; stepType: 'extract' | 'load' } | null {
+  if (nodeId.startsWith('extract-')) return { pipelineId: Number(nodeId.slice(8)), stepType: 'extract' }
+  if (nodeId.startsWith('load-')) return { pipelineId: Number(nodeId.slice(5)), stepType: 'load' }
+  return null
+}
+
+// ─── Extract step node ────────────────────────────────────────────────────────
+function ExtractStepNode({ data, selected }: { data: StepNodeData; selected?: boolean }) {
+  const isRunning = data.lastRunStatus === 'running'
+  const runColor = data.lastRunStatus ? (RUN_STATUS_COLOUR[data.lastRunStatus] ?? '#6b7280') : '#2a3550'
   const borderColor = selected ? '#3b82f6' : runColor
-  const statusColor = STATUS_COLOUR[data.status] ?? '#94a3b8'
-  const appNames = data.app_names ?? []
+  const statusColor = STATUS_COLOUR[data.pipelineStatus] ?? '#94a3b8'
+  const appNames = data.appNames ?? []
 
   return (
     <>
-      {/* Quick-action toolbar — appears when node is selected */}
       <NodeToolbar isVisible={selected} position={Position.Top} offset={10}>
         <Box sx={{
           display: 'flex', gap: 0.25,
@@ -103,32 +139,161 @@ function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean })
           borderRadius: 1.5, px: 0.75, py: 0.4,
           boxShadow: '0 4px 14px rgba(0,0,0,0.7)',
         }}>
-          <Tooltip title="Edit pipeline">
-            <IconButton size="small" onClick={() => nodeActions.onEdit(data.id)}
+          <Tooltip title="Edit Extract">
+            <IconButton size="small" onClick={() => nodeActions.onEditExtract(data.pipelineId)}
               sx={{ color: '#94a3b8', p: 0.5, '&:hover': { color: '#e2e8f0', bgcolor: '#1e293b' } }}>
               <EditIcon sx={{ fontSize: 14 }} />
             </IconButton>
           </Tooltip>
           <Tooltip title="Trigger run">
-            <IconButton size="small" onClick={() => nodeActions.onTrigger(data.id)}
+            <IconButton size="small" onClick={() => nodeActions.onTrigger(data.pipelineId)}
               sx={{ color: '#94a3b8', p: 0.5, '&:hover': { color: '#10b981', bgcolor: '#1e293b' } }}>
               <PlayArrow sx={{ fontSize: 14 }} />
             </IconButton>
           </Tooltip>
           <Tooltip title="View dependencies">
-            <IconButton size="small" onClick={() => nodeActions.onViewDeps(data.id)}
+            <IconButton size="small" onClick={() => nodeActions.onViewDeps(data.pipelineId)}
               sx={{ color: '#94a3b8', p: 0.5, '&:hover': { color: '#e2e8f0', bgcolor: '#1e293b' } }}>
               <AccountTree sx={{ fontSize: 14 }} />
             </IconButton>
           </Tooltip>
           <Tooltip title="Open in Studio">
-            <IconButton size="small" onClick={() => nodeActions.onOpenPipelines(data.id)}
+            <IconButton size="small" onClick={() => nodeActions.onOpenPipelines(data.pipelineId)}
               sx={{ color: '#94a3b8', p: 0.5, '&:hover': { color: '#3b82f6', bgcolor: '#1e293b' } }}>
               <OpenInNewIcon sx={{ fontSize: 14 }} />
             </IconButton>
           </Tooltip>
+        </Box>
+      </NodeToolbar>
+
+      <Box sx={{
+        width: STEP_W,
+        borderRadius: '10px',
+        border: `2px solid ${borderColor}`,
+        bgcolor: '#111827',
+        boxShadow: selected
+          ? `0 0 0 3px ${alpha('#3b82f6', 0.25)}, 0 4px 16px rgba(0,0,0,0.5)`
+          : '0 2px 8px rgba(0,0,0,0.4)',
+        display: 'flex', flexDirection: 'column',
+        cursor: 'pointer',
+        transition: 'box-shadow 0.15s, border-color 0.15s',
+        overflow: 'hidden',
+        ...(isRunning && {
+          '@keyframes borderPulse': {
+            '0%, 100%': { borderColor: RUN_STATUS_COLOUR.running },
+            '50%': { borderColor: '#60a5fa', boxShadow: `0 0 0 4px ${alpha(RUN_STATUS_COLOUR.running, 0.2)}` },
+          },
+          animation: 'borderPulse 1.4s ease-in-out infinite',
+        }),
+      }}>
+        {/* Step label header */}
+        <Box sx={{
+          bgcolor: alpha(statusColor, 0.14),
+          borderBottom: `1px solid ${alpha(statusColor, 0.2)}`,
+          px: 1.25, py: 0.35,
+          display: 'flex', alignItems: 'center', gap: 0.5,
+        }}>
+          <Storage sx={{ fontSize: 11, color: '#60a5fa', flexShrink: 0 }} />
+          <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: '#60a5fa', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+            Extract
+          </Typography>
+          <Box sx={{ flex: 1 }} />
+          <Typography sx={{ fontSize: '0.58rem', color: statusColor, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            {data.pipelineStatus}
+          </Typography>
+        </Box>
+
+        {/* Pipeline name */}
+        <Box sx={{ px: 1.25, pt: 0.55, pb: 0.2 }}>
+          <Typography sx={{
+            fontSize: '0.8rem', fontWeight: 700, color: '#e2e8f0',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {data.pipelineName}
+          </Typography>
+        </Box>
+
+        {/* App names */}
+        {appNames.length > 0 && (
+          <Box sx={{ px: 1.25, pb: 0.2, display: 'flex', flexWrap: 'wrap', gap: 0.3 }}>
+            {appNames.slice(0, 2).map((n) => (
+              <Typography key={n} sx={{
+                fontSize: '0.57rem', color: '#94a3b8', bgcolor: '#1e293b',
+                px: 0.5, py: 0.1, borderRadius: 0.5,
+                maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{n}</Typography>
+            ))}
+            {appNames.length > 2 && (
+              <Typography sx={{ fontSize: '0.57rem', color: '#64748b' }}>+{appNames.length - 2}</Typography>
+            )}
+          </Box>
+        )}
+
+        {/* Footer */}
+        <Box sx={{ display: 'flex', alignItems: 'center', px: 1.25, py: 0.4, gap: 0.5 }}>
+          <Chip
+            label={SOURCE_LABEL[data.sourceType] ?? data.sourceType.toUpperCase()}
+            size="small"
+            sx={{ height: 15, fontSize: '0.58rem', bgcolor: '#1e293b', color: '#64748b' }}
+          />
+          {(() => {
+            const stepSt = data.lastRunStepStatuses?.['extract']
+            const color = stepSt ? (RUN_STATUS_COLOUR[stepSt] ?? '#6b7280') : null
+            return stepSt ? (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
+                {RUN_STATUS_ICON[stepSt]}
+                <Typography sx={{ fontSize: '0.58rem', color: color ?? 'inherit' }}>{stepSt}</Typography>
+              </Box>
+            ) : data.lastRunStatus ? (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25, color: runColor }}>
+                {RUN_STATUS_ICON[data.lastRunStatus]}
+                <Typography sx={{ fontSize: '0.58rem', color: runColor }}>{data.lastRunStatus}</Typography>
+              </Box>
+            ) : null
+          })()}
+          <Box sx={{ flex: 1 }} />
+          {nodeContext.businessDate && (
+            <Typography sx={{ fontSize: '0.55rem', color: '#64748b', fontFamily: 'monospace' }}>
+              {nodeContext.businessDate}
+            </Typography>
+          )}
+        </Box>
+      </Box>
+
+      {/* Left: target for incoming cross-pipeline deps */}
+      <Handle type="target" position={Position.Left}
+        style={{ background: '#3b82f6', width: 10, height: 10, border: '2px solid #111827' }} />
+      {/* Right: source for internal edge to Load step */}
+      <Handle type="source" position={Position.Right} id="to-load"
+        style={{ background: '#374151', width: 8, height: 8, border: '2px solid #111827' }} />
+    </>
+  )
+}
+
+// ─── Load step node ───────────────────────────────────────────────────────────
+function LoadStepNode({ data, selected }: { data: StepNodeData; selected?: boolean }) {
+  const loadColor = LOAD_TARGET_COLOR[data.loadTarget] ?? '#a78bfa'
+  const borderColor = selected ? '#3b82f6' : loadColor
+  const tableName = data.loadTableName
+    || data.pipelineName?.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
+
+  return (
+    <>
+      <NodeToolbar isVisible={selected} position={Position.Top} offset={10}>
+        <Box sx={{
+          display: 'flex', gap: 0.25,
+          bgcolor: '#111827', border: '1px solid #2a3550',
+          borderRadius: 1.5, px: 0.75, py: 0.4,
+          boxShadow: '0 4px 14px rgba(0,0,0,0.7)',
+        }}>
+          <Tooltip title="Edit Load">
+            <IconButton size="small" onClick={() => nodeActions.onEditLoad(data.pipelineId)}
+              sx={{ color: '#94a3b8', p: 0.5, '&:hover': { color: '#e2e8f0', bgcolor: '#1e293b' } }}>
+              <EditIcon sx={{ fontSize: 14 }} />
+            </IconButton>
+          </Tooltip>
           <Tooltip title="Load to Spark">
-            <IconButton size="small" onClick={() => nodeActions.onLoadSpark(data.id)}
+            <IconButton size="small" onClick={() => nodeActions.onLoadSpark(data.pipelineId)}
               sx={{ color: '#94a3b8', p: 0.5, '&:hover': { color: '#a78bfa', bgcolor: '#1e293b' } }}>
               <CloudUpload sx={{ fontSize: 14 }} />
             </IconButton>
@@ -136,89 +301,72 @@ function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean })
         </Box>
       </NodeToolbar>
 
-      {/* Node body */}
-      <Box
-        sx={{
-          width: NODE_W,
-          borderRadius: '10px',
-          border: `2px solid ${borderColor}`,
-          bgcolor: '#111827',
-          boxShadow: selected
-            ? `0 0 0 3px ${alpha('#3b82f6', 0.25)}, 0 4px 16px rgba(0,0,0,0.5)`
-            : '0 2px 8px rgba(0,0,0,0.4)',
-          display: 'flex',
-          flexDirection: 'column',
-          cursor: 'pointer',
-          transition: 'box-shadow 0.15s, border-color 0.15s',
-          overflow: 'hidden',
-          ...(isRunning && {
-            '@keyframes borderPulse': {
-              '0%, 100%': { borderColor: RUN_STATUS_COLOUR.running },
-              '50%': { borderColor: '#60a5fa', boxShadow: `0 0 0 4px ${alpha(RUN_STATUS_COLOUR.running, 0.2)}` },
-            },
-            animation: 'borderPulse 1.4s ease-in-out infinite',
-          }),
-        }}
-      >
-        {/* Solid status header */}
+      <Box sx={{
+        width: STEP_W,
+        borderRadius: '10px',
+        border: `2px solid ${borderColor}`,
+        bgcolor: '#111827',
+        boxShadow: selected
+          ? `0 0 0 3px ${alpha('#3b82f6', 0.25)}, 0 4px 16px rgba(0,0,0,0.5)`
+          : '0 2px 8px rgba(0,0,0,0.4)',
+        display: 'flex', flexDirection: 'column',
+        cursor: 'pointer',
+        transition: 'box-shadow 0.15s, border-color 0.15s',
+        overflow: 'hidden',
+      }}>
+        {/* Step label header */}
         <Box sx={{
-          bgcolor: alpha(statusColor, 0.18),
-          borderBottom: `1px solid ${alpha(statusColor, 0.25)}`,
-          px: 1.25, py: 0.5,
-          display: 'flex', alignItems: 'center', gap: 0.75,
+          bgcolor: alpha(loadColor, 0.14),
+          borderBottom: `1px solid ${alpha(loadColor, 0.2)}`,
+          px: 1.25, py: 0.35,
+          display: 'flex', alignItems: 'center', gap: 0.5,
         }}>
-          <Storage sx={{ fontSize: 13, color: statusColor, flexShrink: 0 }} />
-          <Typography sx={{
-            fontSize: '0.78rem', fontWeight: 700, color: '#e2e8f0',
-            flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            {data.name}
+          <CloudUpload sx={{ fontSize: 11, color: loadColor, flexShrink: 0 }} />
+          <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: loadColor, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+            Load
           </Typography>
-          <Typography sx={{ fontSize: '0.6rem', fontWeight: 600, color: statusColor, textTransform: 'uppercase', letterSpacing: '0.06em', flexShrink: 0 }}>
-            {data.status}
+          <Box sx={{ flex: 1 }} />
+          <Chip
+            label={LOAD_TARGET_LABEL[data.loadTarget] ?? data.loadTarget}
+            size="small"
+            sx={{ height: 14, fontSize: '0.56rem', bgcolor: alpha(loadColor, 0.18), color: loadColor, border: `1px solid ${alpha(loadColor, 0.28)}` }}
+          />
+        </Box>
+
+        {/* Table name */}
+        <Box sx={{ px: 1.25, pt: 0.55, pb: 0.25 }}>
+          <Typography sx={{
+            fontSize: '0.75rem', fontWeight: 600, color: '#cbd5e1', fontFamily: 'monospace',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {tableName}
           </Typography>
         </Box>
 
-        {/* App names */}
-        {appNames.length > 0 && (
-          <Box sx={{ px: 1.25, pt: 0.5, pb: 0.25, display: 'flex', flexWrap: 'wrap', gap: 0.4 }}>
-            {appNames.slice(0, 3).map((n) => (
-              <Typography key={n} sx={{
-                fontSize: '0.6rem', color: '#94a3b8', bgcolor: '#1e293b',
-                px: 0.6, py: 0.1, borderRadius: 0.5,
-                maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              }}>{n}</Typography>
-            ))}
-            {appNames.length > 3 && (
-              <Typography sx={{ fontSize: '0.6rem', color: '#64748b' }}>+{appNames.length - 3}</Typography>
-            )}
-          </Box>
-        )}
-
         {/* Footer */}
-        <Box sx={{ display: 'flex', alignItems: 'center', px: 1.25, py: 0.5, gap: 0.5 }}>
-          <Chip
-            label={SOURCE_LABEL[data.source_type] ?? data.source_type.toUpperCase()}
-            size="small"
-            sx={{ height: 16, fontSize: '0.62rem', bgcolor: '#1e293b', color: '#64748b' }}
-          />
-          {data.last_run_status && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25, color: runColor }}>
-              {RUN_STATUS_ICON[data.last_run_status]}
-              <Typography sx={{ fontSize: '0.62rem', color: runColor }}>{data.last_run_status}</Typography>
-            </Box>
-          )}
-          <Box sx={{ flex: 1 }} />
-          {nodeContext.businessDate && (
-            <Typography sx={{ fontSize: '0.58rem', color: '#64748b', fontFamily: 'monospace' }}>
-              {nodeContext.businessDate}
-            </Typography>
-          )}
+        <Box sx={{ px: 1.25, pb: 0.5, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <Typography sx={{ fontSize: '0.58rem', color: '#64748b', flex: 1 }}>
+            {data.loadTarget === 'parquet' ? 'Parquet · partitioned' :
+             data.loadTarget === 'csv' ? 'CSV files' : 'Spark table'}
+          </Typography>
+          {(() => {
+            const stepSt = data.lastRunStepStatuses?.['load']
+            if (!stepSt) return null
+            const color = RUN_STATUS_COLOUR[stepSt] ?? '#6b7280'
+            return (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
+                {RUN_STATUS_ICON[stepSt]}
+                <Typography sx={{ fontSize: '0.58rem', color }}>{stepSt}</Typography>
+              </Box>
+            )
+          })()}
         </Box>
       </Box>
 
-      <Handle type="target" position={Position.Left}
-        style={{ background: '#3b82f6', width: 10, height: 10, border: '2px solid #111827' }} />
+      {/* Left: target for internal edge from Extract */}
+      <Handle type="target" position={Position.Left} id="from-extract"
+        style={{ background: '#374151', width: 8, height: 8, border: '2px solid #111827' }} />
+      {/* Right: source for outgoing cross-pipeline deps */}
       <Handle type="source" position={Position.Right}
         style={{ background: '#3b82f6', width: 10, height: 10, border: '2px solid #111827' }} />
     </>
@@ -228,9 +376,10 @@ function PipelineNode({ data, selected }: { data: ApiNode; selected?: boolean })
 // ─── Custom edge — smoothstep path with floating delete on selection ──────────
 function DependencyEdge({
   id, sourceX, sourceY, targetX, targetY,
-  sourcePosition, targetPosition, selected, markerEnd, style,
+  sourcePosition, targetPosition, selected, markerEnd, style, data,
 }: EdgeProps) {
   const { deleteElements } = useReactFlow()
+  const isInternal = (data as { internal?: boolean })?.internal ?? false
   const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX, sourceY, sourcePosition,
     targetX, targetY, targetPosition,
@@ -242,15 +391,22 @@ function DependencyEdge({
       <BaseEdge
         id={id}
         path={edgePath}
-        markerEnd={markerEnd}
-        style={{
+        markerEnd={isInternal ? undefined : markerEnd}
+        style={isInternal ? {
+          stroke: '#4a6080',
+          strokeWidth: 2,
+          strokeDasharray: '6 4',
+          filter: 'drop-shadow(0 0 2px rgba(74,96,128,0.5))',
+        } : {
           ...style,
-          stroke: selected ? '#60a5fa' : '#3b82f6',
-          strokeWidth: selected ? 3 : 2,
-          filter: selected ? 'drop-shadow(0 0 4px rgba(59,130,246,0.6))' : undefined,
+          stroke: selected ? '#93c5fd' : '#60a5fa',
+          strokeWidth: selected ? 4 : 3,
+          filter: selected
+            ? 'drop-shadow(0 0 8px rgba(96,165,250,0.9))'
+            : 'drop-shadow(0 0 4px rgba(96,165,250,0.5))',
         }}
       />
-      {selected && (
+      {selected && !isInternal && (
         <EdgeLabelRenderer>
           <Box
             sx={{
@@ -282,12 +438,10 @@ function DependencyEdge({
   )
 }
 
-const nodeTypes = { pipeline: PipelineNode }
+const nodeTypes = { 'step-extract': ExtractStepNode, 'step-load': LoadStepNode }
 const edgeTypes = { dependency: DependencyEdge }
 
 // ─── Layout persistence ───────────────────────────────────────────────────────
-const LAYOUT_KEY = 'pipeline-graph-layout-v1'
-
 function loadSavedPositions(): Record<string, { x: number; y: number }> {
   try {
     return JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? '{}')
@@ -387,7 +541,7 @@ function ZoomPanel({ onResetLayout, snapGrid, onToggleSnap }: {
   )
 }
 
-// ─── Layout: simple left-to-right layered layout ─────────────────────────────
+// ─── Layout: left-to-right layered layout with step nodes ────────────────────
 function computeLayout(apiNodes: ApiNode[], apiEdges: ApiEdge[]): { nodes: Node[]; edges: Edge[] } {
   // Topological layer assignment
   const inDegree: Record<number, number> = {}
@@ -411,45 +565,83 @@ function computeLayout(apiNodes: ApiNode[], apiEdges: ApiEdge[]): { nodes: Node[
       queue.push(child)
     }
   }
-  // Nodes with no layer assignment go to layer 0
   for (const n of apiNodes) { if (layer[n.id] === undefined) layer[n.id] = 0 }
 
   // Position within each layer
   const layerCounts: Record<number, number> = {}
   const layerIdx: Record<number, number> = {}
-  const GAP_X = 280
-  const GAP_Y = 110
+  const GAP_X = 520   // space between pipeline groups (must fit 2×STEP_W + STEP_GAP + margin)
+  const GAP_Y = 130
   for (const n of apiNodes) {
     const l = layer[n.id]
     layerIdx[n.id] = layerCounts[l] ?? 0
     layerCounts[l] = (layerCounts[l] ?? 0) + 1
   }
 
-  const nodes: Node[] = apiNodes.map((n) => {
+  const nodes: Node[] = []
+  const edges: Edge[] = []
+
+  for (const n of apiNodes) {
     const l = layer[n.id]
     const idx = layerIdx[n.id]
     const totalInLayer = layerCounts[l]
-    return {
-      id: String(n.id),
-      type: 'pipeline',
-      position: {
-        x: l * GAP_X + 40,
-        y: idx * GAP_Y - ((totalInLayer - 1) * GAP_Y) / 2 + 300,
-      },
-      data: { ...n, selected: false },
-    }
-  })
+    const baseX = l * GAP_X + 40
+    const baseY = idx * GAP_Y - ((totalInLayer - 1) * GAP_Y) / 2 + 300
 
-  const edges: Edge[] = apiEdges.map((e) => ({
-    id: e.id,
-    type: 'dependency',
-    source: String(e.source),
-    target: String(e.target),
-    markerEnd: { type: MarkerType.ArrowClosed, color: '#3b82f6', width: 16, height: 16 },
-    style: { stroke: '#3b82f6', strokeWidth: 2 },
-    animated: true,
-    data: { dependency_id: e.dependency_id },
-  }))
+    const stepData: StepNodeData = {
+      pipelineId: n.id,
+      pipelineName: n.name,
+      pipelineStatus: n.status,
+      lastRunStatus: n.last_run_status,
+      lastRunStepStatuses: n.last_run_step_statuses ?? {},
+      description: n.description,
+      sourceType: n.source_type,
+      appNames: n.app_names ?? [],
+      loadTarget: n.load_target ?? 'parquet',
+      loadTableName: n.load_table_name,
+    }
+
+    nodes.push({
+      id: `extract-${n.id}`,
+      type: 'step-extract',
+      position: { x: baseX, y: baseY },
+      data: stepData,
+    })
+
+    nodes.push({
+      id: `load-${n.id}`,
+      type: 'step-load',
+      position: { x: baseX + STEP_W + STEP_GAP, y: baseY },
+      data: stepData,
+    })
+
+    // Internal dashed edge: extract → load within same pipeline
+    edges.push({
+      id: `internal-${n.id}`,
+      source: `extract-${n.id}`,
+      sourceHandle: 'to-load',
+      target: `load-${n.id}`,
+      targetHandle: 'from-extract',
+      type: 'dependency',
+      animated: false,
+      selectable: false,
+      data: { dependency_id: 0, internal: true },
+    })
+  }
+
+  // Cross-pipeline dependency edges: load(upstream) → extract(downstream)
+  for (const e of apiEdges) {
+    edges.push({
+      id: e.id,
+      type: 'dependency',
+      source: `load-${e.source}`,
+      target: `extract-${e.target}`,
+      markerEnd: { type: MarkerType.ArrowClosed, color: '#60a5fa', width: 18, height: 18 },
+      style: { stroke: '#60a5fa', strokeWidth: 3 },
+      animated: true,
+      data: { dependency_id: e.dependency_id, internal: false },
+    })
+  }
 
   return { nodes, edges }
 }
@@ -573,8 +765,9 @@ interface EditDialogProps {
   pipelineId: number | null
   open: boolean
   onClose: () => void
+  defaultTab?: 'extract' | 'load'
 }
-function EditPipelineDialog({ pipelineId, open, onClose }: EditDialogProps) {
+function EditPipelineDialog({ pipelineId, open, onClose, defaultTab = 'extract' }: EditDialogProps) {
   const qc = useQueryClient()
   const { data: pipeline } = useQuery({
     queryKey: ['pipeline', pipelineId],
@@ -592,10 +785,16 @@ function EditPipelineDialog({ pipelineId, open, onClose }: EditDialogProps) {
     enabled: open,
   })
 
+  const [activeTab, setActiveTab] = useState(defaultTab === 'load' ? 1 : 0)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [status, setStatus] = useState<'active' | 'inactive' | 'draft'>('active')
   const [extractConfig, setExtractConfig] = useState<ExtractConfig | null>(null)
+  const [loadConfig, setLoadConfig] = useState<LoadConfig | null>(null)
+
+  useEffect(() => {
+    setActiveTab(defaultTab === 'load' ? 1 : 0)
+  }, [defaultTab, open])
 
   useEffect(() => {
     if (pipeline) {
@@ -603,6 +802,7 @@ function EditPipelineDialog({ pipelineId, open, onClose }: EditDialogProps) {
       setDescription(pipeline.description ?? '')
       setStatus(pipeline.status)
       setExtractConfig(pipeline.extract_config)
+      setLoadConfig(pipeline.load_config)
     }
   }, [pipeline])
 
@@ -615,6 +815,7 @@ function EditPipelineDialog({ pipelineId, open, onClose }: EditDialogProps) {
       description,
       status,
       ...(extractConfig && { extract_config: extractConfig }),
+      ...(loadConfig && { load_config: loadConfig }),
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['pipeline-graph'] })
@@ -625,45 +826,105 @@ function EditPipelineDialog({ pipelineId, open, onClose }: EditDialogProps) {
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle sx={{ pb: 1 }}>Edit Pipeline</DialogTitle>
+      <DialogTitle sx={{ pb: 0 }}>
+        <Tabs value={activeTab} onChange={(_, v) => setActiveTab(v)} sx={{ borderBottom: 1, borderColor: 'divider' }}>
+          <Tab label="Edit Extract" sx={{ fontSize: '0.85rem' }} />
+          <Tab label="Edit Load" sx={{ fontSize: '0.85rem' }} />
+        </Tabs>
+      </DialogTitle>
       <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '20px !important' }}>
-        {/* Identity fields */}
-        <Box sx={{ display: 'flex', gap: 1.5 }}>
-          <TextField
-            label="Name" value={name} onChange={(e) => setName(e.target.value)}
-            size="small" sx={{ flex: 1 }} autoFocus
-          />
-          <FormControl size="small" sx={{ width: 140 }}>
-            <InputLabel>Status</InputLabel>
-            <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
-              <MenuItem value="active">Active</MenuItem>
-              <MenuItem value="inactive">Inactive</MenuItem>
-              <MenuItem value="draft">Draft</MenuItem>
-            </Select>
-          </FormControl>
-        </Box>
-        <TextField
-          label="Description" value={description} onChange={(e) => setDescription(e.target.value)}
-          size="small" fullWidth multiline rows={2}
-        />
-
-        {/* Extract configuration */}
-        {extractConfig ? (
-          <ExtractConfigWizard
-            config={extractConfig}
-            onChange={setExtract}
-            sqlFiles={sqlFiles}
-            connections={connections}
-          />
+        {activeTab === 0 ? (
+          <>
+            {/* Identity fields */}
+            <Box sx={{ display: 'flex', gap: 1.5 }}>
+              <TextField
+                label="Name" value={name} onChange={(e) => setName(e.target.value)}
+                size="small" sx={{ flex: 1 }} autoFocus
+              />
+              <FormControl size="small" sx={{ width: 140 }}>
+                <InputLabel>Status</InputLabel>
+                <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
+                  <MenuItem value="active">Active</MenuItem>
+                  <MenuItem value="inactive">Inactive</MenuItem>
+                  <MenuItem value="draft">Draft</MenuItem>
+                </Select>
+              </FormControl>
+            </Box>
+            <TextField
+              label="Description" value={description} onChange={(e) => setDescription(e.target.value)}
+              size="small" fullWidth multiline rows={2}
+            />
+            {/* Extract configuration */}
+            {extractConfig ? (
+              <ExtractConfigWizard
+                config={extractConfig}
+                onChange={setExtract}
+                sqlFiles={sqlFiles}
+                connections={connections}
+              />
+            ) : (
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}><CircularProgress size={20} /></Box>
+            )}
+          </>
         ) : (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}><CircularProgress size={20} /></Box>
+          /* Load configuration */
+          loadConfig ? (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <Box sx={{ display: 'flex', gap: 1.5 }}>
+                <FormControl size="small" sx={{ flex: 1 }}>
+                  <InputLabel>Target format</InputLabel>
+                  <Select
+                    label="Target format"
+                    value={loadConfig.target}
+                    onChange={(e) => setLoadConfig((p) => p ? { ...p, target: e.target.value as LoadConfig['target'] } : p)}
+                  >
+                    <MenuItem value="parquet">Parquet</MenuItem>
+                    <MenuItem value="csv">CSV</MenuItem>
+                    <MenuItem value="spark_table">Spark table</MenuItem>
+                  </Select>
+                </FormControl>
+                <FormControl size="small" sx={{ width: 140 }}>
+                  <InputLabel>Write mode</InputLabel>
+                  <Select
+                    label="Write mode"
+                    value={loadConfig.mode}
+                    onChange={(e) => setLoadConfig((p) => p ? { ...p, mode: e.target.value as LoadConfig['mode'] } : p)}
+                  >
+                    <MenuItem value="overwrite">Overwrite</MenuItem>
+                    <MenuItem value="append">Append</MenuItem>
+                  </Select>
+                </FormControl>
+              </Box>
+              <TextField
+                label="Table name override"
+                value={loadConfig.table_name ?? ''}
+                onChange={(e) => setLoadConfig((p) => p ? { ...p, table_name: e.target.value || undefined } : p)}
+                size="small"
+                fullWidth
+                helperText="Leave blank to use job name from extract config"
+              />
+              <TextField
+                label="Partition columns"
+                value={loadConfig.partition_by.join(', ')}
+                onChange={(e) => setLoadConfig((p) => p ? {
+                  ...p,
+                  partition_by: e.target.value.split(',').map((s) => s.trim()).filter(Boolean)
+                } : p)}
+                size="small"
+                fullWidth
+                helperText="Comma-separated column names, e.g. date, application_id"
+              />
+            </Box>
+          ) : (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}><CircularProgress size={20} /></Box>
+          )
         )}
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} size="small">Cancel</Button>
         <Button
           variant="contained" size="small"
-          disabled={!name.trim() || mut.isPending || !extractConfig}
+          disabled={!name.trim() || mut.isPending || !extractConfig || !loadConfig}
           onClick={() => mut.mutate()}
         >
           {mut.isPending ? 'Saving…' : 'Save'}
@@ -676,26 +937,39 @@ function EditPipelineDialog({ pipelineId, open, onClose }: EditDialogProps) {
 // ─── Node detail panel ────────────────────────────────────────────────────────
 interface NodeDetailPanelProps {
   selectedNode: ApiNode
-  onEdit: () => void
+  selectedStep: 'extract' | 'load'
+  onEdit: (step: 'extract' | 'load') => void
 }
-function NodeDetailPanel({ selectedNode, onEdit }: NodeDetailPanelProps) {
+function NodeDetailPanel({ selectedNode, selectedStep, onEdit }: NodeDetailPanelProps) {
   const navigate = useNavigate()
   const { data: pipeline } = useQuery({
     queryKey: ['pipeline', selectedNode.id],
     queryFn: () => pipelinesApi.get(selectedNode.id).then((r) => r.data),
   })
-  const theme = useTheme()
   const statusColor = STATUS_COLOUR[selectedNode.status] ?? '#6b7280'
+  const stepColor = selectedStep === 'load'
+    ? (LOAD_TARGET_COLOR[selectedNode.load_target ?? 'parquet'] ?? '#a78bfa')
+    : '#60a5fa'
 
   return (
     <Box sx={{ px: 1.5, py: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       {/* name + actions */}
       <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
-        <Typography variant="subtitle2" fontWeight={700} sx={{ flex: 1, wordBreak: 'break-word' }}>
-          {selectedNode.name}
-        </Typography>
-        <Tooltip title="Edit pipeline">
-          <IconButton size="small" onClick={onEdit} sx={{ color: 'text.secondary' }}>
+        <Box sx={{ flex: 1 }}>
+          <Chip
+            label={selectedStep === 'extract' ? 'Extract' : 'Load'}
+            size="small"
+            sx={{
+              height: 16, fontSize: '0.6rem', fontWeight: 700, mb: 0.4,
+              bgcolor: alpha(stepColor, 0.15), color: stepColor, border: `1px solid ${alpha(stepColor, 0.3)}`,
+            }}
+          />
+          <Typography variant="subtitle2" fontWeight={700} sx={{ wordBreak: 'break-word' }}>
+            {selectedNode.name}
+          </Typography>
+        </Box>
+        <Tooltip title={selectedStep === 'extract' ? 'Edit Extract' : 'Edit Load'}>
+          <IconButton size="small" onClick={() => onEdit(selectedStep)} sx={{ color: 'text.secondary' }}>
             <EditIcon fontSize="small" />
           </IconButton>
         </Tooltip>
@@ -713,13 +987,23 @@ function NodeDetailPanel({ selectedNode, onEdit }: NodeDetailPanelProps) {
           label={selectedNode.status}
           sx={{ bgcolor: alpha(statusColor, 0.15), color: statusColor, fontWeight: 600, fontSize: '0.68rem', height: 20 }}
         />
-        <Chip
-          size="small"
-          icon={<Storage sx={{ fontSize: '0.75rem !important' }} />}
-          label={SOURCE_LABEL[selectedNode.source_type] ?? selectedNode.source_type}
-          sx={{ fontSize: '0.68rem', height: 20 }}
-          variant="outlined"
-        />
+        {selectedStep === 'extract' ? (
+          <Chip
+            size="small"
+            icon={<Storage sx={{ fontSize: '0.75rem !important' }} />}
+            label={SOURCE_LABEL[selectedNode.source_type] ?? selectedNode.source_type}
+            sx={{ fontSize: '0.68rem', height: 20 }}
+            variant="outlined"
+          />
+        ) : (
+          <Chip
+            size="small"
+            icon={<SaveAlt sx={{ fontSize: '0.75rem !important' }} />}
+            label={LOAD_TARGET_LABEL[selectedNode.load_target ?? 'parquet'] ?? selectedNode.load_target}
+            sx={{ fontSize: '0.68rem', height: 20, color: stepColor, borderColor: alpha(stepColor, 0.4) }}
+            variant="outlined"
+          />
+        )}
       </Box>
 
       {/* description */}
@@ -959,8 +1243,10 @@ export default function PipelineGraph() {
   const { settings: appSettings } = useAppSettings()
 
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [selectedStep, setSelectedStep] = useState<'extract' | 'load'>('extract')
   const [sideTab, setSideTab] = useState(0)
   const [editOpen, setEditOpen] = useState(false)
+  const [editMode, setEditMode] = useState<'extract' | 'load'>('extract')
   const [snapGrid, setSnapGrid] = useState(false)
   const [search, setSearch] = useState('')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
@@ -977,7 +1263,7 @@ export default function PipelineGraph() {
     queryFn: () => pipelinesApi.getContext().then((r) => r.data),
     refetchInterval: 60_000,
   })
-  // Keep module-level context in sync so PipelineNode can read it without props
+  // Keep module-level context in sync so step nodes can read it without props
   nodeContext.businessDate = execCtx?.business_date ?? null
 
   // ── Mutations ────────────────────────────────────────────────────────────────
@@ -1013,16 +1299,16 @@ export default function PipelineGraph() {
   })
 
   // ── Register node toolbar / context-menu actions ──────────────────────────────
-  const handleEdit = useCallback((id: number) => { setSelectedId(id); setEditOpen(true) }, [])
+  const handleEditExtract = useCallback((id: number) => { setSelectedId(id); setEditMode('extract'); setEditOpen(true) }, [])
+  const handleEditLoad = useCallback((id: number) => { setSelectedId(id); setEditMode('load'); setEditOpen(true) }, [])
   const handleTrigger = useCallback((id: number) => { runMut.mutate(id) }, [runMut])
   const handleViewDeps = useCallback((id: number) => { setSelectedId(id); setSideTab(1) }, [])
   const handleOpenPipelines = useCallback((id: number) => { navigate(`/studio?id=${id}`) }, [navigate])
   const handleLoadSpark = useCallback((id: number) => {
-    const pl = graph?.nodes.find((n) => n.id === id) as unknown as Pipeline | undefined
-    // graph nodes don't carry full Pipeline; fetch it
     pipelinesApi.get(id).then((r) => setLoadSparkPipeline(r.data))
-  }, [graph])
-  nodeActions.onEdit = handleEdit
+  }, [])
+  nodeActions.onEditExtract = handleEditExtract
+  nodeActions.onEditLoad = handleEditLoad
   nodeActions.onTrigger = handleTrigger
   nodeActions.onViewDeps = handleViewDeps
   nodeActions.onOpenPipelines = handleOpenPipelines
@@ -1042,10 +1328,13 @@ export default function PipelineGraph() {
     const saved = loadSavedPositions()
     const { nodes: n, edges: e } = computeLayout(graph?.nodes ?? [], graph?.edges ?? [])
     setNodes((prev) => n.map((newN) => {
+      // Saved positions (from localStorage) always take priority so they survive page nav
+      const savedPos = saved[newN.id]
+      if (savedPos) return { ...newN, position: savedPos }
+      // Fallback: keep in-memory position for nodes already on canvas (mid-session drag)
       const existing = prev.find((p) => p.id === newN.id)
       if (existing) return { ...newN, position: existing.position, selected: !!existing.selected }
-      const savedPos = saved[newN.id]
-      return savedPos ? { ...newN, position: savedPos } : newN
+      return newN
     }))
     setEdges(e)
   }, [graph])
@@ -1064,33 +1353,43 @@ export default function PipelineGraph() {
     }
   }, [graph, setNodes, setEdges])
 
-  // Select a node both in the side panel and visually on canvas
-  const selectNode = useCallback((id: number) => {
-    setSelectedId(id)
-    setNodes((nds) => nds.map((n) => ({ ...n, selected: Number(n.id) === id })))
+  // Select a step node both in side panel and visually on canvas
+  const selectStepNode = useCallback((nodeId: string) => {
+    const parsed = parseStepId(nodeId)
+    if (!parsed) return
+    setSelectedId(parsed.pipelineId)
+    setSelectedStep(parsed.stepType)
+    setNodes((nds) => nds.map((n) => ({ ...n, selected: n.id === nodeId })))
   }, [setNodes])
 
   // ── Connection handlers ───────────────────────────────────────────────────────
   const onConnect = useCallback((params: Connection) => {
-    if (!params.source || !params.target || params.source === params.target) return
-    const pid = Number(params.target)
-    const uid = Number(params.source)
+    // Only allow load → extract cross-pipeline connections
+    if (!params.source?.startsWith('load-') || !params.target?.startsWith('extract-')) {
+      enqueueSnackbar('Connect a Load node (right handle) to an Extract node (left handle) to create a pipeline dependency', { variant: 'info' })
+      return
+    }
+    const uid = Number(params.source.slice(5))   // upstream pipeline id
+    const pid = Number(params.target.slice(8))    // downstream pipeline id
+    if (!uid || !pid || uid === pid) return
     setEdges((eds) => addEdge({
       ...params,
       id: `dep-opt-${uid}-${pid}`,
       type: 'dependency',
       animated: true,
-      markerEnd: { type: MarkerType.ArrowClosed, color: '#3b82f6', width: 16, height: 16 },
-      style: { stroke: '#3b82f6', strokeWidth: 2 },
-      data: { dependency_id: 0 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: '#60a5fa', width: 18, height: 18 },
+      style: { stroke: '#60a5fa', strokeWidth: 3 },
+      data: { dependency_id: 0, internal: false },
     }, eds))
     addDepMut.mutate({ pid, uid })
-  }, [addDepMut, setEdges])
+  }, [addDepMut, setEdges, enqueueSnackbar])
 
   const onEdgesDelete = useCallback((deletedEdges: Edge[]) => {
     for (const edge of deletedEdges) {
-      const depId = (edge.data as { dependency_id?: number })?.dependency_id
-      const pid = Number(edge.target)
+      const d = edge.data as { dependency_id?: number; internal?: boolean }
+      if (d?.internal) continue  // don't delete internal edges
+      const depId = d?.dependency_id
+      const pid = Number(edge.target.replace('extract-', ''))
       if (depId && pid) removeMut.mutate({ pid, depId })
     }
   }, [removeMut])
@@ -1102,9 +1401,10 @@ export default function PipelineGraph() {
     return (graph?.nodes ?? []).filter((n) => n.name.toLowerCase().includes(s))
   }, [graph?.nodes, search])
 
-  const jumpToNode = useCallback((nodeId: number) => {
-    const n = nodes.find((nd) => nd.id === String(nodeId))
-    if (n) rfCenterRef.current(n.position.x + NODE_W / 2, n.position.y + NODE_H / 2, { zoom: 1.2, duration: 500 })
+  const jumpToNode = useCallback((pipelineId: number, step: 'extract' | 'load' = 'extract') => {
+    const nodeId = `${step}-${pipelineId}`
+    const n = nodes.find((nd) => nd.id === nodeId)
+    if (n) rfCenterRef.current(n.position.x + STEP_W / 2, n.position.y + STEP_H / 2, { zoom: 1.2, duration: 500 })
   }, [nodes])
 
   const selectedNode = graph?.nodes.find((n) => n.id === selectedId) ?? null
@@ -1145,13 +1445,13 @@ export default function PipelineGraph() {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             onEdgesDelete={onEdgesDelete}
-            onNodeClick={(_, node) => { selectNode(Number(node.id)); setContextMenu(null) }}
+            onNodeClick={(_, node) => { selectStepNode(node.id); setContextMenu(null) }}
             onPaneClick={() => { setSelectedId(null); setContextMenu(null) }}
             onNodeDragStop={onNodeDragStop}
             onNodeContextMenu={(e, node) => {
               e.preventDefault()
-              setContextMenu({ x: e.clientX, y: e.clientY, nodeId: String(node.id) })
-              selectNode(Number(node.id))
+              setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id })
+              selectStepNode(node.id)
             }}
             onPaneContextMenu={(e) => e.preventDefault()}
             onMoveEnd={(_e, vp) => saveViewport(vp)}
@@ -1176,15 +1476,17 @@ export default function PipelineGraph() {
             />
             <MiniMap
               nodeStrokeColor={(n) => {
-                const d = n.data as unknown as ApiNode
-                if (d.last_run_status === 'running') return RUN_STATUS_COLOUR.running
-                if (d.last_run_status === 'failed') return RUN_STATUS_COLOUR.failed
-                return STATUS_COLOUR[d.status] ?? '#2a3550'
+                const d = n.data as StepNodeData
+                if (n.type === 'step-load') return LOAD_TARGET_COLOR[d.loadTarget] ?? '#a78bfa'
+                if (d.lastRunStatus === 'running') return RUN_STATUS_COLOUR.running
+                if (d.lastRunStatus === 'failed') return RUN_STATUS_COLOUR.failed
+                return STATUS_COLOUR[d.pipelineStatus] ?? '#2a3550'
               }}
               nodeColor={(n) => {
-                const d = n.data as unknown as ApiNode
-                if (d.last_run_status === 'failed') return alpha(RUN_STATUS_COLOUR.failed, 0.2)
-                if (d.last_run_status === 'running') return alpha(RUN_STATUS_COLOUR.running, 0.2)
+                const d = n.data as StepNodeData
+                if (n.type === 'step-load') return alpha(LOAD_TARGET_COLOR[d.loadTarget] ?? '#a78bfa', 0.15)
+                if (d.lastRunStatus === 'failed') return alpha(RUN_STATUS_COLOUR.failed, 0.2)
+                if (d.lastRunStatus === 'running') return alpha(RUN_STATUS_COLOUR.running, 0.2)
                 return '#131c2f'
               }}
               maskColor={alpha('#070b14', 0.7)}
@@ -1244,7 +1546,7 @@ export default function PipelineGraph() {
                       key={n.id}
                       disableGutters
                       sx={{ px: 1.5, py: 0.75, cursor: 'pointer', '&:hover': { bgcolor: alpha(theme.palette.primary.main, 0.07) } }}
-                      onClick={() => { selectNode(n.id); setSideTab(0); setSearch(''); jumpToNode(n.id) }}
+                      onClick={() => { selectStepNode(`extract-${n.id}`); setSideTab(0); setSearch(''); jumpToNode(n.id) }}
                     >
                       <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: STATUS_COLOUR[n.status] ?? '#6b7280', mr: 1.25, flexShrink: 0 }} />
                       <ListItemText
@@ -1274,7 +1576,11 @@ export default function PipelineGraph() {
 
               {sideTab === 0 && (
                 <Box sx={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
-                  <NodeDetailPanel selectedNode={selectedNode} onEdit={() => setEditOpen(true)} />
+                  <NodeDetailPanel
+                    selectedNode={selectedNode}
+                    selectedStep={selectedStep}
+                    onEdit={(step) => { setEditMode(step); setEditOpen(true) }}
+                  />
                   <Divider />
                   <Box sx={{ px: 1.5, py: 1 }}>
                     <Button
@@ -1303,7 +1609,7 @@ export default function PipelineGraph() {
             <CardContent sx={{ p: 0, flex: 1, overflow: 'auto', '&:last-child': { pb: 0 } }}>
               <Box sx={{ px: 1.5, py: 1, bgcolor: alpha(theme.palette.primary.main, 0.08), borderBottom: `1px solid ${theme.palette.divider}` }}>
                 <Typography variant="subtitle2" fontWeight={700}>All Pipelines</Typography>
-                <Typography variant="caption" color="text.secondary">{graph?.nodes.length ?? 0} total</Typography>
+                <Typography variant="caption" color="text.secondary">{graph?.nodes.length ?? 0} total · {(graph?.nodes.length ?? 0) * 2} steps</Typography>
               </Box>
               {graph && graph.nodes.length > 0 ? (
                 <List dense disablePadding sx={{ px: 0.5, py: 0.5 }}>
@@ -1312,7 +1618,7 @@ export default function PipelineGraph() {
                       key={n.id}
                       disableGutters
                       sx={{ py: 0.25, cursor: 'pointer', borderRadius: 1, px: 0.5, '&:hover': { bgcolor: alpha(theme.palette.primary.main, 0.06) } }}
-                      onClick={() => { selectNode(n.id); setSideTab(0); jumpToNode(n.id) }}
+                      onClick={() => { selectStepNode(`extract-${n.id}`); setSideTab(0); jumpToNode(n.id) }}
                     >
                       <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: STATUS_COLOUR[n.status] ?? '#6b7280', mr: 1, flexShrink: 0 }} />
                       <ListItemText
@@ -1346,28 +1652,47 @@ export default function PipelineGraph() {
           sx={{ '& .MuiMenu-paper': { bgcolor: '#111827', border: '1px solid #1e293b', boxShadow: '0 8px 24px rgba(0,0,0,0.6)', minWidth: 190 } }}
         >
           {(() => {
-            const cNode = graph?.nodes.find((n) => String(n.id) === contextMenu.nodeId)
+            const parsed = parseStepId(contextMenu.nodeId)
+            if (!parsed) return null
+            const cNode = graph?.nodes.find((n) => n.id === parsed.pipelineId)
             if (!cNode) return null
+            const isLoad = parsed.stepType === 'load'
             return [
               <Box key="hdr" sx={{ px: 2, py: 0.75, borderBottom: '1px solid #1e293b' }}>
-                <Typography sx={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                <Typography sx={{ fontSize: '0.62rem', color: isLoad ? (LOAD_TARGET_COLOR[cNode.load_target ?? 'parquet'] ?? '#a78bfa') : '#60a5fa', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', mb: 0.1 }}>
+                  {isLoad ? 'Load step' : 'Extract step'}
+                </Typography>
+                <Typography sx={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: 600 }}>
                   {cNode.name}
                 </Typography>
               </Box>,
-              <MenuItem key="edit" onClick={() => { nodeActions.onEdit(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
-                <EditIcon sx={{ fontSize: 15, color: '#64748b' }} /> Edit pipeline
-              </MenuItem>,
-              <MenuItem key="run" onClick={() => { nodeActions.onTrigger(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
-                <PlayArrow sx={{ fontSize: 15, color: '#10b981' }} /> Trigger run
-              </MenuItem>,
-              <MenuItem key="deps" onClick={() => { nodeActions.onViewDeps(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
-                <AccountTree sx={{ fontSize: 15, color: '#64748b' }} /> Dependencies
+              isLoad ? (
+                <MenuItem key="edit-load" onClick={() => { nodeActions.onEditLoad(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
+                  <EditIcon sx={{ fontSize: 15, color: '#64748b' }} /> Edit Load
+                </MenuItem>
+              ) : (
+                <MenuItem key="edit-extract" onClick={() => { nodeActions.onEditExtract(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
+                  <EditIcon sx={{ fontSize: 15, color: '#64748b' }} /> Edit Extract
+                </MenuItem>
+              ),
+              !isLoad && (
+                <MenuItem key="run" onClick={() => { nodeActions.onTrigger(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
+                  <PlayArrow sx={{ fontSize: 15, color: '#10b981' }} /> Trigger run
+                </MenuItem>
+              ),
+              !isLoad && (
+                <MenuItem key="deps" onClick={() => { nodeActions.onViewDeps(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
+                  <AccountTree sx={{ fontSize: 15, color: '#64748b' }} /> Dependencies
+                </MenuItem>
+              ),
+              <MenuItem key="spark" onClick={() => { nodeActions.onLoadSpark(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
+                <CloudUpload sx={{ fontSize: 15, color: '#a78bfa' }} /> Load to Spark
               </MenuItem>,
               <Divider key="div" sx={{ borderColor: '#1e293b' }} />,
               <MenuItem key="open" onClick={() => { nodeActions.onOpenPipelines(cNode.id); setContextMenu(null) }} sx={{ fontSize: '0.82rem', gap: 1.5, py: 0.75 }}>
                 <OpenInNewIcon sx={{ fontSize: 15, color: '#64748b' }} /> Open in Studio
               </MenuItem>,
-            ]
+            ].filter(Boolean)
           })()}
         </MuiMenu>
       )}
@@ -1377,6 +1702,7 @@ export default function PipelineGraph() {
         pipelineId={selectedId}
         open={editOpen}
         onClose={() => setEditOpen(false)}
+        defaultTab={editMode}
       />
 
       {/* ── Load to Spark dialog ── */}

@@ -78,6 +78,13 @@ class RunStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+
+
+class StepType(str, enum.Enum):
+    EXTRACT = "extract"
+    TRANSFORM = "transform"
+    LOAD = "load"
 
 
 class ETLPipeline(Base):
@@ -160,6 +167,10 @@ class ETLRun(Base):
     extract_jobs: Mapped[list[ExtractJob]] = relationship(
         "ExtractJob", back_populates="run", cascade="all, delete-orphan"
     )
+    steps: Mapped[list["RunStep"]] = relationship(
+        "RunStep", back_populates="run", cascade="all, delete-orphan",
+        order_by="RunStep.step_order",
+    )
 
 
 class ETLRunLog(Base):
@@ -202,6 +213,35 @@ class ExtractJob(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text)
 
     run: Mapped[ETLRun] = relationship("ETLRun", back_populates="extract_jobs")
+
+
+class RunStep(Base):
+    """Tracks the execution status of each logical step (extract / transform / load)
+    within a single ETL run.  Three rows are created per run — one per StepType —
+    and updated as the engine progresses through each phase."""
+    __tablename__ = "run_steps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("etl_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Ordering matches the execution sequence: 0=extract, 1=transform, 2=load
+    step_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_type: Mapped[str] = mapped_column(
+        SAEnum(StepType), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        SAEnum(RunStatus), default=RunStatus.PENDING, nullable=False
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[Optional[float]] = mapped_column(Float)
+    # Record counts flowing through this step
+    records_in: Mapped[int] = mapped_column(BigInteger, default=0)
+    records_out: Mapped[int] = mapped_column(BigInteger, default=0)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    run: Mapped["ETLRun"] = relationship("ETLRun", back_populates="steps")
 
 
 class ServiceError(Base):

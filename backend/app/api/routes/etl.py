@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, SqlFileVersion, PipelineDependency, ExecutionContext
+from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, SqlFileVersion, PipelineDependency, ExecutionContext, RunStep, StepType
 from app.schemas.etl import (
     PipelineCreate, PipelineUpdate, PipelineResponse,
     RunTrigger, RunSummary, RunDetail,
@@ -342,6 +342,7 @@ async def get_run(run_id: int, db: AsyncSession = Depends(get_db)):
         .options(
             selectinload(ETLRun.logs),
             selectinload(ETLRun.extract_jobs),
+            selectinload(ETLRun.steps),
         )
     )
     run = result.scalar_one_or_none()
@@ -621,18 +622,23 @@ async def get_pipeline_graph(db: AsyncSession = Depends(get_db)):
     deps_result = await db.execute(select(PipelineDependency))
     deps = deps_result.scalars().all()
 
-    # Gather last run status per pipeline
+    # Gather last run status + step statuses per pipeline
     last_run_by_pipeline: dict[int, str] = {}
+    step_statuses_by_pipeline: dict[int, dict[str, str]] = {}
     for p in pipelines:
         run_q = await db.execute(
             select(ETLRun)
             .where(ETLRun.pipeline_id == p.id)
             .order_by(desc(ETLRun.created_at))
             .limit(1)
+            .options(selectinload(ETLRun.steps))
         )
         last_run = run_q.scalar_one_or_none()
         if last_run:
             last_run_by_pipeline[p.id] = last_run.status
+            step_statuses_by_pipeline[p.id] = {
+                s.step_type: s.status for s in last_run.steps
+            }
 
     def _app_names(ec: dict) -> list[str]:
         result = []
@@ -654,6 +660,9 @@ async def get_pipeline_graph(db: AsyncSession = Depends(get_db)):
             source_type=(p.extract_config or {}).get("source_type", "grpc"),
             last_run_status=last_run_by_pipeline.get(p.id),
             app_names=_app_names(p.extract_config or {}),
+            load_target=(p.load_config or {}).get("target", "parquet"),
+            load_table_name=(p.load_config or {}).get("table_name"),
+            last_run_step_statuses=step_statuses_by_pipeline.get(p.id, {}),
         )
         for p in pipelines
     ]

@@ -12,12 +12,13 @@ import {
   ExpandMore, ExpandLess, FilterList, Search, Clear, Timer,
   Segment as SegmentIcon, Apps as AppsIcon, StorageOutlined,
   WarningAmber, FiberManualRecord, ArrowDownward,
+  Replay, OpenInNew, PlayArrow,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSnackbar } from 'notistack'
 import { formatDistanceToNow, format, differenceInSeconds } from 'date-fns'
 import { parseApiDate } from '../utils/dates'
-import { runsApi, adminApi, RunDetail, RunSummary, RunLog, ExtractJob } from '../api/client'
+import { runsApi, pipelinesApi, adminApi, RunDetail, RunSummary, RunLog, ExtractJob, RunStep } from '../api/client'
 import StatusChip from '../components/StatusChip'
 import { useWebSocket } from '../hooks/useWebSocket'
 
@@ -267,6 +268,89 @@ function AppProgress({ appId, jobs }: { appId: string; jobs: ExtractJob[] }) {
   )
 }
 
+// ─── Pipeline Step Stepper ────────────────────────────────────────────────────
+
+const STEP_META: Record<string, { label: string; color: string; icon: string }> = {
+  extract:   { label: 'Extract',   color: '#3b82f6', icon: '⬇' },
+  transform: { label: 'Transform', color: '#8b5cf6', icon: '⚙' },
+  load:      { label: 'Load',      color: '#10b981', icon: '⬆' },
+}
+
+const STEP_STATUS_COLOR: Record<string, string> = {
+  pending:   '#475569',
+  running:   '#f59e0b',
+  completed: '#22c55e',
+  failed:    '#ef4444',
+  cancelled: '#6b7280',
+  skipped:   '#334155',
+}
+
+function RunStepStepper({ steps }: { steps: RunStep[] }) {
+  const sorted = [...steps].sort((a, b) => a.step_order - b.step_order)
+
+  return (
+    <Table size="small" sx={{ mb: 1.5 }}>
+      <TableHead>
+        <TableRow sx={{ '& th': { fontSize: '0.65rem', color: 'text.disabled', py: 0.5, borderColor: alpha('#ffffff', 0.06) } }}>
+          <TableCell>Step</TableCell>
+          <TableCell>Status</TableCell>
+          <TableCell align="right">In</TableCell>
+          <TableCell align="right">Out</TableCell>
+          <TableCell align="right">Duration</TableCell>
+          <TableCell>Error</TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {sorted.map((step) => {
+          const meta = STEP_META[step.step_type] ?? { label: step.step_type, color: '#64748b', icon: '●' }
+          const statusColor = STEP_STATUS_COLOR[step.status] ?? '#64748b'
+          const isRunning = step.status === 'running'
+          const dur = step.started_at && step.finished_at
+            ? differenceInSeconds(parseApiDate(step.finished_at), parseApiDate(step.started_at))
+            : null
+          return (
+            <TableRow key={step.id} sx={{ '& td': { py: 0.6, borderColor: alpha('#ffffff', 0.05) } }}>
+              <TableCell>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                  <Typography sx={{ fontSize: '0.75rem', lineHeight: 1 }}>{meta.icon}</Typography>
+                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: meta.color }}>{meta.label}</Typography>
+                </Box>
+              </TableCell>
+              <TableCell>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  {isRunning && <CircularProgress size={10} sx={{ color: statusColor }} />}
+                  <Typography sx={{ fontFamily: MONO, fontSize: '0.72rem', color: statusColor, fontWeight: 600 }}>
+                    {step.status}
+                  </Typography>
+                </Box>
+              </TableCell>
+              <TableCell align="right" sx={{ fontFamily: MONO, fontSize: '0.72rem', color: 'text.secondary' }}>
+                {step.records_in > 0 ? step.records_in.toLocaleString() : '—'}
+              </TableCell>
+              <TableCell align="right" sx={{ fontFamily: MONO, fontSize: '0.72rem', fontWeight: step.records_out > 0 ? 600 : 400 }}>
+                {step.records_out > 0 ? step.records_out.toLocaleString() : '—'}
+              </TableCell>
+              <TableCell align="right" sx={{ fontFamily: MONO, fontSize: '0.72rem', color: 'text.disabled' }}>
+                {dur !== null ? formatElapsed(dur) : isRunning ? '…' : '—'}
+              </TableCell>
+              <TableCell sx={{ maxWidth: 200 }}>
+                {step.error_message && (
+                  <Tooltip title={step.error_message}>
+                    <Typography sx={{ fontSize: '0.65rem', color: 'error.main',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {step.error_message}
+                    </Typography>
+                  </Tooltip>
+                )}
+              </TableCell>
+            </TableRow>
+          )
+        })}
+      </TableBody>
+    </Table>
+  )
+}
+
 // ─── Stat pill ────────────────────────────────────────────────────────────────
 
 function StatPill({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: string | number; color?: string }) {
@@ -286,7 +370,7 @@ function StatPill({ icon, label, value, color }: { icon: React.ReactNode; label:
 
 // ─── Detail panel ─────────────────────────────────────────────────────────────
 
-function DetailPanel({ runId, onClose }: { runId: number; onClose: () => void }) {
+function DetailPanel({ runId, onClose, onRerun }: { runId: number; onClose: () => void; onRerun: (pipelineId: number, runId: number) => void }) {
   const theme = useTheme()
   const [tab, setTab] = useState(0)
   const [logFilter, setLogFilter] = useState<string>('ALL')
@@ -401,6 +485,20 @@ function DetailPanel({ runId, onClose }: { runId: number; onClose: () => void })
         <Box sx={{ flex: 1 }} />
         <Chip label={`Pipeline #${run.pipeline_id}`} size="small" variant="outlined"
           sx={{ fontFamily: MONO, fontSize: '0.7rem', height: 22 }} />
+        {!isActive && (
+          <Tooltip title="Re-run this pipeline">
+            <Button
+              size="small"
+              variant="outlined"
+              color="primary"
+              startIcon={<Replay sx={{ fontSize: 14 }} />}
+              onClick={() => onRerun(run.pipeline_id, run.id)}
+              sx={{ fontSize: '0.72rem', height: 26, px: 1.25 }}
+            >
+              Re-run
+            </Button>
+          </Tooltip>
+        )}
         <IconButton size="small" onClick={onClose} sx={{ color: 'text.disabled', ml: 0.5 }}>
           <ExpandMore sx={{ fontSize: 18 }} />
         </IconButton>
@@ -446,6 +544,31 @@ function DetailPanel({ runId, onClose }: { runId: number; onClose: () => void })
       {/* Progress tab */}
       {tab === 0 && (
         <Box sx={{ flex: 1, overflow: 'auto', p: 2 }}>
+          {/* Step-level pipeline progress */}
+          {(run.steps?.length ?? 0) > 0 && (
+            <>
+              <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.75, gap: 1 }}>
+                <Typography sx={{ fontSize: '0.68rem', color: 'text.disabled', textTransform: 'uppercase', letterSpacing: '0.08em', flex: 1 }}>
+                  Pipeline Steps
+                </Typography>
+                {run.steps.some((s) => s.status === 'failed') && (
+                  <Tooltip title="One or more steps failed — re-run will retry from the start">
+                    <Chip
+                      icon={<WarningAmber sx={{ fontSize: 12 }} />}
+                      label="Step failed"
+                      size="small"
+                      color="error"
+                      variant="outlined"
+                      sx={{ height: 20, fontSize: '0.62rem' }}
+                    />
+                  </Tooltip>
+                )}
+              </Box>
+              <RunStepStepper steps={run.steps} />
+              <Divider sx={{ mb: 2, borderColor: alpha('#ffffff', 0.06) }} />
+            </>
+          )}
+
           {appIds.length === 0 && isActive && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, color: 'text.disabled', pt: 2, pl: 1 }}>
               <CircularProgress size={16} color="inherit" />
@@ -632,6 +755,24 @@ export default function ETLRuns() {
     onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
   })
 
+  const rerunMutation = useMutation({
+    mutationFn: ({ pipelineId }: { pipelineId: number; fromRunId: number }) =>
+      pipelinesApi.run(pipelineId),
+    onSuccess: (r, { fromRunId }) => {
+      enqueueSnackbar(`New run #${r.data.id} triggered (re-run of pipeline #${r.data.pipeline_id})`, { variant: 'success' })
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+      // Switch detail panel to the new run
+      qc.removeQueries({ queryKey: ['run-detail', r.data.id] })
+      setFocusedRunId(r.data.id)
+      setPanelOpen(true)
+    },
+    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
+  })
+
+  const handleRerun = (pipelineId: number, fromRunId: number) => {
+    rerunMutation.mutate({ pipelineId, fromRunId })
+  }
+
   const deleteMutation = useMutation({
     mutationFn: (ids: number[]) => adminApi.deleteRuns(ids),
     onSuccess: () => {
@@ -772,10 +913,18 @@ export default function ETLRuns() {
                         </Typography>
                       </TableCell>
                       <TableCell onClick={(e) => e.stopPropagation()}>
-                        {isActive && (
+                        {isActive ? (
                           <Tooltip title="Cancel run">
                             <IconButton size="small" color="warning" onClick={() => cancelMutation.mutate(r.id)}>
                               <Cancel fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        ) : (
+                          <Tooltip title="Re-run pipeline">
+                            <IconButton size="small" color="primary"
+                              disabled={rerunMutation.isPending}
+                              onClick={() => handleRerun(r.pipeline_id, r.id)}>
+                              <Replay sx={{ fontSize: 16 }} />
                             </IconButton>
                           </Tooltip>
                         )}
@@ -794,7 +943,7 @@ export default function ETLRuns() {
         <>
           <Divider />
           <Box sx={{ flex: '1 1 0', minHeight: 0, overflow: 'hidden' }}>
-            <DetailPanel key={focusedRunId} runId={focusedRunId} onClose={() => setPanelOpen(false)} />
+            <DetailPanel key={focusedRunId} runId={focusedRunId} onClose={() => setPanelOpen(false)} onRerun={handleRerun} />
           </Box>
         </>
       )}
