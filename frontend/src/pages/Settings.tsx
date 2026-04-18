@@ -1,620 +1,242 @@
 import { useState, useEffect } from 'react'
 import {
-  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
-  DialogContent, DialogTitle, Divider,
-  FormControlLabel, Grid, IconButton, InputAdornment, MenuItem,
-  Paper, Switch, Tab, Tabs, TextField, Tooltip, Typography, alpha, useTheme,
+  Box, Typography, Card, CardContent, TextField, Button,
+  Alert, CircularProgress, Divider, Tab, Tabs, Chip,
+  ToggleButtonGroup, ToggleButton,
 } from '@mui/material'
 import {
-  Add, Delete, Edit, Visibility, VisibilityOff, CheckCircle, Cancel,
-  Palette, Link as LinkIcon,
+  Save, Brightness4, Brightness7, Water,
+  ViewAgenda, ViewCompact,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useSnackbar } from 'notistack'
-import { connectionsApi, Connection, ConnectionPayload, ConnectionType } from '../api/client'
-import { useThemeMode } from '../App'
-import { useAppSettings, UIDensity, DiagramEdgeStyle } from '../hooks/useAppSettings'
-import { THEMES } from '../theme'
+import { contextApi } from '../api/client'
+import { useThemeStore, ThemeMode, Density } from '../store/theme'
 
-// ─── Tab panel helper ─────────────────────────────────────────────────────────
-function TabPanel({ value, index, children }: { value: number; index: number; children: React.ReactNode }) {
-  if (value !== index) return null
-  return <Box sx={{ pt: 3 }}>{children}</Box>
-}
+const APP_VERSION = '0.1.0'
+const BACKEND_URL = 'http://localhost:8000'
 
-// ─── Appearance panel ─────────────────────────────────────────────────────────
-function AppearancePanel() {
-  const { themeName, setThemeName } = useThemeMode()
-  const { settings, update } = useAppSettings()
-  const theme = useTheme()
+// ── Tab panel helper ──────────────────────────────────────────────────────────
 
-  const densityOptions: { value: UIDensity; label: string; desc: string }[] = [
-    { value: 'comfortable', label: 'Comfortable', desc: 'Default spacing, larger click targets' },
-    { value: 'compact', label: 'Compact', desc: 'Reduced padding, fits more on screen' },
-  ]
-
-  const edgeOptions: { value: DiagramEdgeStyle; label: string; desc: string }[] = [
-    { value: 'bezier', label: 'Bezier', desc: 'Smooth curved lines' },
-    { value: 'smoothstep', label: 'Smooth Step', desc: 'Rounded right-angle corners' },
-    { value: 'step', label: 'Step', desc: 'Hard right-angle corners' },
-    { value: 'straight', label: 'Straight', desc: 'Direct lines between nodes' },
-  ]
-
-  return (
-    <Grid container spacing={3}>
-      {/* Theme */}
-      <Grid item xs={12}>
-        <Typography variant="subtitle2" fontWeight={700} gutterBottom>Color Theme</Typography>
-        {Array.from(new Set(THEMES.map((t) => t.group))).map((group) => (
-          <Box key={group} sx={{ mb: 2 }}>
-            <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block', textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: '0.7rem' }}>
-              {group}
-            </Typography>
-            <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
-              {THEMES.filter((t) => t.group === group).map((t) => {
-                const active = themeName === t.name
-                const [bg, surface, accent] = t.preview
-                return (
-                  <Paper
-                    key={t.name}
-                    variant="outlined"
-                    onClick={() => setThemeName(t.name)}
-                    sx={{
-                      p: 1.5, cursor: 'pointer', width: 120,
-                      borderColor: active ? 'primary.main' : undefined,
-                      borderWidth: active ? 2 : 1,
-                      bgcolor: active ? alpha(theme.palette.primary.main, 0.06) : undefined,
-                      '&:hover': { borderColor: 'primary.main' },
-                      transition: 'border-color 0.15s',
-                    }}
-                  >
-                    <Box sx={{
-                      width: '100%', height: 40, borderRadius: 1, mb: 1,
-                      bgcolor: bg, border: `1px solid ${surface}`,
-                      display: 'flex', flexDirection: 'column',
-                      alignItems: 'flex-start', justifyContent: 'flex-end', p: '5px',
-                      gap: '3px', overflow: 'hidden',
-                    }}>
-                      <Box sx={{ width: '55%', height: 4, borderRadius: 1, bgcolor: accent, opacity: 0.9 }} />
-                      <Box sx={{ width: '80%', height: 3, borderRadius: 1, bgcolor: surface, opacity: 0.8, border: `1px solid ${accent}33` }} />
-                      <Box sx={{ width: '40%', height: 3, borderRadius: 1, bgcolor: surface, opacity: 0.6 }} />
-                    </Box>
-                    <Typography variant="caption" fontWeight={active ? 700 : 400} display="block" noWrap>
-                      {t.label}
-                    </Typography>
-                    {active && (
-                      <Chip label="Active" size="small" color="primary"
-                        sx={{ mt: 0.5, fontSize: '0.6rem', height: 16, '& .MuiChip-label': { px: 0.75 } }} />
-                    )}
-                  </Paper>
-                )
-              })}
-            </Box>
-          </Box>
-        ))}
-      </Grid>
-
-      <Grid item xs={12}><Divider /></Grid>
-
-      {/* Density */}
-      <Grid item xs={12}>
-        <Typography variant="subtitle2" fontWeight={700} gutterBottom>UI Density</Typography>
-        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-          {densityOptions.map((opt) => (
-            <Paper
-              key={opt.value}
-              variant="outlined"
-              onClick={() => update({ density: opt.value })}
-              sx={{
-                p: 2, cursor: 'pointer', minWidth: 160,
-                borderColor: settings.density === opt.value ? 'primary.main' : undefined,
-                borderWidth: settings.density === opt.value ? 2 : 1,
-                bgcolor: settings.density === opt.value ? alpha(theme.palette.primary.main, 0.06) : undefined,
-                '&:hover': { borderColor: 'primary.main' },
-              }}
-            >
-              <Typography variant="body2" fontWeight={settings.density === opt.value ? 700 : 400}>{opt.label}</Typography>
-              <Typography variant="caption" color="text.secondary">{opt.desc}</Typography>
-              {settings.density === opt.value && (
-                <Chip label="Active" size="small" color="primary"
-                  sx={{ mt: 0.75, display: 'block', width: 'fit-content', fontSize: '0.65rem', height: 18 }} />
-              )}
-            </Paper>
-          ))}
-        </Box>
-      </Grid>
-
-      <Grid item xs={12}><Divider /></Grid>
-
-      {/* Diagram edge style */}
-      <Grid item xs={12}>
-        <Typography variant="subtitle2" fontWeight={700} gutterBottom>Diagram Connector Style</Typography>
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
-          Controls how edges are drawn in the Pipeline Graph view
-        </Typography>
-        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-          {edgeOptions.map((opt) => (
-            <Paper
-              key={opt.value}
-              variant="outlined"
-              onClick={() => update({ diagramEdgeStyle: opt.value })}
-              sx={{
-                p: 2, cursor: 'pointer', minWidth: 150,
-                borderColor: settings.diagramEdgeStyle === opt.value ? 'primary.main' : undefined,
-                borderWidth: settings.diagramEdgeStyle === opt.value ? 2 : 1,
-                bgcolor: settings.diagramEdgeStyle === opt.value ? alpha(theme.palette.primary.main, 0.06) : undefined,
-                '&:hover': { borderColor: 'primary.main' },
-              }}
-            >
-              <Typography variant="body2" fontWeight={settings.diagramEdgeStyle === opt.value ? 700 : 400}>{opt.label}</Typography>
-              <Typography variant="caption" color="text.secondary">{opt.desc}</Typography>
-              {settings.diagramEdgeStyle === opt.value && (
-                <Chip label="Active" size="small" color="primary"
-                  sx={{ mt: 0.75, display: 'block', width: 'fit-content', fontSize: '0.65rem', height: 18 }} />
-              )}
-            </Paper>
-          ))}
-        </Box>
-      </Grid>
-    </Grid>
-  )
-}
-
-// ─── Connection form dialog ───────────────────────────────────────────────────
-const CONN_TYPES: ConnectionType[] = ['jdbc', 'grpc', 'rest', 'other', 'datawarehouse']
-
-const emptyForm = (): ConnectionPayload => ({
-  name: '', description: '', conn_type: 'jdbc',
-  host: '', port: undefined, database: '', username: '', password: '', extra: {},
-})
-
-function ConnectionDialog({
-  open, initial, onClose,
-}: {
-  open: boolean
-  initial: Connection | null
-  onClose: () => void
+function TabPanel({ children, value, index }: {
+  children?: React.ReactNode
+  value: number
+  index: number
 }) {
-  const [form, setForm] = useState<ConnectionPayload>(emptyForm())
-  const [showPass, setShowPass] = useState(false)
-  const [passwordChanged, setPasswordChanged] = useState(false)
-  const [dwParams, setDwParams] = useState<{ key: string; value: string }[]>([])
-  const { enqueueSnackbar } = useSnackbar()
+  return value === index ? <Box sx={{ pt: 2.5 }}>{children}</Box> : null
+}
+
+// ── Settings page ─────────────────────────────────────────────────────────────
+
+export default function Settings() {
   const qc = useQueryClient()
+  const [tab, setTab] = useState(0)
+  const { mode, setMode, density, setDensity } = useThemeStore()
 
-  // Reset form when dialog opens
-  useEffect(() => {
-    if (open) {
-      if (initial) {
-        setForm({
-          name: initial.name,
-          description: initial.description ?? '',
-          conn_type: initial.conn_type,
-          host: initial.host ?? '',
-          port: initial.port,
-          database: initial.database ?? '',
-          username: initial.username ?? '',
-          password: '',  // never pre-filled
-          extra: initial.extra ?? {},
-        })
-        setPasswordChanged(false)
-        const p = initial.extra?.params
-        setDwParams(p && typeof p === 'object'
-          ? Object.entries(p as Record<string, string>).map(([key, value]) => ({ key, value: String(value) }))
-          : [])
-      } else {
-        setForm(emptyForm())
-        setPasswordChanged(false)
-        setDwParams([])
-      }
-    }
-  }, [open, initial])
-
-  const createMut = useMutation({
-    mutationFn: (d: ConnectionPayload) => connectionsApi.create(d).then((r) => r.data),
-    onSuccess: () => { enqueueSnackbar('Connection created', { variant: 'success' }); qc.invalidateQueries({ queryKey: ['connections'] }); onClose() },
-    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
+  const { data: ctx, isLoading } = useQuery({
+    queryKey: ['execution-context'],
+    queryFn: contextApi.get,
   })
+
+  const [businessDate, setBusinessDate] = useState('')
+  const [namespacePrefix, setNamespacePrefix] = useState('')
+  const [saveMsg, setSaveMsg] = useState('')
+  const [saveErr, setSaveErr] = useState('')
+
+  useEffect(() => {
+    if (ctx) {
+      setBusinessDate(ctx.business_date ?? '')
+      setNamespacePrefix(ctx.namespace_prefix ?? '')
+    }
+  }, [ctx])
 
   const updateMut = useMutation({
-    mutationFn: (d: Partial<ConnectionPayload>) => connectionsApi.update(initial!.id, d).then((r) => r.data),
-    onSuccess: () => { enqueueSnackbar('Connection saved', { variant: 'success' }); qc.invalidateQueries({ queryKey: ['connections'] }); onClose() },
-    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
+    mutationFn: (data: { business_date: string; namespace_prefix: string }) =>
+      contextApi.update(data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['execution-context'] })
+      setSaveMsg('Context saved.')
+      setSaveErr('')
+      setTimeout(() => setSaveMsg(''), 3000)
+    },
+    onError: (e: Error) => setSaveErr(e.message),
   })
 
-  const isPending = createMut.isPending || updateMut.isPending
-
-  const set = (k: keyof ConnectionPayload, v: unknown) => setForm((f) => ({ ...f, [k]: v }))
-  const setExtra = (k: string, v: unknown) => setForm((f) => ({ ...f, extra: { ...f.extra, [k]: v } }))
-
-  const handleSave = () => {
-    if (!form.name.trim()) return
-    const params = Object.fromEntries(dwParams.filter((p) => p.key.trim()).map((p) => [p.key.trim(), p.value]))
-    const extra = form.conn_type === 'datawarehouse'
-      ? { ...form.extra, ...(Object.keys(params).length ? { params } : {}) }
-      : form.extra
-    const base = { ...form, extra }
-    if (initial) {
-      const payload: Partial<ConnectionPayload> = base
-      if (!passwordChanged) delete payload.password
-      updateMut.mutate(payload)
-    } else {
-      createMut.mutate(base)
-    }
+  if (isLoading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', p: 6 }}>
+        <CircularProgress size={28} />
+      </Box>
+    )
   }
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>{initial ? 'Edit Connection' : 'New Connection'}</DialogTitle>
-      <DialogContent dividers>
-        <Grid container spacing={2}>
-          <Grid item xs={12} sm={8}>
-            <TextField label="Name *" value={form.name} fullWidth size="small"
-              onChange={(e) => set('name', e.target.value)} />
-          </Grid>
-          <Grid item xs={12} sm={4}>
-            <TextField select label="Type" value={form.conn_type} fullWidth size="small"
-              onChange={(e) => set('conn_type', e.target.value)}>
-              {CONN_TYPES.map((t) => <MenuItem key={t} value={t}>{t.toUpperCase()}</MenuItem>)}
-            </TextField>
-          </Grid>
-          <Grid item xs={12}>
-            <TextField label="Description" value={form.description ?? ''} fullWidth size="small"
-              onChange={(e) => set('description', e.target.value)} />
-          </Grid>
-          <Grid item xs={12}><Divider><Typography variant="caption">Connection Details</Typography></Divider></Grid>
+    <Box sx={{ p: 3, maxWidth: 740 }}>
+      <Typography variant="h5" fontWeight={700} mb={0.5}>Settings</Typography>
+      <Typography variant="body2" color="text.secondary" mb={2.5}>
+        Configure workspace preferences and execution context.
+      </Typography>
 
-          {form.conn_type !== 'datawarehouse' && <>
-            <Grid item xs={12} sm={8}>
-              <TextField label="Host / URL" value={form.host ?? ''} fullWidth size="small"
-                placeholder="hostname or IP address"
-                onChange={(e) => set('host', e.target.value)} />
-            </Grid>
-            <Grid item xs={12} sm={4}>
-              <TextField label="Port" type="number" value={form.port ?? ''} fullWidth size="small"
-                onChange={(e) => set('port', e.target.value ? parseInt(e.target.value) : undefined)} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField label="Database / Schema" value={form.database ?? ''} fullWidth size="small"
-                onChange={(e) => set('database', e.target.value)} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField label="Username" value={form.username ?? ''} fullWidth size="small"
-                autoComplete="off"
-                onChange={(e) => set('username', e.target.value)} />
-            </Grid>
-          </>}
-
-          {form.conn_type === 'datawarehouse' && <>
-            <Grid item xs={12} sm={6}>
-              <TextField label="Username" value={form.username ?? ''} fullWidth size="small"
-                autoComplete="off"
-                onChange={(e) => set('username', e.target.value)} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField select label="Environment" value={(form.extra?.environment as string) ?? ''} fullWidth size="small"
-                onChange={(e) => setExtra('environment', e.target.value)}>
-                <MenuItem value="PROD">PROD</MenuItem>
-                <MenuItem value="UAT">UAT</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField select label="Datasource" value={(form.extra?.datasource as string) ?? ''} fullWidth size="small"
-                onChange={(e) => setExtra('datasource', e.target.value)}>
-                <MenuItem value="IMPALA">IMPALA</MenuItem>
-                <MenuItem value="SPARK">SPARK</MenuItem>
-                <MenuItem value="DUMMY">DUMMY (test / generate)</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField label="Timeout (ms)" type="number" value={(form.extra?.timeout as number) ?? ''} fullWidth size="small"
-                placeholder="e.g. 30000"
-                onChange={(e) => setExtra('timeout', e.target.value ? parseInt(e.target.value) : undefined)} />
-            </Grid>
-            <Grid item xs={12} sm={6} sx={{ display: 'flex', alignItems: 'center' }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={Boolean(form.extra?.uppercase_columns)}
-                    onChange={(e) => setExtra('uppercase_columns', e.target.checked)}
-                    size="small"
-                  />
-                }
-                label={<Typography variant="body2">Uppercase columns</Typography>}
-              />
-            </Grid>
-          </>}
-
-          <Grid item xs={12}>
-            <TextField
-              label={initial ? 'Password (leave blank to keep existing)' : 'Password'}
-              value={form.password ?? ''}
-              fullWidth size="small"
-              type={showPass ? 'text' : 'password'}
-              autoComplete="new-password"
-              helperText="Encrypted before storage — never returned by the API"
-              InputProps={{
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton size="small" onClick={() => setShowPass((v) => !v)} edge="end">
-                      {showPass ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              }}
-              onChange={(e) => { set('password', e.target.value); setPasswordChanged(true) }}
-            />
-          </Grid>
-          {initial?.has_password && !passwordChanged && (
-            <Grid item xs={12}>
-              <Alert severity="info" sx={{ py: 0.5 }}>
-                A password is stored for this connection. Enter a new value above to replace it, or leave blank to keep it.
-              </Alert>
-            </Grid>
-          )}
-
-          {form.conn_type === 'datawarehouse' && <>
-            <Grid item xs={12}>
-              <Divider><Typography variant="caption">Additional Parameters</Typography></Divider>
-            </Grid>
-            {dwParams.map((p, i) => (
-              <Grid item xs={12} key={i}>
-                <Grid container spacing={1} alignItems="center">
-                  <Grid item xs={5}>
-                    <TextField label="Key" value={p.key} fullWidth size="small"
-                      onChange={(e) => setDwParams((ps) => ps.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} />
-                  </Grid>
-                  <Grid item xs={6}>
-                    <TextField label="Value" value={p.value} fullWidth size="small"
-                      onChange={(e) => setDwParams((ps) => ps.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
-                  </Grid>
-                  <Grid item xs={1}>
-                    <IconButton size="small" onClick={() => setDwParams((ps) => ps.filter((_, j) => j !== i))}>
-                      <Delete fontSize="small" />
-                    </IconButton>
-                  </Grid>
-                </Grid>
-              </Grid>
-            ))}
-            <Grid item xs={12}>
-              <Button size="small" startIcon={<Add />}
-                onClick={() => setDwParams((ps) => [...ps, { key: '', value: '' }])}>
-                Add Parameter
-              </Button>
-            </Grid>
-          </>}
-        </Grid>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={handleSave} disabled={isPending || !form.name.trim()}
-          startIcon={isPending ? <CircularProgress size={14} color="inherit" /> : undefined}>
-          {initial ? 'Save Changes' : 'Create'}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  )
-}
-
-// ─── Connections panel ────────────────────────────────────────────────────────
-function ConnectionsPanel() {
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [editTarget, setEditTarget] = useState<Connection | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Connection | null>(null)
-  const [testingId, setTestingId] = useState<number | null>(null)
-  const [testResults, setTestResults] = useState<Record<number, { success: boolean; message: string }>>({})
-  const { enqueueSnackbar } = useSnackbar()
-  const qc = useQueryClient()
-  const theme = useTheme()
-
-  const { data: connections, isLoading } = useQuery<Connection[]>({
-    queryKey: ['connections'],
-    queryFn: () => connectionsApi.list().then((r) => r.data),
-  })
-
-  const deleteMut = useMutation({
-    mutationFn: (id: number) => connectionsApi.delete(id),
-    onSuccess: () => { enqueueSnackbar('Connection deleted', { variant: 'info' }); qc.invalidateQueries({ queryKey: ['connections'] }); setDeleteTarget(null) },
-    onError: (e: Error) => enqueueSnackbar(e.message, { variant: 'error' }),
-  })
-
-  const handleTest = async (conn: Connection) => {
-    setTestingId(conn.id)
-    try {
-      const result = await connectionsApi.test(conn.id).then((r) => r.data)
-      setTestResults((r) => ({ ...r, [conn.id]: result }))
-      enqueueSnackbar(result.success ? `${conn.name}: connected` : `${conn.name}: ${result.message}`, {
-        variant: result.success ? 'success' : 'error',
-      })
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Test failed'
-      setTestResults((r) => ({ ...r, [conn.id]: { success: false, message: msg } }))
-    } finally {
-      setTestingId(null)
-    }
-  }
-
-  const connTypeColor = (t: ConnectionType) => {
-    const map: Record<ConnectionType, 'primary' | 'secondary' | 'warning' | 'default' | 'info'> = {
-      jdbc: 'primary', grpc: 'secondary', rest: 'warning', other: 'default', datawarehouse: 'info',
-    }
-    return map[t] ?? 'default'
-  }
-
-  return (
-    <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', mb: 3, gap: 1 }}>
-        <Box sx={{ flex: 1 }}>
-          <Typography variant="subtitle1" fontWeight={700}>Named Connections</Typography>
-          <Typography variant="caption" color="text.secondary">
-            Reusable connection configs for ETL jobs. Passwords are encrypted at rest and never exposed via the API.
-          </Typography>
-        </Box>
-        <Button
-          variant="contained"
-          startIcon={<Add />}
-          size="small"
-          onClick={() => { setEditTarget(null); setDialogOpen(true) }}
+      <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
+        <Tabs
+          value={tab}
+          onChange={(_, v) => setTab(v)}
+          textColor="primary"
+          indicatorColor="primary"
         >
-          Add Connection
-        </Button>
-      </Box>
-
-      {isLoading ? (
-        <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}><CircularProgress /></Box>
-      ) : !connections?.length ? (
-        <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
-          <LinkIcon sx={{ fontSize: 40, color: 'text.disabled', mb: 1 }} />
-          <Typography variant="body2" color="text.secondary">No connections configured yet</Typography>
-          <Button variant="contained" startIcon={<Add />} size="small" sx={{ mt: 2 }}
-            onClick={() => { setEditTarget(null); setDialogOpen(true) }}>
-            Add First Connection
-          </Button>
-        </Paper>
-      ) : (
-        <Grid container spacing={2}>
-          {connections.map((conn) => {
-            const testResult = testResults[conn.id]
-            return (
-              <Grid item xs={12} md={6} key={conn.id}>
-                <Paper
-                  variant="outlined"
-                  sx={{
-                    p: 2,
-                    borderColor: testResult
-                      ? (testResult.success ? 'success.main' : 'error.main')
-                      : undefined,
-                  }}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, mb: 1 }}>
-                    <Box sx={{ flex: 1, minWidth: 0 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                        <Typography variant="subtitle2" fontWeight={700} noWrap>{conn.name}</Typography>
-                        <Chip label={conn.conn_type} size="small" color={connTypeColor(conn.conn_type)} variant="outlined"
-                          sx={{ fontSize: '0.65rem', height: 18, textTransform: 'uppercase' }} />
-                        {conn.has_password && (
-                          <Chip label="password" size="small" variant="outlined" color="default"
-                            sx={{ fontSize: '0.65rem', height: 18 }} />
-                        )}
-                      </Box>
-                      {conn.description && (
-                        <Typography variant="caption" color="text.secondary" noWrap>{conn.description}</Typography>
-                      )}
-                      <Box sx={{ display: 'flex', gap: 2, mt: 0.5, flexWrap: 'wrap' }}>
-                        {conn.conn_type === 'datawarehouse' ? <>
-                          {conn.extra?.environment && <Typography variant="caption" color="text.secondary">env: <strong>{String(conn.extra.environment)}</strong></Typography>}
-                          {conn.extra?.datasource && <Typography variant="caption" color="text.secondary">source: <strong>{String(conn.extra.datasource)}</strong></Typography>}
-                          {conn.extra?.timeout && <Typography variant="caption" color="text.secondary">timeout: <strong>{String(conn.extra.timeout)}ms</strong></Typography>}
-                          {conn.username && <Typography variant="caption" color="text.secondary">user: <strong>{conn.username}</strong></Typography>}
-                        </> : <>
-                          {conn.host && <Typography variant="caption" color="text.secondary" fontFamily="monospace">{conn.host}{conn.port ? `:${conn.port}` : ''}</Typography>}
-                          {conn.database && <Typography variant="caption" color="text.secondary">db: <strong>{conn.database}</strong></Typography>}
-                          {conn.username && <Typography variant="caption" color="text.secondary">user: <strong>{conn.username}</strong></Typography>}
-                        </>}
-                      </Box>
-                    </Box>
-                    {testResult && (
-                      <Tooltip title={testResult.message}>
-                        {testResult.success
-                          ? <CheckCircle sx={{ color: 'success.main', fontSize: 20, flexShrink: 0 }} />
-                          : <Cancel sx={{ color: 'error.main', fontSize: 20, flexShrink: 0 }} />
-                        }
-                      </Tooltip>
-                    )}
-                  </Box>
-
-                  <Box sx={{ display: 'flex', gap: 1, mt: 1.5 }}>
-                    <Button size="small" variant="outlined"
-                      startIcon={testingId === conn.id ? <CircularProgress size={12} /> : undefined}
-                      onClick={() => handleTest(conn)}
-                      disabled={testingId !== null}
-                      sx={{ fontSize: '0.72rem' }}
-                    >
-                      Test
-                    </Button>
-                    <Button size="small" startIcon={<Edit sx={{ fontSize: 14 }} />}
-                      onClick={() => { setEditTarget(conn); setDialogOpen(true) }}
-                      sx={{ fontSize: '0.72rem' }}
-                    >
-                      Edit
-                    </Button>
-                    <Button size="small" color="error" startIcon={<Delete sx={{ fontSize: 14 }} />}
-                      onClick={() => setDeleteTarget(conn)}
-                      sx={{ fontSize: '0.72rem', ml: 'auto' }}
-                    >
-                      Delete
-                    </Button>
-                  </Box>
-                </Paper>
-              </Grid>
-            )
-          })}
-        </Grid>
-      )}
-
-      {/* Create / edit dialog */}
-      <ConnectionDialog
-        open={dialogOpen}
-        initial={editTarget}
-        onClose={() => { setDialogOpen(false); setEditTarget(null) }}
-      />
-
-      {/* Delete confirm */}
-      <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>Delete Connection</DialogTitle>
-        <DialogContent>
-          <Typography>
-            Delete <strong>{deleteTarget?.name}</strong>? This cannot be undone.
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button color="error" variant="contained"
-            onClick={() => deleteMut.mutate(deleteTarget!.id)}
-            disabled={deleteMut.isPending}
-            startIcon={deleteMut.isPending ? <CircularProgress size={14} color="inherit" /> : <Delete />}>
-            Delete
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
-  )
-}
-
-// ─── Main Settings page ───────────────────────────────────────────────────────
-export default function Settings() {
-  const [tab, setTab] = useState(0)
-
-  return (
-    <Box>
-      <Box sx={{ mb: 3 }}>
-        <Typography variant="h5" fontWeight={700}>Settings</Typography>
-        <Typography variant="caption" color="text.secondary">
-          Manage appearance, connections, and platform configuration
-        </Typography>
-      </Box>
-
-      <Paper variant="outlined" sx={{ p: 0 }}>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ borderBottom: 1, borderColor: 'divider', px: 2 }}>
-          <Tab
-            icon={<Palette fontSize="small" />}
-            iconPosition="start"
-            label="Appearance"
-            sx={{ fontSize: '0.875rem', minHeight: 48 }}
-          />
-          <Tab
-            icon={<LinkIcon fontSize="small" />}
-            iconPosition="start"
-            label="Connections"
-            sx={{ fontSize: '0.875rem', minHeight: 48 }}
-          />
+          <Tab label="General"    sx={{ textTransform: 'none', fontWeight: 500, minHeight: 40, fontSize: '0.82rem' }} />
+          <Tab label="Appearance" sx={{ textTransform: 'none', fontWeight: 500, minHeight: 40, fontSize: '0.82rem' }} />
+          <Tab label="About"      sx={{ textTransform: 'none', fontWeight: 500, minHeight: 40, fontSize: '0.82rem' }} />
         </Tabs>
+      </Box>
 
-        <Box sx={{ p: 3 }}>
-          <TabPanel value={tab} index={0}><AppearancePanel /></TabPanel>
-          <TabPanel value={tab} index={1}><ConnectionsPanel /></TabPanel>
-        </Box>
-      </Paper>
+      {/* ── General ──────────────────────────────────────────────────── */}
+      <TabPanel value={tab} index={0}>
+        {saveMsg && <Alert severity="success" sx={{ mb: 2 }}>{saveMsg}</Alert>}
+        {saveErr && <Alert severity="error"   sx={{ mb: 2 }}>{saveErr}</Alert>}
+
+        <Card>
+          <CardContent>
+            <Typography variant="subtitle2" fontWeight={700} mb={0.5}>
+              Execution Context
+            </Typography>
+            <Typography variant="caption" color="text.secondary" display="block" mb={2.5}>
+              The business date and namespace prefix are used as reference values during
+              pipeline runs and SQL variable injection.
+            </Typography>
+
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, maxWidth: 360 }}>
+              <TextField
+                label="Business Date"
+                type="date"
+                value={businessDate}
+                onChange={e => setBusinessDate(e.target.value)}
+                size="small"
+                InputLabelProps={{ shrink: true }}
+                helperText="Reference date for pipeline runs and SQL variable injection"
+              />
+              <TextField
+                label="Namespace Prefix"
+                value={namespacePrefix}
+                onChange={e => setNamespacePrefix(e.target.value)}
+                size="small"
+                placeholder="e.g. markets_"
+                helperText="Optional prefix prepended to the derived namespace (prefix + YYYYMMDD)"
+              />
+              {ctx && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Typography variant="caption" color="text.secondary">
+                    Derived namespace:
+                  </Typography>
+                  <Chip
+                    label={ctx.namespace ?? '—'}
+                    size="small"
+                    variant="outlined"
+                    sx={{ fontFamily: 'monospace', fontSize: '0.7rem' }}
+                  />
+                </Box>
+              )}
+            </Box>
+
+            <Box sx={{ mt: 2.5 }}>
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={<Save />}
+                onClick={() =>
+                  updateMut.mutate({ business_date: businessDate, namespace_prefix: namespacePrefix })
+                }
+                disabled={updateMut.isPending}
+              >
+                Save Context
+              </Button>
+            </Box>
+          </CardContent>
+        </Card>
+      </TabPanel>
+
+      {/* ── Appearance ───────────────────────────────────────────────── */}
+      <TabPanel value={tab} index={1}>
+        <Card sx={{ mb: 2 }}>
+          <CardContent>
+            <Typography variant="subtitle2" fontWeight={700} mb={0.5}>
+              Color Theme
+            </Typography>
+            <Typography variant="caption" color="text.secondary" display="block" mb={2}>
+              Saved automatically. Also accessible from the account menu in the sidebar.
+            </Typography>
+            <ToggleButtonGroup
+              value={mode}
+              exclusive
+              onChange={(_, val) => val && setMode(val as ThemeMode)}
+              size="small"
+            >
+              <ToggleButton value="github-dark" sx={{ flexDirection: 'column', py: 1, gap: 0.5, px: 2.5 }}>
+                <Brightness4 sx={{ fontSize: 20 }} />
+                <Typography variant="caption">GitHub Dark</Typography>
+              </ToggleButton>
+              <ToggleButton value="dark-blue" sx={{ flexDirection: 'column', py: 1, gap: 0.5, px: 2.5 }}>
+                <Water sx={{ fontSize: 20 }} />
+                <Typography variant="caption">Dark Blue</Typography>
+              </ToggleButton>
+              <ToggleButton value="light" sx={{ flexDirection: 'column', py: 1, gap: 0.5, px: 2.5 }}>
+                <Brightness7 sx={{ fontSize: 20 }} />
+                <Typography variant="caption">Light</Typography>
+              </ToggleButton>
+            </ToggleButtonGroup>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent>
+            <Typography variant="subtitle2" fontWeight={700} mb={0.5}>
+              Layout Density
+            </Typography>
+            <Typography variant="caption" color="text.secondary" display="block" mb={2}>
+              Compact mode reduces font sizes and element spacing to show more content at once.
+            </Typography>
+            <ToggleButtonGroup
+              value={density}
+              exclusive
+              onChange={(_, val) => val && setDensity(val as Density)}
+              size="small"
+            >
+              <ToggleButton value="normal" sx={{ flexDirection: 'column', py: 1, gap: 0.5, px: 3 }}>
+                <ViewAgenda sx={{ fontSize: 20 }} />
+                <Typography variant="caption">Default</Typography>
+              </ToggleButton>
+              <ToggleButton value="compact" sx={{ flexDirection: 'column', py: 1, gap: 0.5, px: 3 }}>
+                <ViewCompact sx={{ fontSize: 20 }} />
+                <Typography variant="caption">Compact</Typography>
+              </ToggleButton>
+            </ToggleButtonGroup>
+          </CardContent>
+        </Card>
+      </TabPanel>
+
+      {/* ── About ────────────────────────────────────────────────────── */}
+      <TabPanel value={tab} index={2}>
+        <Card>
+          <CardContent>
+            <Typography variant="subtitle2" fontWeight={700} mb={2}>
+              System Information
+            </Typography>
+            <Divider sx={{ mb: 2 }} />
+            <Box sx={{ display: 'grid', gridTemplateColumns: '160px 1fr', rowGap: 1.5 }}>
+              <Typography variant="body2" color="text.secondary">App Version</Typography>
+              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{APP_VERSION}</Typography>
+
+              <Typography variant="body2" color="text.secondary">Backend URL</Typography>
+              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{BACKEND_URL}</Typography>
+
+              <Typography variant="body2" color="text.secondary">Active Theme</Typography>
+              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{mode}</Typography>
+
+              <Typography variant="body2" color="text.secondary">Density</Typography>
+              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{density}</Typography>
+            </Box>
+          </CardContent>
+        </Card>
+      </TabPanel>
     </Box>
   )
 }

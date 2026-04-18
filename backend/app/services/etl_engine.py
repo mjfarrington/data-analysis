@@ -1,6 +1,6 @@
 """
 ETL Execution Engine — orchestrates Extract, Transform, Load pipelines.
-Supports sources: gRPC, JDBC (SQLAlchemy), JSON, CSV.
+Supports sources: JDBC (SQLAlchemy), DataWarehouse, JSON, CSV.
 Runs asynchronously and emits log events via an asyncio queue.
 """
 from __future__ import annotations
@@ -10,14 +10,13 @@ import logging
 import traceback
 from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.etl import ETLRun, ETLRunLog, ExtractJob, RunStatus, RunStep, StepType, ServiceError
 from app.schemas.etl import ExtractConfig, TransformConfig, LoadConfig
-from app.services.grpc_client import grpc_client
 from app.services.spark_service import spark_service
 
 logger = logging.getLogger(__name__)
@@ -200,27 +199,6 @@ def inject_sql_vars(
 # ─────────────────────────────────────────────────────────────────────────────
 # Source handlers
 # ─────────────────────────────────────────────────────────────────────────────
-
-async def _extract_grpc(
-    cfg: ExtractConfig,
-    app_id: str,
-    date_str: str,
-    log_fn,
-) -> AsyncIterator[tuple[list[dict], int, int]]:
-    """Yields (records, segment_index, total_segments) from the gRPC service."""
-    probe = await grpc_client.extract_segment(app_id, date_str, 0, cfg.page_size)
-    total_segments: int = probe.get("total_segments", 1)
-    await log_fn(
-        f"  gRPC: {total_segments} server-side segments, "
-        f"~{probe.get('total_records', '?')} total records",
-        step="extract",
-    )
-    for seg in range(total_segments):
-        chunk = probe if seg == 0 else await grpc_client.extract_segment(
-            app_id, date_str, seg, cfg.page_size
-        )
-        yield chunk.get("records", []), seg, total_segments
-
 
 async def _resolve_sql(
     cfg: ExtractConfig,
@@ -746,101 +724,8 @@ async def execute_pipeline(
         total_loaded = 0
         total_segs = 0
 
-        # ── gRPC: server-side segments, iterate apps × dates ─────────────────
-        if source == "grpc":
-            # Build app list from unified apps config; fallback to pipeline_id
-            grpc_app_list = [
-                (str(a.get("id", "")), str(a.get("name", "")))
-                for a in (extract_cfg.apps or [])
-                if str(a.get("id", "")).strip()
-            ] or [(str(run.pipeline_id), "")]
-            for app_id, app_name in grpc_app_list:
-                for date_str in dates:
-                    await log(
-                        f"Extracting gRPC app={app_id} date={date_str}",
-                        step="extract",
-                        extra={"app_id": app_id, "date": date_str},
-                    )
-                    await _begin_step(StepType.EXTRACT)
-                    async for grpc_recs, seg, n_segs in _extract_grpc(
-                        extract_cfg, app_id, date_str, log
-                    ):
-                        job = ExtractJob(
-                            run_id=run_id,
-                            application_id=app_id,
-                            date=date_str,
-                            segment=seg,
-                            total_segments=n_segs,
-                            status=RunStatus.RUNNING,
-                            started_at=datetime.now(timezone.utc),
-                        )
-                        db.add(job)
-                        await db.flush()
-                        try:
-                            total_extracted += len(grpc_recs)
-                            run.records_extracted = total_extracted
-                            await _begin_step(StepType.TRANSFORM)
-                            transformed = _apply_transforms(grpc_recs, transform_cfg)
-                            total_transformed += len(transformed)
-                            run.records_transformed = total_transformed
-                            output_path = ""
-                            if transformed:
-                                await _begin_step(StepType.LOAD)
-                                output_path = await _load_segment(
-                                    transformed, app_id, date_str, seg, load_cfg, log, job_name=job_name
-                                )
-                            total_loaded += len(transformed)
-                            run.records_loaded = total_loaded
-                            total_segs += 1
-                            run.segments_processed = total_segs
-                            job.status = RunStatus.COMPLETED
-                            job.records_count = len(transformed)
-                            job.output_path = output_path
-                            job.output_format = load_cfg.target
-                            job.finished_at = datetime.now(timezone.utc)
-                            await log(
-                                f"  seg={seg + 1}/{n_segs}: "
-                                f"extracted={len(grpc_recs):,} loaded={len(transformed):,}"
-                                f" -> {output_path}",
-                                step="load",
-                                extra={"segment": seg, "records": len(transformed)},
-                            )
-                        except Exception as exc:
-                            tb = traceback.format_exc()
-                            job.status = RunStatus.FAILED
-                            job.error_message = str(exc)
-                            job.finished_at = datetime.now(timezone.utc)
-                            await log(
-                                f"  seg={seg} FAILED: {exc}",
-                                level="ERROR",
-                                step="extract",
-                                extra={"segment": seg, "error": str(exc)},
-                            )
-                            db.add(ServiceError(
-                                service="etl_engine",
-                                level="ERROR",
-                                message=str(exc),
-                                traceback=tb,
-                                context={"run_id": run_id, "app_id": app_id,
-                                         "date": date_str, "segment": seg},
-                            ))
-                        await db.commit()
-
-                    if load_cfg.target == "spark_table":
-                        try:
-                            tbl = await spark_service.merge_and_register_table(
-                                app_id, date_str,
-                                job_name=job_name,
-                                table_name=load_cfg.table_name,
-                                namespace_db=load_cfg.namespace_db,
-                                mode=load_cfg.mode or "overwrite",
-                            )
-                            await log(f"  Saved catalog table: {tbl}", step="load")
-                        except Exception as exc:
-                            await log(f"  Spark table skipped: {exc}", level="WARN")
-
         # ── JDBC / JSON / CSV / DW: read all → chunk by rows_per_segment ──────────
-        else:
+        if True:  # single extraction path
             # Build app list from unified apps config; fallback to pipeline_id
             fallback_app_id = str(run.pipeline_id)
             app_list: list[tuple[Optional[str], Optional[str]]] = [

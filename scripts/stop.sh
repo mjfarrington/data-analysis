@@ -27,7 +27,12 @@ stop_pid_file() {
 echo "Stopping platform services..."
 stop_pid_file "Frontend"   "$LOG_DIR/frontend.pid"
 stop_pid_file "Backend"    "$LOG_DIR/backend/app.pid"
-stop_pid_file "gRPC Server" "$LOG_DIR/grpc/server.pid"
+
+# Clear stale port processes
+for port in 8000 5173; do
+    stale=$(lsof -ti :$port 2>/dev/null || true)
+    [[ -n "$stale" ]] && kill -9 $stale 2>/dev/null || true
+done
 
 echo ""
 echo "Stopping Spark..."

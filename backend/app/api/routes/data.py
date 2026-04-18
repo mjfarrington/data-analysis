@@ -1,18 +1,12 @@
 from __future__ import annotations
+import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
 
-import asyncio
+from fastapi import APIRouter, HTTPException, Query
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, desc
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.database import get_db
 from app.core.config import settings
-from app.models.etl import ServiceError
-from app.schemas.etl import QueryRequest, QueryResult, DataTable, ErrorRecord
+from app.schemas.etl import QueryRequest, QueryResult, DataTable
 from app.services.spark_service import spark_service
 
 router = APIRouter(prefix="/data", tags=["Data"])
@@ -35,19 +29,6 @@ async def list_data_tables():
         )
         for t in tables
     ]
-
-
-@router.delete("/tables/{table_name:path}", status_code=204)
-async def delete_file_table(table_name: str):
-    """Delete a file store entry (removes directory from disk)."""
-    try:
-        await spark_service.delete_file_table(table_name)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.get("/tables/{table_name:path}/preview")
@@ -75,7 +56,6 @@ async def preview_file_table(
         csv_files = sorted(target.glob("*.csv"))
 
         if parquet_files:
-            # Read all segment files and concatenate
             frames = [pd.read_parquet(f) for f in parquet_files]
             df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         elif csv_files:
@@ -87,7 +67,6 @@ async def preview_file_table(
         total_rows = len(df)
         page = df.iloc[offset: offset + limit]
 
-        # Convert to JSON-safe types
         columns = list(page.columns)
         rows = []
         for _, row in page.iterrows():
@@ -126,74 +105,3 @@ async def execute_query(body: QueryRequest):
         return QueryResult(**result)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/catalog")
-async def list_catalog_tables():
-    """List tables registered in the Spark catalog (visible via SHOW TABLES)."""
-    try:
-        return await spark_service.list_catalog_tables()
-    except Exception as exc:
-        logger.warning("Could not list catalog tables: %s", exc)
-        return []
-
-
-@router.get("/catalog/databases")
-async def list_catalog_databases():
-    """Return all Spark database names (for UI dropdowns, including empty databases)."""
-    return await spark_service.list_databases()
-
-
-@router.delete("/catalog/databases/{db_name}", status_code=204)
-async def drop_catalog_database(db_name: str):
-    """Drop an entire Spark database and all its tables (CASCADE)."""
-    try:
-        await spark_service.drop_database(db_name)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.delete("/catalog/{db_name}/tables", status_code=200)
-async def clear_catalog_database_tables(db_name: str):
-    """Drop all tables in a database without dropping the database itself."""
-    try:
-        count = await spark_service.clear_database_tables(db_name)
-        return {"dropped": count}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.delete("/catalog/{db_name}/{table_name}", status_code=204)
-async def drop_catalog_table(db_name: str, table_name: str):
-    """Drop a specific table from a Spark database."""
-    try:
-        await spark_service.drop_table(db_name, table_name)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/errors", response_model=list[ErrorRecord])
-async def list_errors(
-    service: Optional[str] = None,
-    resolved: Optional[bool] = None,
-    limit: int = Query(default=100, ge=1, le=500),
-    db: AsyncSession = Depends(get_db),
-):
-    q = select(ServiceError).order_by(desc(ServiceError.timestamp)).limit(limit)
-    if service:
-        q = q.where(ServiceError.service == service)
-    if resolved is not None:
-        q = q.where(ServiceError.resolved == resolved)
-    result = await db.execute(q)
-    return [ErrorRecord.model_validate(e) for e in result.scalars()]
-
-
-@router.patch("/errors/{error_id}/resolve", response_model=ErrorRecord)
-async def resolve_error(error_id: int, db: AsyncSession = Depends(get_db)):
-    error = await db.get(ServiceError, error_id)
-    if not error:
-        raise HTTPException(status_code=404, detail="Error not found")
-    error.resolved = True
-    await db.commit()
-    await db.refresh(error)
-    return ErrorRecord.model_validate(error)

@@ -1,360 +1,341 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import {
-  Box, Paper, Typography, Button, IconButton, Chip, Divider,
-  TextField, Stack, Tooltip, alpha, useTheme, List, ListItem,
-  ListItemButton, ListItemText, Dialog, DialogTitle, DialogContent,
-  DialogActions, CircularProgress, Alert, ToggleButton, ToggleButtonGroup,
+  Box, Typography, Button, TextField, List, ListItem, ListItemButton,
+  ListItemText, Divider, Chip, CircularProgress, IconButton, Tooltip,
+  alpha, useTheme,
 } from '@mui/material'
 import {
-  Add, Delete, Edit, Save, NoteAlt, AddCircleOutline, DeleteOutline,
+  Add, Delete, ArrowUpward, ArrowDownward, PlayArrow, Code, Article,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useSnackbar } from 'notistack'
-import { notebookFilesApi, NotebookFile, NotebookCell } from '../api/client'
+import { transformApi, NotebookFile, NotebookCell } from '../api/client'
 
-const MONO = '"JetBrains Mono", "Fira Code", monospace'
+let cellIdCounter = 1000
 
-// ─── Notebook Editor ─────────────────────────────────────────────────────────
+function generateId() {
+  return `cell_${cellIdCounter++}_${Math.random().toString(36).slice(2, 7)}`
+}
 
-function NotebookEditor({ cells, onChange }: { cells: NotebookCell[]; onChange: (cells: NotebookCell[]) => void }) {
+function NotebookCellView({
+  cell,
+  onUpdate,
+  onDelete,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
+}: {
+  cell: NotebookCell
+  onUpdate: (patch: Partial<NotebookCell>) => void
+  onDelete: () => void
+  onMoveUp: () => void
+  onMoveDown: () => void
+  canMoveUp: boolean
+  canMoveDown: boolean
+}) {
   const theme = useTheme()
+  const [output, setOutput] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
 
-  const update = (idx: number, patch: Partial<NotebookCell>) =>
-    onChange(cells.map((c, i) => (i === idx ? { ...c, ...patch } : c)))
-  const insert = (idx: number) => {
-    const next = [...cells]
-    next.splice(idx + 1, 0, { type: 'code', source: '' })
-    onChange(next)
+  async function handleRun() {
+    if (cell.type !== 'code') return
+    setRunning(true)
+    setOutput(null)
+    // Simulate execution (no real kernel here)
+    await new Promise(r => setTimeout(r, 800))
+    setOutput(`[Executed at ${new Date().toLocaleTimeString()}]\n(No kernel attached — output placeholder)`)
+    setRunning(false)
   }
-  const remove = (idx: number) => onChange(cells.filter((_, i) => i !== idx))
 
   return (
-    <Box sx={{ flex: 1, overflow: 'auto', p: 1.5 }}>
-      {cells.length === 0 && (
-        <Box sx={{ display: 'flex', justifyContent: 'center', pt: 4 }}>
-          <Button startIcon={<AddCircleOutline />} onClick={() => onChange([{ type: 'code', source: '' }])} size="small">
-            Add first cell
-          </Button>
-        </Box>
-      )}
-      {cells.map((cell, idx) => (
-        <Box key={idx} sx={{ mb: 1.5 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5, px: 0.5 }}>
-            <ToggleButtonGroup value={cell.type} exclusive size="small" onChange={(_, val) => val && update(idx, { type: val })}>
-              <ToggleButton value="code" sx={{ py: 0.25, px: 1, fontSize: '0.65rem' }}>Code</ToggleButton>
-              <ToggleButton value="markdown" sx={{ py: 0.25, px: 1, fontSize: '0.65rem' }}>MD</ToggleButton>
-            </ToggleButtonGroup>
-            <Typography variant="caption" color="text.secondary" sx={{ flex: 1, ml: 0.5 }}>
-              Cell {idx + 1}
-              {idx === cells.length - 1 && cell.type === 'code' && (
-                <span style={{ color: theme.palette.warning.main }}> — assign result_df here</span>
-              )}
-            </Typography>
-            <Tooltip title="Insert cell below">
-              <IconButton size="small" onClick={() => insert(idx)}><AddCircleOutline sx={{ fontSize: 15 }} /></IconButton>
-            </Tooltip>
-            <Tooltip title="Remove cell">
-              <IconButton size="small" onClick={() => remove(idx)}><DeleteOutline sx={{ fontSize: 15 }} /></IconButton>
-            </Tooltip>
-          </Box>
-          <TextField
-            fullWidth multiline minRows={3} maxRows={20} value={cell.source}
-            onChange={(e) => update(idx, { source: e.target.value })}
-            placeholder={cell.type === 'code' ? '# Python code — spark and source_df are available\nresult_df = source_df.filter(...)' : 'Markdown notes...'}
-            InputProps={{
-              sx: {
-                fontFamily: cell.type === 'code' ? MONO : 'inherit',
-                fontSize: '0.8rem',
-                bgcolor: alpha(cell.type === 'code' ? theme.palette.primary.main : theme.palette.text.primary, 0.04),
-              },
+    <Box
+      sx={{
+        border: `1px solid ${theme.palette.divider}`,
+        borderRadius: 1.5,
+        overflow: 'hidden',
+        mb: 1.5,
+      }}
+    >
+      {/* Cell header */}
+      <Box
+        sx={{
+          display: 'flex', alignItems: 'center', gap: 1,
+          px: 1.5, py: 0.5,
+          bgcolor: alpha(theme.palette.background.paper, 0.7),
+          borderBottom: `1px solid ${theme.palette.divider}`,
+        }}
+      >
+        <Chip
+          icon={cell.type === 'code' ? <Code sx={{ fontSize: '0.8rem !important' }} /> : <Article sx={{ fontSize: '0.8rem !important' }} />}
+          label={cell.type}
+          size="small"
+          sx={{ fontSize: '0.65rem', height: 20 }}
+          onClick={() => onUpdate({ type: cell.type === 'code' ? 'markdown' : 'code' })}
+        />
+        <Box sx={{ flex: 1 }} />
+        <Tooltip title="Move up"><span><IconButton size="small" onClick={onMoveUp} disabled={!canMoveUp}><ArrowUpward sx={{ fontSize: 14 }} /></IconButton></span></Tooltip>
+        <Tooltip title="Move down"><span><IconButton size="small" onClick={onMoveDown} disabled={!canMoveDown}><ArrowDownward sx={{ fontSize: 14 }} /></IconButton></span></Tooltip>
+        {cell.type === 'code' && (
+          <Tooltip title="Run cell">
+            <IconButton size="small" color="primary" onClick={handleRun} disabled={running}>
+              {running ? <CircularProgress size={14} /> : <PlayArrow sx={{ fontSize: 16 }} />}
+            </IconButton>
+          </Tooltip>
+        )}
+        <Tooltip title="Delete cell">
+          <IconButton size="small" color="error" onClick={onDelete}>
+            <Delete sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      </Box>
+
+      {/* Content */}
+      <Box
+        component="textarea"
+        value={cell.content}
+        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onUpdate({ content: e.target.value })}
+        spellCheck={false}
+        rows={Math.max(3, cell.content.split('\n').length)}
+        sx={{
+          width: '100%',
+          resize: 'vertical',
+          border: 'none',
+          outline: 'none',
+          bgcolor: theme.palette.mode === 'dark'
+            ? cell.type === 'code' ? '#0d1117' : alpha('#1c2230', 0.6)
+            : cell.type === 'code' ? '#f8f9fa' : '#fafbfc',
+          color: 'text.primary',
+          fontFamily: cell.type === 'code'
+            ? '"JetBrains Mono", Consolas, monospace'
+            : '"Inter", sans-serif',
+          fontSize: cell.type === 'code' ? '0.85rem' : '0.9rem',
+          lineHeight: 1.7,
+          p: 1.5,
+          display: 'block',
+          boxSizing: 'border-box',
+        }}
+      />
+
+      {/* Output */}
+      {output && (
+        <Box
+          sx={{
+            borderTop: `1px solid ${theme.palette.divider}`,
+            bgcolor: alpha(theme.palette.success.main, 0.04),
+            p: 1.5,
+          }}
+        >
+          <Typography
+            component="pre"
+            sx={{
+              fontFamily: 'Consolas, monospace',
+              fontSize: '0.8rem',
+              color: 'text.secondary',
+              m: 0, whiteSpace: 'pre-wrap',
             }}
-          />
-        </Box>
-      ))}
-      {cells.length > 0 && (
-        <Box sx={{ display: 'flex', justifyContent: 'center' }}>
-          <Button size="small" startIcon={<AddCircleOutline />} onClick={() => insert(cells.length - 1)}>
-            Add cell
-          </Button>
+          >
+            {output}
+          </Typography>
         </Box>
       )}
     </Box>
   )
 }
 
-// ─── Notebook Form Dialog ─────────────────────────────────────────────────────
-
-function NotebookFormDialog({
-  open, onClose, initial, onSave, saving,
-}: {
-  open: boolean
-  onClose: () => void
-  initial?: NotebookFile
-  onSave: (data: Omit<NotebookFile, 'id' | 'created_at' | 'updated_at'>) => void
-  saving: boolean
-}) {
-  const [name, setName] = useState(initial?.name ?? '')
-  const [description, setDescription] = useState(initial?.description ?? '')
-  const [cells, setCells] = useState<NotebookCell[]>(initial?.cells ?? [{ type: 'code', source: '' }])
-
-  useEffect(() => {
-    if (open) {
-      setName(initial?.name ?? '')
-      setDescription(initial?.description ?? '')
-      setCells(initial?.cells ?? [{ type: 'code', source: '' }])
-    }
-  }, [open, initial])
-
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { height: '85vh' } }}>
-      <DialogTitle>{initial?.id ? 'Edit Notebook' : 'New Notebook'}</DialogTitle>
-      <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pt: 1 }}>
-        <Stack direction="row" spacing={1}>
-          <TextField label="Name" value={name} onChange={(e) => setName(e.target.value)} required size="small" sx={{ flex: 2 }} />
-          <TextField label="Description" value={description} onChange={(e) => setDescription(e.target.value)} size="small" sx={{ flex: 3 }} />
-        </Stack>
-        <Divider />
-        <NotebookEditor cells={cells} onChange={setCells} />
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button
-          variant="contained"
-          onClick={() => onSave({ name: name.trim(), description: description.trim() || undefined, cells })}
-          disabled={!name.trim() || saving}
-        >
-          {saving ? <CircularProgress size={16} /> : 'Save'}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  )
-}
-
-// ─── Main Page ────────────────────────────────────────────────────────────────
-
 export default function Notebooks() {
   const theme = useTheme()
   const qc = useQueryClient()
-  const { enqueueSnackbar } = useSnackbar()
-
-  const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [editingNb, setEditingNb] = useState<NotebookFile | null>(null)
-  const [deleteId, setDeleteId] = useState<number | null>(null)
-  const [inlineEditing, setInlineEditing] = useState(false)
-  const [inlineCells, setInlineCells] = useState<NotebookCell[]>([])
-  const [inlineDirty, setInlineDirty] = useState(false)
+  const [selected, setSelected] = useState<NotebookFile | null>(null)
+  const [cells, setCells] = useState<NotebookCell[]>([])
+  const [title, setTitle] = useState('')
+  const [saving, setSaving] = useState(false)
 
   const { data: notebooks = [], isLoading } = useQuery({
-    queryKey: ['notebook-files'],
-    queryFn: () => notebookFilesApi.list().then((r) => r.data),
+    queryKey: ['notebooks'],
+    queryFn: transformApi.listNotebooks,
   })
 
-  const selected = notebooks.find((n) => n.id === selectedId) ?? null
-
-  useEffect(() => {
-    if (selected) {
-      setInlineCells(selected.cells ?? [])
-      setInlineDirty(false)
-      setInlineEditing(false)
-    }
-  }, [selectedId]) // eslint-disable-line react-hooks/exhaustive-deps
-
   const createMut = useMutation({
-    mutationFn: notebookFilesApi.create,
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['notebook-files'] })
-      setDialogOpen(false)
-      setSelectedId(res.data.id)
-      enqueueSnackbar('Notebook created', { variant: 'success' })
+    mutationFn: (data: Partial<NotebookFile>) => transformApi.createNotebook(data),
+    onSuccess: (nb) => {
+      qc.invalidateQueries({ queryKey: ['notebooks'] })
+      openNotebook(nb)
     },
-    onError: () => enqueueSnackbar('Failed to create notebook', { variant: 'error' }),
   })
 
   const updateMut = useMutation({
-    mutationFn: ({ id, data }: { id: number; data: Parameters<typeof notebookFilesApi.update>[1] }) =>
-      notebookFilesApi.update(id, data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['notebook-files'] })
-      setDialogOpen(false)
-      setInlineDirty(false)
-      enqueueSnackbar('Notebook saved', { variant: 'success' })
+    mutationFn: ({ id, data }: { id: number; data: Partial<NotebookFile> }) =>
+      transformApi.updateNotebook(id, data),
+    onSuccess: (nb) => {
+      qc.invalidateQueries({ queryKey: ['notebooks'] })
+      setSelected(nb)
     },
-    onError: () => enqueueSnackbar('Failed to save notebook', { variant: 'error' }),
   })
 
-  const deleteMut = useMutation({
-    mutationFn: notebookFilesApi.delete,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['notebook-files'] })
-      setDeleteId(null)
-      if (selectedId === deleteId) setSelectedId(null)
-      enqueueSnackbar('Notebook deleted', { variant: 'info' })
-    },
-    onError: () => enqueueSnackbar('Failed to delete notebook', { variant: 'error' }),
-  })
-
-  const handleSave = (data: Omit<NotebookFile, 'id' | 'created_at' | 'updated_at'>) => {
-    if (editingNb?.id) updateMut.mutate({ id: editingNb.id, data })
-    else createMut.mutate(data)
+  function openNotebook(nb: NotebookFile) {
+    setSelected(nb)
+    setTitle(nb.name)
+    setCells(nb.cells.length > 0 ? nb.cells : [{ id: generateId(), type: 'code', content: '' }])
   }
 
-  const saveInline = () => {
-    if (!selectedId) return
-    updateMut.mutate({ id: selectedId, data: { cells: inlineCells } })
+  function addCell(type: 'code' | 'markdown' = 'code') {
+    setCells(c => [...c, { id: generateId(), type, content: '' }])
   }
 
-  const panelBg = alpha(theme.palette.background.paper, 0.5)
+  function updateCell(id: string, patch: Partial<NotebookCell>) {
+    setCells(c => c.map(cell => cell.id === id ? { ...cell, ...patch } : cell))
+  }
+
+  function deleteCell(id: string) {
+    setCells(c => c.length > 1 ? c.filter(cell => cell.id !== id) : c)
+  }
+
+  function moveCell(id: string, dir: -1 | 1) {
+    setCells(c => {
+      const idx = c.findIndex(cell => cell.id === id)
+      if (idx < 0) return c
+      const newIdx = idx + dir
+      if (newIdx < 0 || newIdx >= c.length) return c
+      const arr = [...c]
+      ;[arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]]
+      return arr
+    })
+  }
+
+  async function handleSave() {
+    if (!selected) return
+    setSaving(true)
+    try {
+      await updateMut.mutateAsync({ id: selected.id, data: { name: title, cells } })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function createNewNotebook() {
+    createMut.mutate({
+      name: `Notebook ${notebooks.length + 1}`,
+      cells: [{ id: generateId(), type: 'code', content: '# New notebook\n' }],
+    })
+  }
 
   return (
-    <Box sx={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
-      {/* Sidebar */}
-      <Paper
-        elevation={0}
+    <Box sx={{ display: 'flex', height: '100%' }}>
+      {/* Left panel */}
+      <Box
         sx={{
-          width: 240,
-          flexShrink: 0,
+          width: 240, flexShrink: 0,
+          bgcolor: 'background.paper',
           borderRight: `1px solid ${theme.palette.divider}`,
-          display: 'flex',
-          flexDirection: 'column',
-          bgcolor: panelBg,
-          overflow: 'hidden',
+          display: 'flex', flexDirection: 'column',
         }}
       >
-        <Box sx={{ px: 1.5, py: 1, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', alignItems: 'center', gap: 1 }}>
-          <NoteAlt sx={{ fontSize: 16, color: 'warning.main' }} />
-          <Typography variant="subtitle2" fontWeight={700} sx={{ flex: 1 }}>Notebooks</Typography>
-          <Tooltip title="New notebook">
-            <IconButton size="small" onClick={() => { setEditingNb(null); setDialogOpen(true) }}>
-              <Add sx={{ fontSize: 16 }} />
-            </IconButton>
-          </Tooltip>
+        <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}` }}>
+          <Typography variant="subtitle2" fontWeight={700}>Notebooks</Typography>
         </Box>
+
         <Box sx={{ flex: 1, overflowY: 'auto' }}>
-          {isLoading && (
-            <Box sx={{ display: 'flex', justifyContent: 'center', p: 2 }}><CircularProgress size={20} /></Box>
+          {isLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress size={24} /></Box>
+          ) : (
+            <List dense disablePadding>
+              {notebooks.map(nb => (
+                <ListItem key={nb.id} disablePadding>
+                  <ListItemButton
+                    selected={selected?.id === nb.id}
+                    onClick={() => openNotebook(nb)}
+                    sx={{ px: 2, py: 1 }}
+                  >
+                    <ListItemText
+                      primary={nb.name}
+                      secondary={`${nb.cells.length} cells`}
+                      primaryTypographyProps={{ variant: 'body2', fontWeight: 500, noWrap: true }}
+                      secondaryTypographyProps={{ variant: 'caption' }}
+                    />
+                  </ListItemButton>
+                </ListItem>
+              ))}
+              {notebooks.length === 0 && (
+                <Box sx={{ p: 3, textAlign: 'center', color: 'text.secondary' }}>
+                  <Typography variant="body2">No notebooks yet</Typography>
+                </Box>
+              )}
+            </List>
           )}
-          {!isLoading && notebooks.length === 0 && (
-            <Box sx={{ px: 2, py: 3, textAlign: 'center' }}>
-              <NoteAlt sx={{ fontSize: 32, opacity: 0.2, mb: 1 }} />
-              <Typography variant="body2" color="text.disabled">No notebooks yet</Typography>
-              <Button size="small" startIcon={<Add />} sx={{ mt: 1 }} onClick={() => { setEditingNb(null); setDialogOpen(true) }}>
-                Create first
-              </Button>
-            </Box>
-          )}
-          <List dense disablePadding>
-            {notebooks.map((nb) => (
-              <ListItem
-                key={nb.id}
-                disablePadding
-                secondaryAction={
-                  <Box sx={{ display: 'flex', gap: 0 }}>
-                    <Tooltip title="Edit in dialog">
-                      <IconButton size="small" onClick={(e) => { e.stopPropagation(); setEditingNb(nb); setDialogOpen(true) }}>
-                        <Edit sx={{ fontSize: 13 }} />
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="Delete">
-                      <IconButton size="small" onClick={(e) => { e.stopPropagation(); setDeleteId(nb.id) }}>
-                        <Delete sx={{ fontSize: 13 }} />
-                      </IconButton>
-                    </Tooltip>
-                  </Box>
-                }
-              >
-                <ListItemButton
-                  selected={selectedId === nb.id}
-                  onClick={() => setSelectedId(nb.id)}
-                  sx={{ pl: 1.5, pr: 8 }}
-                >
-                  <ListItemText
-                    primary={nb.name}
-                    secondary={`${(nb.cells ?? []).length} cell${(nb.cells ?? []).length !== 1 ? 's' : ''}`}
-                    primaryTypographyProps={{ variant: 'body2', noWrap: true, fontFamily: MONO, fontSize: '0.78rem' }}
-                    secondaryTypographyProps={{ variant: 'caption', fontSize: '0.65rem' }}
-                  />
-                </ListItemButton>
-              </ListItem>
-            ))}
-          </List>
         </Box>
-      </Paper>
 
-      {/* Main panel */}
-      {selected ? (
-        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {/* Toolbar */}
-          <Box sx={{ px: 2, py: 1, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', alignItems: 'center', gap: 1, bgcolor: panelBg }}>
-            <NoteAlt sx={{ fontSize: 15, color: 'warning.main' }} />
-            <Typography variant="subtitle2" fontWeight={700} sx={{ fontFamily: MONO }}>{selected.name}</Typography>
-            {selected.description && (
-              <Typography variant="caption" color="text.secondary">— {selected.description}</Typography>
-            )}
-            <Chip label={`${(selected.cells ?? []).length} cells`} size="small" variant="outlined" sx={{ fontSize: '0.65rem', height: 18 }} />
-            {inlineDirty && <Chip label="unsaved" size="small" color="warning" variant="outlined" sx={{ fontSize: '0.65rem', height: 18 }} />}
-            <Box sx={{ flex: 1 }} />
-            {inlineDirty && (
-              <Button size="small" variant="contained" startIcon={updateMut.isPending ? <CircularProgress size={12} color="inherit" /> : <Save />}
-                disabled={updateMut.isPending} onClick={saveInline}>
-                Save
-              </Button>
-            )}
-            <Button size="small" variant="outlined" startIcon={<Edit />}
-              onClick={() => { setEditingNb(selected); setDialogOpen(true) }}>
-              Edit Meta
-            </Button>
-            <Button size="small" variant="outlined" color="error" startIcon={<Delete />}
-              onClick={() => setDeleteId(selected.id)}>
-              Delete
-            </Button>
-          </Box>
-
-          {/* Inline cell editor */}
-          <Box sx={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <Alert severity="info" icon={false} sx={{ mx: 2, mt: 1, py: 0.5, fontSize: '0.75rem' }}>
-              Use <code style={{ fontFamily: MONO }}>source_df</code> as the input DataFrame and assign <code style={{ fontFamily: MONO }}>result_df</code> in the last cell.
-              The <code style={{ fontFamily: MONO }}>spark</code> session is available throughout.
-            </Alert>
-            <NotebookEditor
-              cells={inlineCells}
-              onChange={(cells) => { setInlineCells(cells); setInlineDirty(true) }}
-            />
-          </Box>
-        </Box>
-      ) : (
-        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'text.disabled', gap: 2 }}>
-          <NoteAlt sx={{ fontSize: 56, opacity: 0.2 }} />
-          <Typography variant="h6" color="text.disabled">Select a notebook to edit</Typography>
-          <Button variant="contained" startIcon={<Add />} onClick={() => { setEditingNb(null); setDialogOpen(true) }}>
+        <Box sx={{ p: 1.5, borderTop: `1px solid ${theme.palette.divider}` }}>
+          <Button startIcon={<Add />} fullWidth size="small" onClick={createNewNotebook} disabled={createMut.isPending}>
             New Notebook
           </Button>
         </Box>
+      </Box>
+
+      {/* Right panel: notebook editor */}
+      {selected ? (
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* Header */}
+          <Box
+            sx={{
+              display: 'flex', alignItems: 'center', gap: 1.5,
+              px: 2, py: 1,
+              bgcolor: 'background.paper',
+              borderBottom: `1px solid ${theme.palette.divider}`,
+              flexShrink: 0,
+            }}
+          >
+            <TextField
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              size="small"
+              variant="standard"
+              sx={{ '& input': { fontWeight: 700, fontSize: '1.1rem' } }}
+              placeholder="Notebook title"
+            />
+            <Box sx={{ flex: 1 }} />
+            <Button size="small" onClick={() => addCell('code')} startIcon={<Add />} variant="outlined">
+              Code
+            </Button>
+            <Button size="small" onClick={() => addCell('markdown')} startIcon={<Add />} variant="outlined">
+              Markdown
+            </Button>
+            <Button
+              size="small"
+              variant="contained"
+              onClick={handleSave}
+              disabled={saving || updateMut.isPending}
+            >
+              {saving ? <CircularProgress size={16} /> : 'Save'}
+            </Button>
+          </Box>
+
+          {/* Cells */}
+          <Box sx={{ flex: 1, overflowY: 'auto', p: 2 }}>
+            {cells.map((cell, idx) => (
+              <NotebookCellView
+                key={cell.id}
+                cell={cell}
+                onUpdate={patch => updateCell(cell.id, patch)}
+                onDelete={() => deleteCell(cell.id)}
+                onMoveUp={() => moveCell(cell.id, -1)}
+                onMoveDown={() => moveCell(cell.id, 1)}
+                canMoveUp={idx > 0}
+                canMoveDown={idx < cells.length - 1}
+              />
+            ))}
+            <Button startIcon={<Add />} onClick={() => addCell('code')} sx={{ mt: 1 }} variant="outlined" size="small">
+              Add Cell
+            </Button>
+          </Box>
+        </Box>
+      ) : (
+        <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'text.secondary' }}>
+          <Box sx={{ textAlign: 'center' }}>
+            <Article sx={{ fontSize: 48, opacity: 0.3, mb: 2 }} />
+            <Typography>Select or create a notebook</Typography>
+          </Box>
+        </Box>
       )}
-
-      {/* Create/Edit dialog */}
-      <NotebookFormDialog
-        open={dialogOpen}
-        onClose={() => setDialogOpen(false)}
-        initial={editingNb ?? undefined}
-        onSave={handleSave}
-        saving={createMut.isPending || updateMut.isPending}
-      />
-
-      {/* Delete dialog */}
-      <Dialog open={deleteId !== null} onClose={() => setDeleteId(null)} maxWidth="xs">
-        <DialogTitle>Delete notebook?</DialogTitle>
-        <DialogContent>
-          <Typography>This will permanently delete <strong>{notebooks.find((n) => n.id === deleteId)?.name}</strong>.</Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeleteId(null)}>Cancel</Button>
-          <Button color="error" variant="contained" disabled={deleteMut.isPending}
-            onClick={() => deleteId && deleteMut.mutate(deleteId)}>
-            Delete
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   )
 }

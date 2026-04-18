@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,36 +20,6 @@ from app.services.spark_service import spark_service
 router = APIRouter(prefix="/transform", tags=["Transform"])
 logger = logging.getLogger(__name__)
 
-
-# ─── Preview (dry-run) ────────────────────────────────────────────────────────
-
-class PreviewRequest(BaseModel):
-    source_database: Optional[str] = None
-    source_table: str
-    transform_type: str = "sql"
-    sql_content: Optional[str] = None
-    cells: Optional[list[NotebookCell]] = None
-    limit: int = 100
-
-
-@router.post("/preview")
-async def preview_transform(body: PreviewRequest):
-    """Dry-run a SQL or notebook transform and return a preview of result rows.
-    Nothing is written to any target table.
-    """
-    cells_raw = [c.model_dump() for c in body.cells] if body.cells else None
-    try:
-        result = await spark_service.preview_transform(
-            source_db=body.source_database,
-            source_table=body.source_table,
-            transform_type=body.transform_type,
-            sql=body.sql_content,
-            cells=cells_raw,
-            limit=body.limit,
-        )
-        return result
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 # ─── Notebook Files ───────────────────────────────────────────────────────────
 
@@ -74,14 +42,6 @@ async def create_notebook(body: NotebookFileCreate, db: AsyncSession = Depends(g
     return NotebookFileResponse.model_validate(nb)
 
 
-@router.get("/notebooks/{nb_id}", response_model=NotebookFileResponse)
-async def get_notebook(nb_id: int, db: AsyncSession = Depends(get_db)):
-    nb = await db.get(NotebookFile, nb_id)
-    if not nb:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-    return NotebookFileResponse.model_validate(nb)
-
-
 @router.put("/notebooks/{nb_id}", response_model=NotebookFileResponse)
 async def update_notebook(nb_id: int, body: NotebookFileUpdate, db: AsyncSession = Depends(get_db)):
     nb = await db.get(NotebookFile, nb_id)
@@ -96,15 +56,6 @@ async def update_notebook(nb_id: int, body: NotebookFileUpdate, db: AsyncSession
     await db.commit()
     await db.refresh(nb)
     return NotebookFileResponse.model_validate(nb)
-
-
-@router.delete("/notebooks/{nb_id}", status_code=204)
-async def delete_notebook(nb_id: int, db: AsyncSession = Depends(get_db)):
-    nb = await db.get(NotebookFile, nb_id)
-    if not nb:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-    await db.delete(nb)
-    await db.commit()
 
 
 # ─── Transform Jobs ───────────────────────────────────────────────────────────
@@ -124,7 +75,6 @@ async def list_transform_jobs(db: AsyncSession = Depends(get_db)):
         select(TransformJob).order_by(TransformJob.name)
     )
     jobs = result.scalars().all()
-    # Eager-load sql_file / notebook_file names
     for job in jobs:
         if job.sql_file_id:
             sf = await db.get(SqlFile, job.sql_file_id)
@@ -142,18 +92,6 @@ async def create_transform_job(body: TransformJobCreate, db: AsyncSession = Depe
     await db.commit()
     await db.refresh(job)
     return TransformJobResponse.model_validate(job)
-
-
-@router.get("/jobs/{job_id}", response_model=TransformJobResponse)
-async def get_transform_job(job_id: int, db: AsyncSession = Depends(get_db)):
-    job = await db.get(TransformJob, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Transform job not found")
-    if job.sql_file_id:
-        job.sql_file = await db.get(SqlFile, job.sql_file_id)
-    if job.notebook_file_id:
-        job.notebook_file = await db.get(NotebookFile, job.notebook_file_id)
-    return _to_response(job)
 
 
 @router.put("/jobs/{job_id}", response_model=TransformJobResponse)
@@ -189,7 +127,6 @@ async def run_transform_job(
     if job.status == TransformJobStatus.RUNNING:
         raise HTTPException(status_code=409, detail="Job is already running")
 
-    # Resolve SQL content
     sql_content = job.sql_content
     notebook_cells: list[dict] = []
 
@@ -208,7 +145,6 @@ async def run_transform_job(
         if not notebook_cells:
             raise HTTPException(status_code=422, detail="No notebook configured for this job")
 
-    # Mark running
     job.status = TransformJobStatus.RUNNING
     await db.commit()
 
@@ -249,24 +185,6 @@ async def run_transform_job(
             await session.commit()
 
     background_tasks.add_task(_execute)
-    return TransformJobResponse.model_validate(job)
-
-
-@router.post("/jobs/{job_id}/cancel", response_model=TransformJobResponse)
-async def cancel_transform_job(job_id: int, db: AsyncSession = Depends(get_db)):
-    """Mark a running job as failed/cancelled. The background task will still finish
-    its current Spark operation, but the status is updated immediately so the UI
-    reflects cancellation and the job won't be picked up again."""
-    job = await db.get(TransformJob, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Transform job not found")
-    if job.status != TransformJobStatus.RUNNING:
-        raise HTTPException(status_code=409, detail="Job is not running")
-    job.status = TransformJobStatus.FAILED
-    job.last_error = "Cancelled by user"
-    job.last_run_at = datetime.now(timezone.utc)
-    await db.commit()
-    await db.refresh(job)
     return TransformJobResponse.model_validate(job)
 
 
@@ -316,15 +234,6 @@ async def create_chain(body: ETLChainCreate, db: AsyncSession = Depends(get_db))
     db.add(chain)
     await db.commit()
     await db.refresh(chain)
-    pipelines, jobs = await _load_name_maps(db)
-    return _chain_response(chain, pipelines, jobs)
-
-
-@router.get("/chains/{chain_id}", response_model=ETLChainResponse)
-async def get_chain(chain_id: int, db: AsyncSession = Depends(get_db)):
-    chain = await db.get(ETLChain, chain_id)
-    if not chain:
-        raise HTTPException(status_code=404, detail="Chain not found")
     pipelines, jobs = await _load_name_maps(db)
     return _chain_response(chain, pipelines, jobs)
 
@@ -433,7 +342,6 @@ async def _run_pipeline_step(db: AsyncSession, pipeline_id: int) -> None:
 
     await execute_pipeline(db, run, extract_cfg, transform_cfg, load_cfg)
 
-    # Refresh to check final status
     await db.refresh(run)
     if run.status == RunStatus.FAILED:
         raise RuntimeError(f"Pipeline '{pipeline.name}' failed: {run.error_message}")
@@ -498,4 +406,3 @@ async def _run_transform_step(db: AsyncSession, job_id: int) -> None:
         raise RuntimeError(f"Transform '{job.name}' failed: {exc}") from exc
 
     await db.commit()
-

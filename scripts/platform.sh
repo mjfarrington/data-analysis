@@ -3,9 +3,9 @@
 # platform.sh — Unified Data Analysis Platform control script
 #
 # Usage:
-#   ./scripts/platform.sh start   [all|spark|grpc|backend|frontend]
-#   ./scripts/platform.sh stop    [all|spark|grpc|backend|frontend]
-#   ./scripts/platform.sh restart [all|spark|grpc|backend|frontend]
+#   ./scripts/platform.sh start   [all|spark|backend|frontend]
+#   ./scripts/platform.sh stop    [all|spark|backend|frontend]
+#   ./scripts/platform.sh restart [all|spark|backend|frontend]
 #   ./scripts/platform.sh status
 #   ./scripts/platform.sh monitor          # live-refresh status board
 #   ./scripts/platform.sh logs  <service>  # tail service logs
@@ -21,7 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="$PROJECT_DIR/logs"
-mkdir -p "$LOG_DIR/backend" "$LOG_DIR/grpc"
+mkdir -p "$LOG_DIR/backend"
 
 # Spark manager delegate
 SPARK_MGR="$SCRIPT_DIR/spark-manager.sh"
@@ -79,25 +79,6 @@ wait_for_port() {
     return 1
 }
 
-# ─── Service: gRPC ────────────────────────────────────────────────────────────
-grpc_start() {
-    header "gRPC Data Extract Server"
-    local pf="$LOG_DIR/grpc/server.pid"
-    if pid_running "$pf"; then
-        warn "gRPC already running (PID $(cat "$pf"))"; return 0
-    fi
-    PYTHONPATH="$PROJECT_DIR/grpc" \
-    "$PROJECT_DIR/grpc/.venv/bin/python" "$PROJECT_DIR/grpc/server.py" \
-        >> "$LOG_DIR/grpc/server.log" 2>&1 &
-    local pid=$!; echo $pid > "$pf"
-    printf "  Waiting"; wait_for_port "gRPC" 50051 20 && ok "gRPC started (PID $pid) — :50051"
-}
-
-grpc_stop() {
-    header "Stop gRPC"
-    stop_pid_file "gRPC server" "$LOG_DIR/grpc/server.pid"
-}
-
 # ─── Service: Backend ─────────────────────────────────────────────────────────
 backend_start() {
     header "FastAPI Backend"
@@ -110,7 +91,7 @@ backend_start() {
     [[ -n "$stale" ]] && { echo "  Clearing stale process on :8000"; kill -9 $stale 2>/dev/null || true; sleep 0.5; }
 
     cd "$PROJECT_DIR/backend"
-    PYTHONPATH="$PROJECT_DIR/backend:$PROJECT_DIR/grpc" \
+    PYTHONPATH="$PROJECT_DIR/backend" \
     "$PROJECT_DIR/backend/.venv/bin/uvicorn" app.main:app \
         --host 0.0.0.0 --port 8000 --reload --log-level info \
         >> "$LOG_DIR/backend/app.log" 2>&1 &
@@ -146,14 +127,14 @@ frontend_start() {
     fi
     (cd "$PROJECT_DIR/frontend" && npm run dev >> "$LOG_DIR/frontend.log" 2>&1) &
     local pid=$!; echo $pid > "$pf"
-    printf "  Waiting"; wait_for_port "Frontend" 3000 30 && ok "Frontend started (PID $pid) — http://localhost:3000"
+    printf "  Waiting"; wait_for_port "Frontend" 5173 30 && ok "Frontend started (PID $pid) — http://localhost:5173"
 }
 
 frontend_stop() {
     header "Stop Frontend"
     stop_pid_file "Frontend" "$LOG_DIR/frontend.pid"
-    local stale; stale=$(lsof -ti :3000 2>/dev/null || true)
-    [[ -n "$stale" ]] && kill -9 $stale 2>/dev/null && ok "Cleared stale process on :3000" || true
+    local stale; stale=$(lsof -ti :5173 2>/dev/null || true)
+    [[ -n "$stale" ]] && kill -9 $stale 2>/dev/null && ok "Cleared stale process on :5173" || true
 }
 
 # ─── Start / Stop dispatchers ────────────────────────────────────────────────
@@ -162,13 +143,11 @@ do_start() {
     case "$svc" in
         all)
             "$SPARK_MGR" start all
-            grpc_start
             backend_start
             frontend_start
             ;;
         spark) "$SPARK_MGR" start all ;;
         spark:*) "$SPARK_MGR" start "${svc#spark:}" ;;
-        grpc)     grpc_start ;;
         backend)  backend_start ;;
         frontend) frontend_start ;;
         *) err "Unknown service: $svc"; usage; exit 1 ;;
@@ -181,12 +160,10 @@ do_stop() {
         all)
             frontend_stop
             backend_stop
-            grpc_stop
             "$SPARK_MGR" stop all
             ;;
         spark) "$SPARK_MGR" stop all ;;
         spark:*) "$SPARK_MGR" stop "${svc#spark:}" ;;
-        grpc)     grpc_stop ;;
         backend)  backend_stop ;;
         frontend) frontend_stop ;;
         *) err "Unknown service: $svc"; usage; exit 1 ;;
@@ -248,8 +225,7 @@ do_status() {
 
     echo -e "\n${BOLD}  Platform Services${NC}"
     service_line "FastAPI Backend"  8000  "http://localhost:8000"     "$LOG_DIR/backend/app.pid"
-    service_line "React Frontend"   3000  "http://localhost:3000"     "$LOG_DIR/frontend.pid"
-    service_line "gRPC Extractor"   50051 ""                          "$LOG_DIR/grpc/server.pid"
+    service_line "React Frontend"   5173  "http://localhost:5173"     "$LOG_DIR/frontend.pid"
 
     echo -e "\n${BOLD}  API Health${NC}"
     if http_ok "http://localhost:8000/health"; then
@@ -304,7 +280,6 @@ do_logs() {
     case "$svc" in
         backend)   tail -n "$lines" -f "$LOG_DIR/backend/app.log" ;;
         frontend)  tail -n "$lines" -f "$LOG_DIR/frontend.log" ;;
-        grpc)      tail -n "$lines" -f "$LOG_DIR/grpc/server.log" ;;
         spark:master|master)
             local f; f=$(ls -t "$PROJECT_DIR/logs/spark/"*Worker* 2>/dev/null | head -1 || true)
             local f; f=$(ls -t "$PROJECT_DIR/logs/spark/"spark-*-org.apache.spark.deploy.master* 2>/dev/null | head -1 || true)
@@ -318,7 +293,7 @@ do_logs() {
             "$SPARK_MGR" logs connect "$lines" ;;
         *)
             err "Unknown log target: $svc"
-            echo "  Available: backend, frontend, grpc, master, worker, thrift, connect"
+            echo "  Available: backend, frontend, master, worker, thrift, connect"
             exit 1 ;;
     esac
 }
@@ -329,13 +304,13 @@ usage() {
     echo "  ./scripts/platform.sh <command> [target]"
     echo ""
     echo -e "${BOLD}Commands:${NC}"
-    echo "  start   [all|spark|grpc|backend|frontend]    Start service(s)"
-    echo "  stop    [all|spark|grpc|backend|frontend]    Stop service(s)"
-    echo "  restart [all|spark|grpc|backend|frontend]    Restart service(s)"
+    echo "  start   [all|spark|backend|frontend]    Start service(s)"
+    echo "  stop    [all|spark|backend|frontend]    Stop service(s)"
+    echo "  restart [all|spark|backend|frontend]    Restart service(s)"
     echo "  status                                        Show all service status"
     echo "  monitor                                       Live-refreshing status board"
     echo "  health                                        Query backend health API"
-    echo "  logs    <backend|frontend|grpc|thrift|...>   Tail logs"
+    echo "  logs    <backend|frontend|thrift|...>   Tail logs"
     echo ""
     echo -e "${BOLD}Spark sub-services:${NC}"
     echo "  ./scripts/platform.sh start  spark:master|worker|thrift|connect|history"

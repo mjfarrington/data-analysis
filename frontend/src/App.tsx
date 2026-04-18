@@ -1,88 +1,87 @@
-import { useState, createContext, useContext, useMemo } from 'react'
+import { useMemo } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ThemeProvider, CssBaseline } from '@mui/material'
-import { LocalizationProvider } from '@mui/x-date-pickers'
-import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFnsV3'
-import { THEME_MAP, THEMES } from './theme'
-import Layout from './components/Layout'
-import Dashboard from './pages/Dashboard'
-import ETLRuns from './pages/ETLRuns'
-import DataExplorer from './pages/DataExplorer'
-import ErrorsPage from './pages/ErrorsPage'
-import PipelineGraph from './pages/PipelineGraph'
-import Services from './pages/Services'
-import PipelineStudio from './pages/PipelineStudio'
-import SqlBrowser from './pages/SqlBrowser'
+import { darkTheme, githubDarkTheme, darkBlueTheme, lightTheme, applyDensity } from './theme'
+import { useAuthStore } from './store/auth'
+import { useThemeStore } from './store/theme'
+
+import AppShell from './components/AppShell'
+import Login from './pages/Login'
+import Pipelines from './pages/Pipelines'
+import PipelineEditor from './pages/PipelineEditor'
+import Workflows from './pages/Workflows'
+import SqlFiles from './pages/SqlFiles'
 import Notebooks from './pages/Notebooks'
-import Settings from './pages/Settings'
-import Admin from './pages/Admin'
 import Dictionaries from './pages/Dictionaries'
-import { AppSettingsProvider } from './hooks/useAppSettings'
+import DataExplorer from './pages/DataExplorer'
+import RunHistory from './pages/RunHistory'
+import Services from './pages/Services'
+import Settings from './pages/Settings'
 
-const STORAGE_KEY = 'app-theme-v1'
-
-interface ThemeContextType {
-  themeName: string
-  setThemeName: (name: string) => void
-  mode: 'light' | 'dark'
-  /** @deprecated use setThemeName; kept for backward compat */
-  toggle: () => void
-}
-export const ThemeCtx = createContext<ThemeContextType>({
-  themeName: 'dark', setThemeName: () => {}, mode: 'dark', toggle: () => {},
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      staleTime: 30_000,
+    },
+  },
 })
-export const useThemeMode = () => useContext(ThemeCtx)
 
-export default function App() {
-  const [themeName, setThemeNameState] = useState<string>(
-    () => localStorage.getItem(STORAGE_KEY) ?? 'dark',
-  )
+function AuthGuard({ children }: { children: React.ReactNode }) {
+  const user = useAuthStore(s => s.user)
+  if (!user) return <Navigate to="/login" replace />
+  return <>{children}</>
+}
 
-  const setThemeName = (name: string) => {
-    if (THEME_MAP[name]) {
-      localStorage.setItem(STORAGE_KEY, name)
-      setThemeNameState(name)
-    }
-  }
-
-  const meta = THEME_MAP[themeName] ?? THEME_MAP['dark']
-  const theme = useMemo(() => meta.theme, [meta])
-
-  const toggle = () => {
-    const current = THEME_MAP[themeName]
-    const nextMode = current?.mode === 'dark' ? 'light' : 'dark'
-    const next = THEMES.find((t) => t.mode === nextMode)
-    if (next) setThemeName(next.name)
-  }
+function AppRoutes() {
+  const user = useAuthStore(s => s.user)
 
   return (
-    <ThemeCtx.Provider value={{ themeName, setThemeName, mode: meta.mode, toggle }}>
-      <AppSettingsProvider>
-        <ThemeProvider theme={theme}>
-          <LocalizationProvider dateAdapter={AdapterDateFns}>
-            <CssBaseline />
-            <BrowserRouter>
-              <Layout>
-                <Routes>
-                  <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                  <Route path="/dashboard" element={<Dashboard />} />
-                  <Route path="/studio" element={<PipelineStudio />} />
-                  <Route path="/sql-browser" element={<SqlBrowser />} />
-                  <Route path="/notebooks" element={<Notebooks />} />
-                  <Route path="/graph" element={<PipelineGraph />} />
-                  <Route path="/runs" element={<ETLRuns />} />
-                  <Route path="/explorer" element={<DataExplorer />} />
-                  <Route path="/errors" element={<ErrorsPage />} />
-                  <Route path="/services" element={<Services />} />
-                  <Route path="/settings" element={<Settings />} />
-                  <Route path="/admin" element={<Admin />} />
-                  <Route path="/dictionaries" element={<Dictionaries />} />
-                </Routes>
-              </Layout>
-            </BrowserRouter>
-          </LocalizationProvider>
-        </ThemeProvider>
-      </AppSettingsProvider>
-    </ThemeCtx.Provider>
+    <Routes>
+      <Route
+        path="/login"
+        element={user ? <Navigate to="/pipelines" replace /> : <Login />}
+      />
+      <Route
+        path="/"
+        element={
+          <AuthGuard>
+            <AppShell />
+          </AuthGuard>
+        }
+      >
+        <Route index element={<Navigate to="/pipelines" replace />} />
+        <Route path="pipelines" element={<Pipelines />} />
+        <Route path="pipelines/:id/edit" element={<PipelineEditor />} />
+        <Route path="workflows" element={<Workflows />} />
+        <Route path="sql-files" element={<SqlFiles />} />
+        <Route path="notebooks" element={<Notebooks />} />
+        <Route path="dictionaries" element={<Dictionaries />} />
+        <Route path="explorer" element={<DataExplorer />} />
+        <Route path="runs" element={<RunHistory />} />
+        <Route path="services" element={<Services />} />
+        <Route path="settings" element={<Settings />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/pipelines" replace />} />
+    </Routes>
+  )
+}
+
+export default function App() {
+  const mode = useThemeStore(s => s.mode)
+  const density = useThemeStore(s => s.density)
+  const themeMap = { 'github-dark': githubDarkTheme, 'dark-blue': darkBlueTheme, 'light': lightTheme }
+  const theme = useMemo(() => applyDensity(themeMap[mode] ?? darkTheme, density), [mode, density])
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <BrowserRouter>
+          <AppRoutes />
+        </BrowserRouter>
+      </ThemeProvider>
+    </QueryClientProvider>
   )
 }
