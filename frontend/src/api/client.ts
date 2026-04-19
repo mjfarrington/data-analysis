@@ -23,6 +23,10 @@ export interface Pipeline {
   status: 'active' | 'inactive' | 'draft'
   source_type: string
   load_target: string
+  extract_config?: Record<string, unknown>
+  transform_config?: Record<string, unknown>
+  load_config?: Record<string, unknown>
+  canvas_config?: { nodes: unknown[]; edges: unknown[]; viewport?: { x: number; y: number; zoom: number } }
   last_run?: RunSummary
 }
 
@@ -30,7 +34,9 @@ export interface RunStep {
   id: number
   run_id: number
   step_order: number
-  step_type: 'extract' | 'transform' | 'load'
+  step_type: string
+  step_label?: string
+  parent_step_id?: number
   status: string
   started_at?: string
   finished_at?: string
@@ -47,10 +53,22 @@ export interface RunLog {
   step?: string
 }
 
+export interface ExtractJob {
+  id: number
+  application_id?: string
+  date?: string
+  segment: number
+  total_segments?: number
+  status: string
+  records_count?: number
+  output_path?: string
+}
+
 export interface RunDetail extends RunSummary {
   pipeline_id: number
   logs: RunLog[]
   steps: RunStep[]
+  extract_jobs: ExtractJob[]
 }
 
 export interface ChainStep {
@@ -147,7 +165,18 @@ export interface Dictionary {
   id: number
   name: string
   description?: string
+  key_label: string
+  value_label: string
   entries: DictionaryEntry[]
+}
+
+export interface ForeachEntryResult {
+  key: string
+  value: string
+  total_rows: number
+  file_count: number
+  output_dir: string
+  error?: string
 }
 
 export interface SqlFile {
@@ -168,12 +197,36 @@ export interface DataTable {
 export interface QueryResult {
   columns: string[]
   rows: unknown[][]
+  row_count?: number
+  total_rows?: number
+  truncated?: boolean
+  duration_ms?: number
+}
+
+export interface CatalogTable {
+  database: string
+  name: string
+  is_temporary: boolean
 }
 
 export interface ExecutionContext {
   business_date: string
   namespace: string
   namespace_prefix?: string
+}
+
+export interface Connection {
+  id: number
+  name: string
+  description?: string
+  conn_type: string   // datawarehouse | jdbc | grpc | rest | other
+  host?: string
+  port?: number
+  database?: string
+  username?: string
+  extra: Record<string, unknown>
+  created_at: string
+  updated_at: string
 }
 
 // ── Pipelines API ─────────────────────────────────────────────────────────────
@@ -201,6 +254,9 @@ export const runsApi = {
   list: () => api.get<RunSummary[]>('/etl/runs').then(r => r.data),
   get: (id: number) => api.get<RunDetail>(`/etl/runs/${id}`).then(r => r.data),
   cancel: (id: number) => api.post(`/etl/runs/${id}/cancel`),
+  delete: (id: number) => api.delete(`/etl/runs/${id}`),
+  clearAll: (pipelineId?: number) =>
+    api.delete<{ deleted: number }>('/etl/runs', { params: pipelineId != null ? { pipeline_id: pipelineId } : {} }).then(r => r.data),
 }
 
 // ── Transform API ─────────────────────────────────────────────────────────────
@@ -236,12 +292,42 @@ export const transformApi = {
 
 // ── Data API ──────────────────────────────────────────────────────────────────
 
+export interface BrowserDir {
+  name: string
+  path: string
+  file_count: number
+  format: string
+  size_bytes: number
+  last_modified: number
+}
+
+export interface PreviewResult {
+  columns: string[]
+  rows: unknown[][]
+  row_count: number
+  resolved_sql: string
+}
+
+export interface ExtractResult {
+  total_rows: number
+  file_count: number
+  output_dir: string
+  files: string[]
+}
+
 export const dataApi = {
   listTables: () => api.get<DataTable[]>('/data/tables').then(r => r.data),
-  previewTable: (name: string) =>
-    api.get<QueryResult>(`/data/tables/${name}/preview`).then(r => r.data),
-  query: (sql: string) =>
-    api.post<QueryResult>('/data/query', { sql }).then(r => r.data),
+  previewTable: (name: string, limit = 200, offset = 0) =>
+    api.get<QueryResult>(`/data/tables/${encodeURIComponent(name)}/preview`, { params: { limit, offset } }).then(r => r.data),
+  query: (sql: string, limit = 200, offset = 0, database?: string) =>
+    api.post<QueryResult>('/data/query', { sql, limit, offset, database }).then(r => r.data),
+  listBrowser: () => api.get<BrowserDir[]>('/data/browser').then(r => r.data),
+  listCatalogTables: () => api.get<CatalogTable[]>('/data/catalog/tables').then(r => r.data),
+  listDatabases: () => api.get<string[]>('/data/catalog/databases').then(r => r.data),
+  sparkReconnect: () => api.post<{ status: string }>('/data/catalog/reconnect').then(r => r.data),
+  sparkDisconnect: () => api.post<{ status: string }>('/data/catalog/disconnect').then(r => r.data),
+  dropTempView: (viewName: string) => api.delete<{ status: string }>(`/data/catalog/views/${encodeURIComponent(viewName)}`).then(r => r.data),
+  dropAllTempViews: () => api.delete<{ status: string; count: number }>('/data/catalog/views').then(r => r.data),
 }
 
 // ── Services API ──────────────────────────────────────────────────────────────
@@ -273,14 +359,103 @@ export const dictionariesApi = {
   update: (id: number, data: Partial<Dictionary>) =>
     api.put<Dictionary>(`/dictionaries/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/dictionaries/${id}`),
+  addEntry: (dictId: number, data: { key: string; value: string }) =>
+    api.post<DictionaryEntry>(`/dictionaries/${dictId}/entries`, data).then(r => r.data),
+  updateEntry: (dictId: number, entryId: number, data: { key?: string; value?: string }) =>
+    api.put<DictionaryEntry>(`/dictionaries/${dictId}/entries/${entryId}`, data).then(r => r.data),
+  deleteEntry: (dictId: number, entryId: number) =>
+    api.delete(`/dictionaries/${dictId}/entries/${entryId}`),
 }
 
 // ── SQL Files API ─────────────────────────────────────────────────────────────
 
 export const sqlFilesApi = {
-  list: () => api.get<SqlFile[]>('/etl/sql-files').then(r => r.data),
+  list: (file_type?: string) =>
+    api.get<SqlFile[]>('/etl/sql-files', { params: file_type ? { file_type } : undefined }).then(r => r.data),
   create: (data: Partial<SqlFile>) =>
     api.post<SqlFile>('/etl/sql-files', data).then(r => r.data),
   update: (id: number, data: Partial<SqlFile>) =>
     api.put<SqlFile>(`/etl/sql-files/${id}`, data).then(r => r.data),
+}
+
+// ── Connections API ───────────────────────────────────────────────────────────
+
+export const connectionsApi = {
+  list: () => api.get<Connection[]>('/connections').then(r => r.data),
+  create: (data: Partial<Connection> & { password?: string }) =>
+    api.post<Connection>('/connections', data).then(r => r.data),
+  update: (id: number, data: Partial<Connection> & { password?: string }) =>
+    api.put<Connection>(`/connections/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/connections/${id}`),
+  test: (id: number) =>
+    api.post<{ ok: boolean; latency_ms: number; message: string }>(`/connections/${id}/test`).then(r => r.data),
+  testAdhoc: (params: {
+    conn_type: string; host?: string; port?: number; database?: string;
+    username?: string; password?: string; extra?: Record<string, unknown>;
+  }) =>
+    api.post<{ ok: boolean; latency_ms: number; message: string }>('/connections/test-adhoc', params).then(r => r.data),
+  previewSql: (id: number, sql: string, params: Record<string, string>, limit = 100) =>
+    api.post<PreviewResult>(`/connections/${id}/preview-sql`, { sql, params, limit })
+      .then(r => r.data)
+      .catch(err => { throw new Error(err.response?.data?.detail ?? err.message) }),
+  extract: (id: number, sql: string, params: Record<string, string>, chunk_size = 50_000, output_subdir?: string) =>
+    api.post<ExtractResult>(`/connections/${id}/extract`, { sql, params, chunk_size, output_subdir }).then(r => r.data),
+  foreachExtract: (id: number, body: {
+    sql: string
+    dictionary_id: number
+    key_param: string
+    value_param: string
+    static_params: Record<string, string>
+    output_path_template: string
+    chunk_size: number
+    selected_keys?: string[]
+  }) => api.post<ForeachEntryResult[]>(`/connections/${id}/foreach-extract`, body).then(r => r.data),
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Metadata Catalogue
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const COLUMN_TYPES = [
+  'string', 'integer', 'long', 'float', 'double',
+  'decimal', 'date', 'datetime', 'boolean', 'binary',
+] as const
+export type ColumnType = typeof COLUMN_TYPES[number]
+
+export interface CatalogueColumn {
+  id: number
+  catalogue_id: number
+  name: string
+  data_type: ColumnType
+  nullable: boolean
+  description?: string
+  position: number
+  created_at: string
+}
+
+export interface Catalogue {
+  id: number
+  name: string
+  description?: string
+  created_at: string
+  updated_at: string
+  columns: CatalogueColumn[]
+}
+
+export const cataloguesApi = {
+  list: () => api.get<Catalogue[]>('/catalogues').then(r => r.data),
+  get: (id: number) => api.get<Catalogue>(`/catalogues/${id}`).then(r => r.data),
+  create: (data: { name: string; description?: string }) =>
+    api.post<Catalogue>('/catalogues', data).then(r => r.data),
+  update: (id: number, data: { name?: string; description?: string }) =>
+    api.put<Catalogue>(`/catalogues/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/catalogues/${id}`),
+  addColumn: (catId: number, col: { name: string; data_type: string; nullable?: boolean; description?: string; position?: number }) =>
+    api.post<CatalogueColumn>(`/catalogues/${catId}/columns`, col).then(r => r.data),
+  updateColumn: (catId: number, colId: number, col: Partial<{ name: string; data_type: string; nullable: boolean; description: string; position: number }>) =>
+    api.put<CatalogueColumn>(`/catalogues/${catId}/columns/${colId}`, col).then(r => r.data),
+  deleteColumn: (catId: number, colId: number) =>
+    api.delete(`/catalogues/${catId}/columns/${colId}`),
+  reorderColumns: (catId: number, columnIds: number[]) =>
+    api.post<Catalogue>(`/catalogues/${catId}/columns/reorder`, columnIds).then(r => r.data),
 }

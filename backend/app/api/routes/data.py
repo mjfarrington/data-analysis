@@ -7,10 +7,46 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import settings
 from app.schemas.etl import QueryRequest, QueryResult, DataTable
-from app.services.spark_service import spark_service
+from app.services.spark_service import spark_service, reset_spark_session, _get_spark
 
 router = APIRouter(prefix="/data", tags=["Data"])
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data Browser — list extracted parquet directories
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/browser")
+async def list_browser_dirs():
+    """List all parquet directories under PARQUET_DIR with basic metadata."""
+    base = Path(settings.PARQUET_DIR)
+
+    def _scan():
+        entries = []
+        if not base.exists():
+            return entries
+        for item in sorted(base.iterdir()):
+            if not item.is_dir():
+                continue
+            parquet_files = sorted(item.glob("**/*.parquet"))
+            csv_files = sorted(item.glob("**/*.csv")) if not parquet_files else []
+            files = parquet_files or csv_files
+            if not files:
+                continue
+            total_size = sum(f.stat().st_size for f in files)
+            mtime = max(f.stat().st_mtime for f in files)
+            entries.append({
+                "name": item.name,
+                "path": item.name,
+                "file_count": len(files),
+                "format": "parquet" if parquet_files else "csv",
+                "size_bytes": total_size,
+                "last_modified": mtime,
+            })
+        return entries
+
+    return await asyncio.to_thread(_scan)
 
 
 @router.get("/tables", response_model=list[DataTable])
@@ -104,4 +140,75 @@ async def execute_query(body: QueryRequest):
         result = await spark_service.execute_query(body.sql, body.limit, body.offset, database=body.database)
         return QueryResult(**result)
     except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Spark Catalog — databases and tables
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/catalog/databases")
+async def list_catalog_databases():
+    """List all Spark databases."""
+    try:
+        return await spark_service.list_databases()
+    except Exception as exc:
+        logger.exception("Error listing Spark databases")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/catalog/tables")
+async def list_catalog_tables():
+    """List all Spark catalog tables and views across all databases."""
+    try:
+        return await spark_service.list_catalog_tables()
+    except Exception as exc:
+        logger.exception("Error listing catalog tables")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/catalog/reconnect")
+async def catalog_reconnect():
+    """Drop the current Spark session and establish a fresh connection."""
+    reset_spark_session()
+    try:
+        def _connect():
+            spark = _get_spark()
+            return spark.range(1).collect()
+        await asyncio.to_thread(_connect)
+        return {"status": "connected"}
+    except Exception as exc:
+        logger.exception("Spark reconnect failed")
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@router.post("/catalog/disconnect")
+async def catalog_disconnect():
+    """Drop the current Spark Connect session."""
+    reset_spark_session()
+    return {"status": "disconnected"}
+
+
+@router.delete("/catalog/views/{view_name}")
+async def drop_temp_view(view_name: str):
+    """Drop a temporary view by name."""
+    try:
+        await spark_service.execute_query(f"DROP VIEW IF EXISTS `{view_name}`")
+        return {"status": "dropped", "view": view_name}
+    except Exception as exc:
+        logger.exception("Error dropping view %s", view_name)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/catalog/views")
+async def drop_all_temp_views():
+    """Drop all temporary views in the current Spark session."""
+    try:
+        tables = await spark_service.list_catalog_tables()
+        temp_views = [t["name"] for t in tables if t.get("is_temporary")]
+        for name in temp_views:
+            await spark_service.execute_query(f"DROP VIEW IF EXISTS `{name}`")
+        return {"status": "dropped", "count": len(temp_views), "views": temp_views}
+    except Exception as exc:
+        logger.exception("Error dropping all temp views")
         raise HTTPException(status_code=500, detail=str(exc))
