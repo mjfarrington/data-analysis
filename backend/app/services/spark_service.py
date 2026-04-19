@@ -32,7 +32,7 @@ def _get_spark():
     global _spark_session
     if _spark_session is not None:
         try:
-            _spark_session.sql("SELECT 1").collect()
+            _spark_session.range(0).count()
             return _spark_session
         except Exception:
             _spark_session = None
@@ -50,6 +50,49 @@ def _get_spark():
     except Exception as exc:
         logger.warning("Spark Connect unavailable: %s", exc)
         raise
+
+
+def reset_spark_session() -> None:
+    """Drop the cached Spark Connect session so the next call to _get_spark() reconnects."""
+    global _spark_session
+    if _spark_session is not None:
+        try:
+            _spark_session.stop()
+        except Exception:
+            pass
+    _spark_session = None
+    logger.info("Spark session reset")
+
+
+# ─── Notebook interactive session state ───────────────────────────────────────
+# Each notebook_id maps to a persistent execution namespace dict.
+# Variables assigned in earlier cells survive into later cells.
+_notebook_sessions: dict[int, dict] = {}
+
+#: Preamble injected automatically into every new notebook session
+_NOTEBOOK_PREAMBLE = """\
+from pyspark.sql import functions as F
+from pyspark.sql.types import *
+from pyspark.sql.window import Window
+import pandas as pd
+
+def read_table(table_name, database=None):
+    \"\"\"Read a Spark-catalog table into a DataFrame.\"\"\"
+    if database:
+        return spark.table(f"`{database}`.`{table_name}`")
+    return spark.table(f"`{table_name}`")
+
+def show(df, n=20):
+    \"\"\"Print a DataFrame preview (alias for df.show).\"\"\"
+    df.show(n, truncate=False)
+
+def list_tables(database=None):
+    \"\"\"List tables in a database (or the current database).\"\"\"
+    if database:
+        spark.sql(f"SHOW TABLES IN `{database}`").show(truncate=False)
+    else:
+        spark.sql("SHOW TABLES").show(truncate=False)
+"""
 
 
 def _ensure_namespace_db(spark: Any, db_name: str) -> None:
@@ -488,7 +531,6 @@ class SparkService:
                 "truncated": len(rows) >= limit,
                 "duration_ms": round(elapsed, 2),
             }
-
         return await asyncio.to_thread(_run)
 
     async def list_tables(self) -> list[dict]:
@@ -868,6 +910,162 @@ class SparkService:
                     logger.warning("Preview temp view cleanup failed: %s", _exc)
 
         return await asyncio.to_thread(_run)
+
+    # ─── Interactive notebook execution ──────────────────────────────────────
+
+    async def execute_notebook_cells(
+        self,
+        nb_id: int,
+        cells: list[dict],
+        reset_session: bool = False,
+    ) -> list[dict]:
+        """Execute a list of cells interactively.
+
+        Each cell runs in a persistent per-notebook namespace so variables defined
+        in earlier cells are available in later ones.  The preamble (spark helpers,
+        common imports) is injected once at session start.
+
+        Returns a list of output dicts, one per code cell::
+
+            {cell_id, stdout, error, df_preview, execution_time_ms}
+
+        ``df_preview`` is set when the cell's last expression or a variable named
+        ``result_df`` / ``df`` / ``output_df`` evaluates to a Spark DataFrame.
+        """
+        import io
+        import time as _time
+        import traceback
+        from contextlib import redirect_stdout
+
+        if reset_session:
+            _notebook_sessions.pop(nb_id, None)
+
+        suppressed = frozenset(self._suppressed_views)
+
+        def _run_cells() -> list[dict]:
+            spark = _get_spark()
+            _register_file_views(spark, suppress=suppressed)
+
+            # Initialise namespace with preamble + spark on first use
+            if nb_id not in _notebook_sessions:
+                ns: dict = {"spark": spark}
+                buf = io.StringIO()
+                try:
+                    with redirect_stdout(buf):
+                        exec(compile(_NOTEBOOK_PREAMBLE, "<preamble>", "exec"), ns)  # noqa: S102
+                except Exception as exc:
+                    logger.warning("Preamble exec failed: %s", exc)
+                _notebook_sessions[nb_id] = ns
+            else:
+                ns = _notebook_sessions[nb_id]
+                ns["spark"] = spark  # refresh spark handle in case of reconnect
+
+            outputs: list[dict] = []
+            for cell in cells:
+                if cell.get("type") != "code":
+                    continue
+                src = (cell.get("source") or cell.get("content") or "").strip()
+                cell_id = cell.get("id", "")
+                if not src:
+                    continue
+
+                buf = io.StringIO()
+                t0 = _time.perf_counter()
+                error_text: str | None = None
+                df_preview: dict | None = None
+
+                try:
+                    with redirect_stdout(buf):
+                        exec(compile(src, f"<cell:{cell_id}>", "exec"), ns)  # noqa: S102
+                except Exception:
+                    error_text = traceback.format_exc()
+
+                elapsed_ms = round((_time.perf_counter() - t0) * 1000)
+
+                # Look for a displayable DataFrame in the namespace
+                if error_text is None:
+                    candidate = None
+                    for var_name in ("result_df", "output_df", "df"):
+                        v = ns.get(var_name)
+                        if v is not None:
+                            try:
+                                from pyspark.sql import DataFrame as _DF  # noqa: PLC0415
+                                if isinstance(v, _DF):
+                                    candidate = v
+                                    break
+                            except ImportError:
+                                pass
+                    if candidate is not None:
+                        try:
+                            rows = candidate.limit(100).collect()
+                            cols = candidate.columns
+                            df_preview = {
+                                "columns": cols,
+                                "rows": [[str(r[c]) if r[c] is not None else None for c in cols] for r in rows],
+                                "row_count": len(rows),
+                            }
+                        except Exception as exc:
+                            df_preview = None
+                            logger.debug("df_preview failed: %s", exc)
+
+                outputs.append({
+                    "cell_id": cell_id,
+                    "stdout": buf.getvalue(),
+                    "error": error_text,
+                    "df_preview": df_preview,
+                    "execution_time_ms": elapsed_ms,
+                })
+
+            return outputs
+
+        return await asyncio.to_thread(_run_cells)
+
+    async def export_notebook_result(
+        self,
+        nb_id: int,
+        target_db: str,
+        target_table: str,
+        source_var: str = "result_df",
+        mode: str = "overwrite",
+    ) -> dict:
+        """Write a DataFrame from the notebook session to a Spark table.
+
+        ``source_var`` names the namespace variable holding the DataFrame
+        (defaults to ``result_df``).
+        """
+        import time as _time
+
+        suppressed = frozenset(self._suppressed_views)
+
+        def _export() -> dict:
+            ns = _notebook_sessions.get(nb_id)
+            if ns is None:
+                raise ValueError("No active notebook session — run the notebook first")
+            df = ns.get(source_var)
+            if df is None:
+                raise ValueError(
+                    f"Variable '{source_var}' not found in notebook session. "
+                    "Make sure your notebook assigns it before exporting."
+                )
+            try:
+                from pyspark.sql import DataFrame as _DF  # noqa: PLC0415
+                if not isinstance(df, _DF):
+                    raise TypeError(f"'{source_var}' is not a Spark DataFrame (got {type(df).__name__})")
+            except ImportError:
+                pass
+
+            spark = _get_spark()
+            _register_file_views(spark, suppress=suppressed)
+            _ensure_namespace_db(spark, target_db)
+            tbl = f"`{target_db}`.`{target_table}`"
+            t0 = _time.perf_counter()
+            row_count = df.count()
+            df.write.mode(mode).saveAsTable(tbl)
+            duration = _time.perf_counter() - t0
+            logger.info("Notebook export: %s.%s → %s (%d rows, %.2fs)", target_db, target_table, tbl, row_count, duration)
+            return {"table": tbl, "row_count": row_count, "duration_s": round(duration, 2)}
+
+        return await asyncio.to_thread(_export)
 
 
 spark_service = SparkService()

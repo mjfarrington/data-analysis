@@ -53,9 +53,80 @@ async def update_notebook(nb_id: int, body: NotebookFileUpdate, db: AsyncSession
         nb.description = body.description
     if body.cells is not None:
         nb.cells = [c.model_dump() for c in body.cells]
+    if body.name is not None:
+        nb.name = body.name
+    if body.description is not None:
+        nb.description = body.description
+    if body.cells is not None:
+        nb.cells = [c.model_dump() for c in body.cells]
     await db.commit()
     await db.refresh(nb)
     return NotebookFileResponse.model_validate(nb)
+
+
+@router.delete("/notebooks/{nb_id}", status_code=204)
+async def delete_notebook(nb_id: int, db: AsyncSession = Depends(get_db)):
+    nb = await db.get(NotebookFile, nb_id)
+    if not nb:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    await db.delete(nb)
+    await db.commit()
+
+
+class _ExecuteRequest(NotebookFileUpdate):
+    """Subset of cells + reset flag used for interactive execution."""
+    reset_session: bool = False
+
+
+@router.post("/notebooks/{nb_id}/execute")
+async def execute_notebook(nb_id: int, body: _ExecuteRequest, db: AsyncSession = Depends(get_db)):
+    """Execute all code cells and return per-cell outputs."""
+    nb = await db.get(NotebookFile, nb_id)
+    if not nb:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    cells = [c.model_dump() for c in body.cells] if body.cells else (nb.cells or [])
+    try:
+        outputs = await spark_service.execute_notebook_cells(
+            nb_id=nb_id,
+            cells=cells,
+            reset_session=body.reset_session,
+        )
+        return {"outputs": outputs}
+    except Exception as exc:
+        logger.exception("Notebook %d execution failed", nb_id)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+from pydantic import BaseModel  # noqa: E402
+
+
+class _ExportRequest(BaseModel):
+    target_db: str
+    target_table: str
+    source_var: str = "result_df"
+    mode: str = "overwrite"
+
+
+@router.post("/notebooks/{nb_id}/export")
+async def export_notebook(nb_id: int, body: _ExportRequest, db: AsyncSession = Depends(get_db)):
+    """Export a DataFrame from the notebook session to a Spark table."""
+    nb = await db.get(NotebookFile, nb_id)
+    if not nb:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    try:
+        result = await spark_service.export_notebook_result(
+            nb_id=nb_id,
+            target_db=body.target_db,
+            target_table=body.target_table,
+            source_var=body.source_var,
+            mode=body.mode,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Notebook %d export failed", nb_id)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ─── Transform Jobs ───────────────────────────────────────────────────────────

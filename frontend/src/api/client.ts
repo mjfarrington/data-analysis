@@ -110,6 +110,33 @@ export interface NotebookFile {
   cells: NotebookCell[]
 }
 
+export interface DfPreview {
+  columns: string[]
+  rows: (string | null)[][]
+  row_count: number
+}
+
+export interface CellOutput {
+  cell_id: string
+  stdout: string
+  error: string | null
+  df_preview: DfPreview | null
+  execution_time_ms: number
+}
+
+export interface ExportConfig {
+  target_db: string
+  target_table: string
+  source_var?: string
+  mode?: string
+}
+
+export interface ExportResult {
+  table: string
+  row_count: number
+  duration_s: number
+}
+
 export interface GraphNode {
   id: number
   name: string
@@ -288,6 +315,12 @@ export const transformApi = {
     api.post<NotebookFile>('/transform/notebooks', data).then(r => r.data),
   updateNotebook: (id: number, data: Partial<NotebookFile>) =>
     api.put<NotebookFile>(`/transform/notebooks/${id}`, data).then(r => r.data),
+  deleteNotebook: (id: number) =>
+    api.delete(`/transform/notebooks/${id}`),
+  executeNotebook: (id: number, cells: NotebookCell[], reset = false) =>
+    api.post<{ outputs: CellOutput[] }>(`/transform/notebooks/${id}/execute`, { cells, reset_session: reset }).then(r => r.data),
+  exportNotebook: (id: number, config: ExportConfig) =>
+    api.post<ExportResult>(`/transform/notebooks/${id}/export`, config).then(r => r.data),
 }
 
 // ── Data API ──────────────────────────────────────────────────────────────────
