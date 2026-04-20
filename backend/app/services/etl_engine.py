@@ -890,6 +890,53 @@ async def execute_pipeline(
 
         source = extract_cfg.source_type
 
+        # ── S3 fast-path: Spark-native ingest, bypasses segment loop ─────────
+        if source == "s3":
+            if not extract_cfg.s3_connection_id:
+                raise ValueError("S3 source requires s3_connection_id.")
+            if not extract_cfg.s3_target_table:
+                raise ValueError("S3 source requires s3_target_table.")
+            from app.models.etl import Connection as ConnModel
+            from app.services.crypto import decrypt_password
+            from app.services.s3_service import config_from_connection, ingest_sync
+
+            conn = await db.get(ConnModel, extract_cfg.s3_connection_id)
+            if not conn:
+                raise ValueError(f"S3 connection {extract_cfg.s3_connection_id} not found.")
+            plain_secret = decrypt_password(conn.password_encrypted) if conn.password_encrypted else None
+            s3_cfg = config_from_connection(conn, plain_secret)
+
+            await _begin_step("extract")
+            await log("S3 ingest started", step="extract")
+            rows_out = 0
+
+            def _run_ingest():
+                nonlocal rows_out
+                for ev in ingest_sync(
+                    s3_cfg,
+                    prefix=extract_cfg.s3_prefix or "",
+                    pattern=extract_cfg.s3_pattern,
+                    fmt=extract_cfg.s3_format,
+                    csv_sep=extract_cfg.s3_csv_sep,
+                    transform_sql=extract_cfg.s3_transform_sql,
+                    target_db=extract_cfg.s3_target_db,
+                    target_table=extract_cfg.s3_target_table,
+                    write_mode=extract_cfg.s3_write_mode,
+                ):
+                    if ev.get("event") == "done":
+                        rows_out = ev.get("rows", 0)
+
+            await asyncio.to_thread(_run_ingest)
+            await _finish_step("extract", RunStatus.COMPLETED, records_in=rows_out, records_out=rows_out)
+            await _finish_step("load", RunStatus.COMPLETED, records_in=rows_out, records_out=rows_out)
+            run.status = RunStatus.COMPLETED
+            run.finished_at = datetime.now(timezone.utc)
+            run.total_records_extracted = rows_out
+            run.total_records_loaded = rows_out
+            await db.commit()
+            await log(f"S3 ingest complete — {rows_out:,} rows written to {extract_cfg.s3_target_db}.{extract_cfg.s3_target_table}", step="extract")
+            return
+
         # Validate app IDs in the unified apps list (no reserved names).
         _RESERVED_APP_IDS: frozenset[str] = frozenset({"default"})
         cfg_app_ids = [str(a.get("id", "")).strip() for a in (extract_cfg.apps or []) if str(a.get("id", "")).strip()]
@@ -903,6 +950,16 @@ async def execute_pipeline(
         dates = _resolve_dates(extract_cfg, business_date)
         rows_per_seg = extract_cfg.rows_per_segment
         job_name = (extract_cfg.job_name or "PIPELINE").strip() or "PIPELINE"
+
+        # Store parameters needed for a potential spark-table retry later
+        run.run_metadata = {
+            **(run.run_metadata or {}),
+            "job_name": job_name,
+            "namespace_db": load_cfg.namespace_db,
+            "table_name": load_cfg.table_name,
+            "mode": load_cfg.mode or "overwrite",
+        }
+        await db.commit()
 
         # Pre-load any dictionaries needed by lookup steps
         lookup_tables: dict[int, dict[str, str]] = {}
@@ -933,6 +990,7 @@ async def execute_pipeline(
         total_transformed = 0
         total_loaded = 0
         total_segs = 0
+        spark_table_failed = False
 
         # ── JDBC / JSON / CSV / DW: read all → chunk by rows_per_segment ──────────
         if True:  # single extraction path
@@ -1116,13 +1174,16 @@ async def execute_pipeline(
                             )
                             await log(f"  Saved catalog table: {tbl}", step="load")
                         except Exception as exc:
+                            spark_table_failed = True
+                            spark_err_msg = f"Spark table registration failed (app={app_id}, date={date_str}): {exc}"
+                            run.error_message = spark_err_msg
                             await log(f"  Spark table skipped: {exc}", level="WARN")
 
                 # Finish app step after all dates for this app are done
                 await _finish_step(_app_key, RunStatus.COMPLETED,
                                    records_in=0, records_out=_app_extracted)
 
-        run.status = RunStatus.COMPLETED
+        run.status = RunStatus.COMPLETED_WITH_WARNINGS if spark_table_failed else RunStatus.COMPLETED
         run.finished_at = datetime.now(timezone.utc)
         if run.started_at:
             run.duration_seconds = (run.finished_at - run.started_at).total_seconds()

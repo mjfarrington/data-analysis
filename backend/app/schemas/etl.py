@@ -51,6 +51,17 @@ class ExtractConfig(BaseModel):
     # DataWarehouse source
     dw_connection_id: Optional[int] = None   # named Connection (conn_type=datawarehouse)
 
+    # S3 source
+    s3_connection_id: Optional[int] = None   # named Connection (conn_type=s3)
+    s3_prefix: Optional[str] = None          # key prefix / directory path
+    s3_pattern: str = "*"                    # fnmatch pattern, e.g. *.parquet
+    s3_format: str = "auto"                  # auto | parquet | csv | json | orc
+    s3_write_mode: str = "overwrite"         # overwrite | append | ignore | error
+    s3_target_db: str = "default"
+    s3_target_table: Optional[str] = None
+    s3_transform_sql: Optional[str] = None   # optional SQL applied before save
+    s3_csv_sep: str = ","
+
     # File source (json / csv)
     file_path: Optional[str] = None           # relative to DATA_DIR/sources/
     file_encoding: str = "utf-8"
@@ -569,7 +580,7 @@ class PipelineGraph(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 # Connection schemas
 # ─────────────────────────────────────────────────────────────────────────────
-CONNECTION_TYPES = ("jdbc", "grpc", "rest", "other", "datawarehouse")
+CONNECTION_TYPES = ("jdbc", "grpc", "rest", "other", "datawarehouse", "s3")
 
 
 class ConnectionCreate(BaseModel):

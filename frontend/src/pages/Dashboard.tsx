@@ -195,7 +195,7 @@ export default function Dashboard() {
   const stats = useMemo(() => {
     const runsToday = runs.filter(r => r.started_at && isToday(parseISO(r.started_at)))
     const failed = runsToday.filter(r => r.status === 'failed').length
-    const completed = runsToday.filter(r => r.status === 'completed').length
+    const completed = runsToday.filter(r => r.status === 'completed' || r.status === 'completed_with_warnings').length
     const running = runs.filter(r => r.status === 'running' || r.status === 'pending').length
     const activePipelines = pipelines.filter(p => p.status === 'active').length
     return { runsToday: runsToday.length, failed, completed, running, activePipelines }
@@ -223,7 +223,7 @@ export default function Dashboard() {
       try {
         const date = format(parseISO(r.started_at), 'yyyy-MM-dd')
         if (dayMap[date]) {
-          if (r.status === 'completed') dayMap[date].completed++
+          if (r.status === 'completed' || r.status === 'completed_with_warnings') dayMap[date].completed++
           else if (r.status === 'failed') dayMap[date].failed++
         }
       } catch { /* skip */ }

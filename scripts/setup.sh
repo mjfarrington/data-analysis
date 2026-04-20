@@ -33,31 +33,6 @@ log "  Installing backend dependencies..."
 "$PROJECT_DIR/backend/.venv/bin/pip" install -q -r "$PROJECT_DIR/backend/requirements.txt"
 ok "Backend dependencies installed"
 
-# gRPC venv (shares with backend or separate)
-if [[ ! -d "$PROJECT_DIR/grpc/.venv" ]]; then
-    log "  Creating gRPC venv..."
-    python3 -m venv "$PROJECT_DIR/grpc/.venv"
-fi
-log "  Installing gRPC dependencies..."
-"$PROJECT_DIR/grpc/.venv/bin/pip" install -q --upgrade pip
-"$PROJECT_DIR/grpc/.venv/bin/pip" install -q -r "$PROJECT_DIR/grpc/requirements.txt"
-ok "gRPC dependencies installed"
-
-# ─────────────────────────────────────────────────────────────────────────────
-log "Generating gRPC protobuf stubs"
-chmod +x "$PROJECT_DIR/grpc/generate_protos.sh"
-(cd "$PROJECT_DIR/grpc" && .venv/bin/python -m grpc_tools.protoc \
-    -I proto \
-    --python_out=generated \
-    --grpc_python_out=generated \
-    proto/data_extract.proto)
-# Fix import
-sed -i '' 's/^import data_extract_pb2/from . import data_extract_pb2/' \
-    "$PROJECT_DIR/grpc/generated/data_extract_pb2_grpc.py" 2>/dev/null || \
-sed -i 's/^import data_extract_pb2/from . import data_extract_pb2/' \
-    "$PROJECT_DIR/grpc/generated/data_extract_pb2_grpc.py"
-ok "gRPC stubs generated"
-
 # ─────────────────────────────────────────────────────────────────────────────
 log "Checking Node.js / npm for frontend"
 if ! command -v node &>/dev/null; then
@@ -74,7 +49,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 log "Creating data directories"
 mkdir -p "$PROJECT_DIR/data"/{extracts,parquet,csv,spark-events,spark-warehouse}
-mkdir -p "$PROJECT_DIR/logs"/{spark/pid,backend,grpc}
+mkdir -p "$PROJECT_DIR/logs"/{spark/pid,backend}
 ok "Directories created"
 
 # ─────────────────────────────────────────────────────────────────────────────

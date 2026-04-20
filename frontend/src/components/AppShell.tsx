@@ -6,6 +6,7 @@ import {
   Divider, Avatar, Chip, alpha, useTheme, Button,
   ToggleButtonGroup, ToggleButton, Typography,
   Dialog, DialogTitle, DialogContent, DialogActions,
+  Popover, TextField, CircularProgress,
 } from '@mui/material'
 import {
   Dashboard as DashboardIcon,
@@ -31,7 +32,7 @@ import {
   FolderOpen as FolderOpenIcon,
   TableChart as TableChartIcon,
 } from '@mui/icons-material'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { servicesApi, contextApi } from '../api/client'
 import { useAuthStore } from '../store/auth'
 import { useThemeStore, ThemeMode, Density } from '../store/theme'
@@ -115,8 +116,11 @@ function ServiceDots({ overall }: { overall: string }) {
 
 export default function AppShell() {
   const theme = useTheme()
+  const qc = useQueryClient()
   const [collapsed, setCollapsed] = useState(false)
   const [quickSettingsOpen, setQuickSettingsOpen] = useState(false)
+  const [dateAnchor, setDateAnchor] = useState<HTMLElement | null>(null)
+  const [dateInput, setDateInput] = useState('')
   const navigate = useNavigate()
   const location = useLocation()
   const user = useAuthStore(s => s.user)
@@ -139,6 +143,20 @@ export default function AppShell() {
     staleTime: 60000,
     retry: false,
   })
+
+  const updateCtxMut = useMutation({
+    mutationFn: (date: string) =>
+      contextApi.update({ business_date: date, namespace: ctx?.namespace ?? '' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['execution-context'] })
+      setDateAnchor(null)
+    },
+  })
+
+  const openDatePicker = (el: HTMLElement) => {
+    setDateInput(ctx?.business_date ?? '')
+    setDateAnchor(el)
+  }
 
   const sidebarWidth = collapsed ? SIDEBAR_MINI : SIDEBAR_FULL
 
@@ -370,16 +388,59 @@ export default function AppShell() {
           <Toolbar variant="dense" sx={{ minHeight: 44, gap: 1.5 }}>
             <Box sx={{ flex: 1 }} />
 
-            {/* Business date */}
-            {ctx?.business_date && (
-              <Chip
-                icon={<CalendarToday sx={{ fontSize: '0.72rem !important' }} />}
-                label={ctx.business_date}
+            {/* Business date — click to edit */}
+            <Chip
+              icon={<CalendarToday sx={{ fontSize: '0.72rem !important' }} />}
+              label={ctx?.business_date ?? 'No date set'}
+              size="small"
+              variant="outlined"
+              onClick={e => openDatePicker(e.currentTarget)}
+              sx={{
+                fontSize: '0.68rem', height: 22,
+                cursor: 'pointer',
+                '&:hover': { borderColor: 'primary.main', color: 'primary.main' },
+              }}
+            />
+
+            {/* Date edit popover */}
+            <Popover
+              open={Boolean(dateAnchor)}
+              anchorEl={dateAnchor}
+              onClose={() => setDateAnchor(null)}
+              anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+              PaperProps={{ sx: { p: 1.5, mt: 0.5, borderRadius: 1.5, minWidth: 220 } }}
+            >
+              <Typography variant="caption" fontWeight={700} color="text.secondary" display="block" mb={1}>
+                Business Date
+              </Typography>
+              <TextField
+                type="date"
                 size="small"
-                variant="outlined"
-                sx={{ fontSize: '0.68rem', height: 22 }}
+                value={dateInput}
+                onChange={e => setDateInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && dateInput) updateCtxMut.mutate(dateInput)
+                  if (e.key === 'Escape') setDateAnchor(null)
+                }}
+                fullWidth
+                autoFocus
+                sx={{ mb: 1 }}
+                inputProps={{ style: { fontSize: '0.82rem' } }}
               />
-            )}
+              <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+                <Button size="small" onClick={() => setDateAnchor(null)} sx={{ fontSize: '0.72rem' }}>Cancel</Button>
+                <Button
+                  size="small"
+                  variant="contained"
+                  disabled={!dateInput || updateCtxMut.isPending}
+                  onClick={() => updateCtxMut.mutate(dateInput)}
+                  sx={{ fontSize: '0.72rem' }}
+                >
+                  {updateCtxMut.isPending ? <CircularProgress size={12} color="inherit" /> : 'Apply'}
+                </Button>
+              </Box>
+            </Popover>
 
             {/* Service health */}
             {services && <ServiceDots overall={services.overall} />}

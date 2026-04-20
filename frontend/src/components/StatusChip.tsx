@@ -19,9 +19,10 @@ export const STATUS_COLOR: Record<string, string> = {
   running:   '#58a6ff',
   pending:   '#58a6ff',
   // amber — warning / draft
-  draft:     '#d29922',
-  degraded:  '#d29922',
-  warning:   '#d29922',
+  draft:                    '#d29922',
+  degraded:                 '#d29922',
+  warning:                  '#d29922',
+  completed_with_warnings:  '#d29922',
   // grey — neutral / terminal
   inactive:  '#8b949e',
   cancelled: '#8b949e',
@@ -42,6 +43,7 @@ interface Props {
 export default function StatusChip({ status, size = 'small', label }: Props) {
   const color = STATUS_COLOR[status.toLowerCase()] ?? DEFAULT_COLOR
   const isRunning = status === 'running'
+  const displayLabel = label ?? (status === 'completed_with_warnings' ? 'completed (warnings)' : status)
 
   return (
     <Chip
@@ -50,9 +52,9 @@ export default function StatusChip({ status, size = 'small', label }: Props) {
         isRunning ? (
           <Box component="span" sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
             <CircularProgress size={9} thickness={4} sx={{ color, flexShrink: 0 }} />
-            {label ?? status}
+            {displayLabel}
           </Box>
-        ) : (label ?? status)
+        ) : displayLabel
       }
       sx={{
         height: size === 'medium' ? 24 : 20,

@@ -4,15 +4,18 @@ import {
   Chip, TextField, MenuItem, Button, CircularProgress, Collapse,
   Alert, IconButton, Tooltip, alpha, useTheme,
   Dialog, DialogTitle, DialogContent, DialogActions,
+  ToggleButtonGroup, ToggleButton,
 } from '@mui/material'
 import {
   ExpandMore, ExpandLess, ChevronRight, Cancel, PlayArrow, Refresh, Delete,
+  AccountTree, FormatListBulleted,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { runsApi, pipelinesApi, RunSummary, RunDetail, RunStep } from '../api/client'
 import { format, parseISO } from 'date-fns'
 import RunLogPanel from '../components/RunLogPanel'
 import StatusChip from '../components/StatusChip'
+import RunGraphView from '../components/RunGraphView'
 
 // ── Step tree helpers (mirrors Pipelines.tsx InlineRunMonitor) ────────────────
 
@@ -149,7 +152,8 @@ function formatDate(str?: string): string {
 function RunDetailPanel({ runId }: { runId: number }) {
   const theme = useTheme()
   const qc = useQueryClient()
-  const terminal = ['completed', 'failed', 'cancelled']
+  const terminal = ['completed', 'failed', 'cancelled', 'completed_with_warnings']
+  const [stepView, setStepView] = useState<'steps' | 'graph'>('steps')
 
   const { data: run, isLoading } = useQuery<RunDetail>({
     queryKey: ['run-detail', runId],
@@ -160,10 +164,16 @@ function RunDetailPanel({ runId }: { runId: number }) {
     },
   })
 
+  const { data: pipeline } = useQuery({
+    queryKey: ['pipeline', run?.pipeline_id],
+    queryFn: () => pipelinesApi.get(run!.pipeline_id),
+    enabled: !!run?.pipeline_id,
+    staleTime: 120_000,
+  })
+
   const cancelMut = useMutation({
     mutationFn: () => runsApi.cancel(runId),
     onSuccess: () => {
-      // Invalidate all views that show this run so every page updates immediately
       qc.invalidateQueries({ queryKey: ['run-detail', runId] })
       qc.invalidateQueries({ queryKey: ['run', runId] })
       qc.invalidateQueries({ queryKey: ['pipelines'] })
@@ -171,10 +181,30 @@ function RunDetailPanel({ runId }: { runId: number }) {
     },
   })
 
+  const retrySparkMut = useMutation({
+    mutationFn: () => runsApi.retrySparkLoad(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['run-detail', runId] })
+      qc.invalidateQueries({ queryKey: ['run', runId] })
+      qc.invalidateQueries({ queryKey: ['runs'] })
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+    },
+  })
+
+  const rerunMut = useMutation({
+    mutationFn: () => pipelinesApi.run(run!.pipeline_id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+      qc.invalidateQueries({ queryKey: ['pipelines'] })
+    },
+  })
+
   if (isLoading) return <Box sx={{ p: 2 }}><CircularProgress size={20} /></Box>
   if (!run) return null
 
   const isRunning = run.status === 'running' || run.status === 'pending'
+  const hasSparkWarning = run.status === 'completed_with_warnings'
+  const hasCanvas = !!(pipeline?.canvas_config as any)?.nodes?.length
 
   return (
     <Box sx={{ p: 2, bgcolor: alpha(theme.palette.background.paper, 0.5) }}>
@@ -189,23 +219,77 @@ function RunDetailPanel({ runId }: { runId: number }) {
             Cancel
           </Button>
         )}
+        {hasSparkWarning && (
+          <Button
+            size="small"
+            color="warning"
+            startIcon={retrySparkMut.isPending ? <CircularProgress size={14} color="inherit" /> : <Refresh />}
+            onClick={() => retrySparkMut.mutate()}
+            disabled={retrySparkMut.isPending}
+          >
+            Retry Spark Load
+          </Button>
+        )}
       </Box>
 
-      {/* Steps — hierarchical tree */}
+      {/* Steps / Graph toggle */}
       {run.steps.length > 0 && (
-        <Box sx={{ mb: 2 }}>
-          <Typography variant="caption" fontWeight={700} color="text.secondary" textTransform="uppercase" letterSpacing="0.08em" display="block" mb={0.5}>
-            Steps
-          </Typography>
-          <Box sx={{ border: `1px solid ${theme.palette.divider}`, borderRadius: 1, overflow: 'hidden' }}>
-            {buildStepTree(run.steps).map(node => (
-              <StepTreeRow key={node.step.id} node={node} depth={0} />
-            ))}
-          </Box>
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
+          <ToggleButtonGroup
+            value={stepView}
+            exclusive
+            onChange={(_, v) => v && setStepView(v)}
+            size="small"
+            sx={{ '& .MuiToggleButton-root': { py: 0.3, px: 1, fontSize: '0.7rem' } }}
+          >
+            <ToggleButton value="steps">
+              <FormatListBulleted sx={{ fontSize: 13, mr: 0.5 }} /> Steps
+            </ToggleButton>
+            <ToggleButton value="graph" disabled={!hasCanvas}>
+              <AccountTree sx={{ fontSize: 13, mr: 0.5 }} /> Graph
+            </ToggleButton>
+          </ToggleButtonGroup>
         </Box>
       )}
 
-      {run.error_message && (
+      {hasSparkWarning && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          <strong>Spark table registration failed.</strong>{run.error_message ? ` ${run.error_message}` : ' Parquet data was saved successfully but could not be registered in the Spark catalog.'}
+          {' '}Use <strong>Retry Spark Load</strong> to re-attempt without re-extracting.
+          {retrySparkMut.isError && (
+            <Box component="span" sx={{ display: 'block', mt: 0.5, color: 'error.main' }}>
+              Retry failed: {(retrySparkMut.error as Error)?.message ?? 'Unknown error'}
+            </Box>
+          )}
+        </Alert>
+      )}
+
+      {/* Steps — hierarchical tree or graph */}
+      {run.steps.length > 0 && (
+        <Box sx={{ mb: 2 }}>
+          {stepView === 'steps' ? (
+            <Box sx={{ border: `1px solid ${theme.palette.divider}`, borderRadius: 1, overflow: 'hidden' }}>
+              {buildStepTree(run.steps).map(node => (
+                <StepTreeRow key={node.step.id} node={node} depth={0} />
+              ))}
+            </Box>
+          ) : pipeline ? (
+            <RunGraphView
+              run={run}
+              pipeline={pipeline}
+              onRerun={() => rerunMut.mutate()}
+              onRetrySparkLoad={() => retrySparkMut.mutate()}
+              retryPending={retrySparkMut.isPending}
+            />
+          ) : (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
+              <CircularProgress size={20} />
+            </Box>
+          )}
+        </Box>
+      )}
+
+      {run.error_message && !hasSparkWarning && (
         <Alert severity="error" sx={{ mb: 2 }}>{run.error_message}</Alert>
       )}
 

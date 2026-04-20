@@ -50,12 +50,6 @@ class Settings(BaseSettings):
     SPARK_EVENTS_DIR:   str = str(Path(__file__).parents[3] / "data" / "spark" / "events")
     SPARK_WAREHOUSE_DIR: str = str(Path(__file__).parents[3] / "data" / "spark" / "warehouse")
 
-    # gRPC Data Extract Service
-    GRPC_HOST: str = "localhost"
-    GRPC_PORT: int = 50051
-    GRPC_TIMEOUT: float = 30.0
-    GRPC_MAX_MESSAGE_MB: int = 64
-
     # ETL defaults
     DEFAULT_PAGE_SIZE: int = 10_000
     MAX_CONCURRENT_RUNS: int = 5
@@ -64,10 +58,6 @@ class Settings(BaseSettings):
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     # Must be set in .env — do NOT commit the actual key.
     CONNECTIONS_SECRET_KEY: str = ''
-
-    @property
-    def grpc_address(self) -> str:
-        return f"{self.GRPC_HOST}:{self.GRPC_PORT}"
 
     @property
     def data_path(self) -> Path:

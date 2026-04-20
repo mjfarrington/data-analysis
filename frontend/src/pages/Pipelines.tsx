@@ -4,17 +4,20 @@ import {
   Box, Typography, Button, Chip, IconButton, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, InputAdornment, CircularProgress, Tooltip, Alert,
   alpha, useTheme, Table, TableHead, TableRow, TableCell, TableBody, LinearProgress,
+  ToggleButtonGroup, ToggleButton,
 } from '@mui/material'
 import {
   Add, PlayArrow, Search, Refresh, Cancel, ErrorOutlined,
   OpenInNew, ArrowUpward, ArrowDownward, UnfoldMore,
   ExpandMore, ExpandLess, ChevronRight, Close, History,
+  AccountTree, FormatListBulleted,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { pipelinesApi, runsApi, Pipeline, RunDetail, RunStep } from '../api/client'
 import { format, parseISO } from 'date-fns'
 import RunLogPanel from '../components/RunLogPanel'
 import StatusChip, { STATUS_COLOR } from '../components/StatusChip'
+import RunGraphView from '../components/RunGraphView'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -201,13 +204,14 @@ function StageRow({ node, depth = 0 }: { node: StepNode; depth?: number }) {
 // Compact "flight strip" always visible for active runs.
 // Stage dots show live status at a glance. Expand to drill into stages → apps → chunks.
 
-function InlineRunMonitor({ runId, pipelineId, onClose, onDone }: {
-  runId: number; pipelineId: number; onClose: () => void; onDone?: () => void
+function InlineRunMonitor({ runId, pipelineId, pipeline: pipelineProp, onClose, onDone }: {
+  runId: number; pipelineId: number; pipeline: Pipeline; onClose: () => void; onDone?: () => void
 }) {
   const [detailsOpen, setDetailsOpen] = useState(true)
+  const [viewMode, setViewMode] = useState<'steps' | 'graph'>('steps')
   const theme = useTheme()
   const qc = useQueryClient()
-  const terminal = ['completed', 'failed', 'cancelled']
+  const terminal = ['completed', 'failed', 'cancelled', 'completed_with_warnings']
 
   const { data: run } = useQuery<RunDetail>({
     queryKey: ['run', runId],
@@ -218,9 +222,19 @@ function InlineRunMonitor({ runId, pipelineId, onClose, onDone }: {
     },
   })
 
+  const pipeline = pipelineProp
+
   const cancelMut = useMutation({
     mutationFn: () => runsApi.cancel(runId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['run', runId] }),
+  })
+
+  const retrySparkMut = useMutation({
+    mutationFn: () => runsApi.retrySparkLoad(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['run', runId] })
+      qc.invalidateQueries({ queryKey: ['pipelines'] })
+    },
   })
 
   const rerunMut = useMutation({
@@ -231,6 +245,7 @@ function InlineRunMonitor({ runId, pipelineId, onClose, onDone }: {
   const isTerminal = run ? terminal.includes(run.status) : false
   const isRunning = run?.status === 'running' || run?.status === 'pending'
   const roots = run?.steps ? buildStepTree(run.steps) : []
+  const hasCanvas = !!(pipeline?.canvas_config as any)?.nodes?.length
 
   return (
     <Box sx={{ borderTop: `2px solid ${alpha('#58a6ff', 0.25)}`, bgcolor: alpha(theme.palette.background.paper, 0.65) }}>
@@ -299,7 +314,7 @@ function InlineRunMonitor({ runId, pipelineId, onClose, onDone }: {
         )}
 
         {/* Expand / collapse detail accordion */}
-        <Tooltip title={detailsOpen ? 'Hide steps' : 'Drill into steps'}>
+        <Tooltip title={detailsOpen ? 'Hide detail' : 'Show detail'}>
           <IconButton size="small" onClick={() => setDetailsOpen(o => !o)} sx={{ p: 0.3, flexShrink: 0 }}>
             {detailsOpen ? <ExpandLess sx={{ fontSize: 16 }} /> : <ExpandMore sx={{ fontSize: 16 }} />}
           </IconButton>
@@ -313,10 +328,39 @@ function InlineRunMonitor({ runId, pipelineId, onClose, onDone }: {
         </Tooltip>
       </Box>
 
+      {/* ── Steps / Graph toggle ── */}
+      {hasCanvas && (
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 2, pt: 0.75 }}>
+          <ToggleButtonGroup
+            value={viewMode}
+            exclusive
+            onChange={(_, v) => { if (v) { setViewMode(v); setDetailsOpen(true) } }}
+            size="small"
+          >
+            <ToggleButton value="steps" sx={{ px: 1.5, fontSize: '0.7rem' }}>
+              <FormatListBulleted sx={{ fontSize: 13, mr: 0.5 }} />Steps
+            </ToggleButton>
+            <ToggleButton value="graph" sx={{ px: 1.5, fontSize: '0.7rem' }}>
+              <AccountTree sx={{ fontSize: 13, mr: 0.5 }} />Graph
+            </ToggleButton>
+          </ToggleButtonGroup>
+        </Box>
+      )}
+
       {/* ── Stage accordion — only rendered when user expands ── */}
       {detailsOpen && roots.length > 0 && (
         <Box sx={{ borderTop: `1px solid ${alpha(theme.palette.divider, 0.5)}` }}>
-          {roots.map(node => <StageRow key={node.step.id} node={node} />)}
+          {viewMode === 'graph' && run && pipeline ? (
+            <RunGraphView
+              run={run}
+              pipeline={pipeline}
+              onRerun={() => rerunMut.mutate()}
+              onRetrySparkLoad={() => retrySparkMut.mutate()}
+              retryPending={retrySparkMut.isPending}
+            />
+          ) : (
+            roots.map(node => <StageRow key={node.step.id} node={node} />)
+          )}
         </Box>
       )}
 
@@ -642,7 +686,7 @@ export default function Pipelines() {
             <Typography variant="caption" color="text.secondary" sx={{ px: 1, fontWeight: 600 }}>
               {pipeline.name}
             </Typography>
-            <InlineRunMonitor runId={panelRunId} pipelineId={pipeline.id}
+            <InlineRunMonitor runId={panelRunId} pipelineId={pipeline.id} pipeline={pipeline}
               onClose={closePanel}
               onDone={closePanel} />
           </Box>

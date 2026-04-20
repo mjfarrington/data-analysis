@@ -358,3 +358,237 @@ async def foreach_extract(
             ))
 
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Datawarehouse — test
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/{conn_id}/test-dw")
+async def test_dw_connection(
+    conn_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Test a datawarehouse-type connection using the bespoke library."""
+    from app.services import datawarehouse_service
+
+    conn = await db.get(Connection, conn_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.conn_type != "datawarehouse":
+        raise HTTPException(status_code=400, detail="Connection is not of type 'datawarehouse'")
+
+    config = datawarehouse_service.config_from_connection(conn)
+    return await datawarehouse_service.test_connection(config)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Datawarehouse — streaming extract (SSE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DWExtractRequest(BaseModel):
+    sql:            str
+    chunk_size:     int = 50_000
+    output_subdir:  Optional[str] = None
+    output_format:  str = "parquet"   # "parquet" | "csv"
+
+
+@router.post("/{conn_id}/extract-dw")
+async def extract_dw_stream(
+    conn_id: int,
+    body: DWExtractRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Stream a datawarehouse extraction as Server-Sent Events.
+
+    Each SSE message carries a JSON payload with an 'event' field:
+      connected | schema | chunk | done | error
+
+    The client should consume this endpoint with EventSource or fetch+ReadableStream.
+    """
+    from fastapi.responses import StreamingResponse
+    from app.services import datawarehouse_service
+
+    conn = await db.get(Connection, conn_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.conn_type != "datawarehouse":
+        raise HTTPException(status_code=400, detail="Connection is not of type 'datawarehouse'")
+
+    stripped = body.sql.strip().upper()
+    if not stripped.startswith("SELECT") and not stripped.startswith("WITH"):
+        raise HTTPException(status_code=400, detail="Only SELECT / WITH statements are allowed")
+
+    # Resolve output directory
+    if body.output_subdir:
+        safe = re.sub(r"[^a-zA-Z0-9_\-/]", "_", body.output_subdir)
+        output_dir = Path(settings.PARQUET_DIR) / safe
+    else:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", conn.name)
+        output_dir = Path(settings.PARQUET_DIR) / f"{safe_name}_{ts}"
+
+    try:
+        fmt = datawarehouse_service.OutputFormat(body.output_format)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid output_format '{body.output_format}'. Use 'parquet' or 'csv'.")
+
+    config = datawarehouse_service.config_from_connection(conn)
+
+    async def event_stream():
+        import json
+        # Emit a "connected" heartbeat immediately so the client knows the stream opened
+        yield f"data: {json.dumps({'event': 'connected', 'message': f'Starting extract for connection {conn.name}'})}\n\n"
+        async for line in datawarehouse_service.extract_stream_async(
+            config, body.sql, output_dir, body.chunk_size, fmt
+        ):
+            yield line
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering if present
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S3 — test connection
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/{conn_id}/test-s3")
+async def test_s3_connection(
+    conn_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Test an S3-type connection (list-objects ping)."""
+    from app.services import s3_service
+
+    conn = await db.get(Connection, conn_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.conn_type != "s3":
+        raise HTTPException(status_code=400, detail="Connection is not of type 's3'")
+
+    config = s3_service.config_from_connection(conn)
+    return await s3_service.test_connection(config)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S3 — list matching files
+# ─────────────────────────────────────────────────────────────────────────────
+
+class S3ListRequest(BaseModel):
+    prefix:   str = ""
+    pattern:  str = "*"
+    max_keys: int = 1000
+
+
+@router.post("/{conn_id}/s3-list")
+async def s3_list_files(
+    conn_id: int,
+    body: S3ListRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """List S3 objects matching prefix + pattern. Returns at most max_keys keys."""
+    from app.services import s3_service
+
+    conn = await db.get(Connection, conn_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.conn_type != "s3":
+        raise HTTPException(status_code=400, detail="Connection is not of type 's3'")
+
+    config = s3_service.config_from_connection(conn)
+    keys = await s3_service.list_files(config, body.prefix, body.pattern, body.max_keys)
+    return {"count": len(keys), "keys": keys}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S3 — ingest to Spark (SSE streaming)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class S3IngestRequest(BaseModel):
+    # Source
+    prefix:          str
+    pattern:         str        = "*"
+    format:          str        = "auto"    # auto | parquet | csv | json | orc
+    # CSV reader options
+    csv_header:      bool       = True
+    csv_sep:         str        = ","
+    csv_infer:       bool       = True
+    # Extra Spark reader options (e.g. {"multiLine": "true"} for JSON)
+    reader_options:  dict[str, str] = {}
+    # Transformation (optional) — SQL referencing {source} as the input view name
+    transform_sql:   Optional[str] = None
+    # Target Spark table
+    target_db:       str        = "default"
+    target_table:    str
+    write_mode:      str        = "overwrite"  # overwrite | append | ignore | error
+
+
+@router.post("/{conn_id}/s3-ingest")
+async def s3_ingest_stream(
+    conn_id: int,
+    body: S3IngestRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Ingest files from S3 into a Spark table, streaming progress as SSE.
+
+    Events: listing → matched → download(×N) → reading → schema → transform? → saving → done | error
+    """
+    from fastapi.responses import StreamingResponse
+    from app.services import s3_service
+
+    conn = await db.get(Connection, conn_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.conn_type != "s3":
+        raise HTTPException(status_code=400, detail="Connection is not of type 's3'")
+
+    if not body.target_table:
+        raise HTTPException(status_code=400, detail="target_table is required")
+
+    # Validate target names (alphanumeric + underscore only)
+    if not re.match(r"^[a-zA-Z0-9_]+$", body.target_table):
+        raise HTTPException(status_code=400, detail="target_table must be alphanumeric/underscore only")
+    if not re.match(r"^[a-zA-Z0-9_]+$", body.target_db):
+        raise HTTPException(status_code=400, detail="target_db must be alphanumeric/underscore only")
+
+    try:
+        fmt        = s3_service.S3Format(body.format)
+        write_mode = s3_service.WriteMode(body.write_mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    config = s3_service.config_from_connection(conn)
+
+    async def event_stream():
+        import json
+        yield f"data: {json.dumps({'event': 'connected', 'message': f'Starting S3 ingest from s3://{config.bucket}/{body.prefix}'})}\n\n"
+        async for line in s3_service.ingest_stream_async(
+            config       = config,
+            prefix       = body.prefix,
+            pattern      = body.pattern,
+            fmt          = fmt,
+            transform_sql = body.transform_sql,
+            target_db    = body.target_db,
+            target_table = body.target_table,
+            write_mode   = write_mode,
+            csv_header   = body.csv_header,
+            csv_sep      = body.csv_sep,
+            csv_infer    = body.csv_infer,
+            reader_options = body.reader_options or {},
+        ):
+            yield line
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+

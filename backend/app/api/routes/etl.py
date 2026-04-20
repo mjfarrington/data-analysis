@@ -121,6 +121,28 @@ async def _apply_canvas_to_extract_cfg(
             if date_fmt:
                 updates["jdbc_date_var_format"] = date_fmt
 
+        elif node_type == "s3_extract":
+            updates["source_type"] = "s3"
+            conn_id = cfg.get("connection_id")
+            if conn_id is not None:
+                updates["s3_connection_id"] = int(conn_id)
+            if cfg.get("prefix") is not None:
+                updates["s3_prefix"] = cfg["prefix"]
+            if cfg.get("pattern"):
+                updates["s3_pattern"] = cfg["pattern"]
+            if cfg.get("format"):
+                updates["s3_format"] = cfg["format"]
+            if cfg.get("write_mode"):
+                updates["s3_write_mode"] = cfg["write_mode"]
+            if cfg.get("target_db"):
+                updates["s3_target_db"] = cfg["target_db"]
+            if cfg.get("target_table"):
+                updates["s3_target_table"] = cfg["target_table"]
+            if cfg.get("transform_sql"):
+                updates["s3_transform_sql"] = cfg["transform_sql"]
+            if cfg.get("csv_sep"):
+                updates["s3_csv_sep"] = cfg["csv_sep"]
+
     if updates:
         return base_cfg.model_copy(update=updates)
     return base_cfg
@@ -176,6 +198,22 @@ async def list_pipelines(
         resp.total_runs = total
         out.append(resp)
     return out
+
+
+@router.get("/pipelines/{pid}", response_model=PipelineResponse)
+async def get_pipeline(pid: int, db: AsyncSession = Depends(get_db)):
+    pipeline = await db.get(ETLPipeline, pid)
+    if not pipeline:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    runs_q = await db.execute(
+        select(ETLRun).where(ETLRun.pipeline_id == pid).order_by(desc(ETLRun.created_at)).limit(1)
+    )
+    last_run = runs_q.scalar_one_or_none()
+    count_q = await db.execute(select(func.count()).where(ETLRun.pipeline_id == pid))
+    resp = PipelineResponse.model_validate(pipeline)
+    resp.last_run = RunSummary.model_validate(last_run) if last_run else None
+    resp.total_runs = count_q.scalar_one()
+    return resp
 
 
 @router.post("/pipelines", response_model=PipelineResponse, status_code=201)
@@ -350,6 +388,76 @@ async def cancel_run_endpoint(run_id: int, db: AsyncSession = Depends(get_db)):
             detail="Run not active or already completed",
         )
     return {"message": f"Cancellation requested for run {run_id}"}
+
+
+@router.post("/runs/{run_id}/retry-spark-load", status_code=202)
+async def retry_spark_load(run_id: int, db: AsyncSession = Depends(get_db)):
+    """Re-attempt Spark catalog table registration for a completed_with_warnings run."""
+    result = await db.execute(
+        select(ETLRun)
+        .where(ETLRun.id == run_id)
+        .options(selectinload(ETLRun.extract_jobs))
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status != RunStatus.COMPLETED_WITH_WARNINGS:
+        raise HTTPException(
+            status_code=400,
+            detail="Only completed_with_warnings runs can have their Spark load retried",
+        )
+
+    metadata = run.run_metadata or {}
+    job_name = metadata.get("job_name")
+    namespace_db = metadata.get("namespace_db")
+    table_name = metadata.get("table_name")
+    mode = metadata.get("mode", "overwrite")
+
+    if not job_name or not namespace_db:
+        raise HTTPException(
+            status_code=400,
+            detail="Run is missing retry metadata (job_name / namespace_db). Re-run the full pipeline.",
+        )
+
+    # Collect unique (app_id, date) pairs from extract jobs
+    app_date_pairs = list({(j.application_id, j.date) for j in run.extract_jobs if j.status == RunStatus.COMPLETED})
+    if not app_date_pairs:
+        raise HTTPException(status_code=400, detail="No completed extract jobs found for this run")
+
+    run.status = RunStatus.RUNNING
+    run.error_message = None
+    await db.commit()
+
+    from app.core.database import AsyncSessionLocal
+    from app.services import spark_service
+
+    async def _bg():
+        async with AsyncSessionLocal() as bg_db:
+            bg_run = await bg_db.get(ETLRun, run_id)
+            errors: list[str] = []
+            for app_id, date_str in app_date_pairs:
+                try:
+                    tbl = await spark_service.merge_and_register_table(
+                        app_id, date_str,
+                        job_name=job_name,
+                        table_name=table_name,
+                        namespace_db=namespace_db,
+                        mode=mode,
+                    )
+                    logger.info("Retry spark load: registered %s", tbl)
+                except Exception as exc:
+                    logger.warning("Retry spark load failed app=%s date=%s: %s", app_id, date_str, exc)
+                    errors.append(f"app={app_id} date={date_str}: {exc}")
+            if errors:
+                bg_run.status = RunStatus.COMPLETED_WITH_WARNINGS
+                bg_run.error_message = "Spark table registration failed: " + "; ".join(errors)
+            else:
+                bg_run.status = RunStatus.COMPLETED
+                bg_run.error_message = None
+            await bg_db.commit()
+
+    asyncio.create_task(_bg())
+    return {"message": "Spark table load retry initiated"}
 
 
 @router.delete("/runs/{run_id}", status_code=204)

@@ -23,11 +23,19 @@ function loadDensity(): Density {
   return localStorage.getItem(DENSITY_KEY) === 'compact' ? 'compact' : 'normal'
 }
 
+function applyColorScheme(mode: ThemeMode) {
+  document.documentElement.style.colorScheme = mode === 'light' ? 'light' : 'dark'
+}
+
+// Apply on initial load
+applyColorScheme(loadMode())
+
 export const useThemeStore = create<ThemeState>()((set) => ({
   mode: loadMode(),
   density: loadDensity(),
   setMode: (mode) => {
     localStorage.setItem(THEME_KEY, mode)
+    applyColorScheme(mode)
     set({ mode })
   },
   setDensity: (density) => {

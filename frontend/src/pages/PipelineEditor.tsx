@@ -28,6 +28,7 @@ import {
   EditNote, Info, Dataset as DatasetIcon, Visibility,
   Loop as LoopIcon, CheckBox, CheckBoxOutlineBlank,
   ZoomIn, ZoomOut, CenterFocusStrong, LibraryBooks,
+  CloudDownload as S3Icon,
 } from '@mui/icons-material'
 import { Checkbox, ListItemIcon } from '@mui/material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -57,6 +58,7 @@ const CATALOG: CatalogItem[] = [
   { type: 'iterator',         label: 'Iterator',           color: EXTRACT_COLOR,    category: 'source',    icon: <LoopIcon fontSize="inherit" /> },
   { type: 'dw_extract',       label: 'Datawarehouse',     color: EXTRACT_COLOR,    category: 'source',    icon: <StorageIcon fontSize="inherit" /> },
   { type: 'jdbc_extract',     label: 'JDBC Extract',       color: EXTRACT_COLOR,    category: 'source',    icon: <DatasetIcon fontSize="inherit" />, dualHandle: true },
+  { type: 's3_extract',       label: 'S3 Extract',         color: '#3fb950',        category: 'source',    icon: <S3Icon fontSize="inherit" /> },
   { type: 'filter',        label: 'Filter Rows',        color: TRANSFORM_COLOR,  category: 'transform', icon: <FilterList fontSize="inherit" /> },
   { type: 'join',          label: 'Join',               color: TRANSFORM_COLOR,  category: 'transform', icon: <JoinFull fontSize="inherit" /> },
   { type: 'sort',          label: 'Sort',               color: TRANSFORM_COLOR,  category: 'transform', icon: <Sort fontSize="inherit" /> },
@@ -107,6 +109,18 @@ function defaultConfig(type: string): Record<string, any> {
         output_subdir: '',
         date_format: 'YYYY-MM-DD',
       }
+    case 's3_extract':
+      return {
+        connection_id: null,
+        prefix: '',
+        pattern: '*',
+        format: 'auto',
+        write_mode: 'overwrite',
+        target_db: 'default',
+        target_table: '',
+        transform_sql: '',
+        csv_sep: ',',
+      }
     case 'filter':
       return { conditions: [{ column: '', operator: '=', value: '' }], logic: 'AND' }
     case 'join':
@@ -155,6 +169,12 @@ function nodeSummary(type: string, config: Record<string, any>, meta?: { connNam
         meta?.connName ? `🔌 ${meta.connName}` : '🔌 No connection',
         config.sql || config.sql_file_id ? '📝 SQL configured' : '📝 No SQL',
         `📦 ${config.chunk_size?.toLocaleString() ?? '50,000'} rows/chunk`,
+      ]
+    case 's3_extract':
+      return [
+        meta?.connName ? `☁ ${meta.connName}` : '☁ No connection',
+        config.prefix ? `📁 ${config.prefix}` : '📁 No prefix',
+        `🔍 ${config.pattern ?? '*'} → ${config.target_db ?? 'default'}.${config.target_table || '?'}`,
       ]
     case 'filter':
       return [`${config.conditions?.length ?? 0} condition(s)`, config.logic]
@@ -1070,6 +1090,156 @@ function JdbcExtractForm({
 // DW Extract form
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// S3 Extract form
+// ─────────────────────────────────────────────────────────────────────────────
+
+const S3_FORMATS     = ['auto', 'parquet', 'csv', 'json', 'orc']
+const S3_WRITE_MODES = ['overwrite', 'append', 'ignore', 'error']
+
+function S3ExtractForm({
+  config, onChange, connections,
+}: {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  config: Record<string, any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onChange: (patch: Record<string, any>) => void
+  connections: Connection[]
+}) {
+  const [showSql, setShowSql] = useState(false)
+  const s3Connections = connections.filter(c => c.conn_type === 's3')
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.75 }}>
+      {/* Connection */}
+      <FormControl size="small" fullWidth>
+        <InputLabel>S3 Connection</InputLabel>
+        <Select
+          label="S3 Connection"
+          value={config.connection_id ?? ''}
+          onChange={e => onChange({ connection_id: e.target.value || null })}
+        >
+          <MenuItem value=""><em>None</em></MenuItem>
+          {s3Connections.length === 0 && (
+            <MenuItem disabled><em>No S3 connections — add one in Connections</em></MenuItem>
+          )}
+          {s3Connections.map(c => (
+            <MenuItem key={c.id} value={c.id}>
+              <Box>
+                <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{c.name}</Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
+                  s3://{(c.extra?.bucket as string) ?? '?'} · {(c.extra?.region as string) ?? 'us-east-1'}
+                </Typography>
+              </Box>
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+
+      {/* Prefix + Pattern */}
+      <Box sx={{ display: 'flex', gap: 1 }}>
+        <TextField
+          label="Path prefix"
+          value={config.prefix ?? ''}
+          onChange={e => onChange({ prefix: e.target.value })}
+          size="small"
+          sx={{ flex: 3 }}
+          placeholder="data/trades/2026-04/"
+          helperText="S3 key prefix (directory)"
+        />
+        <TextField
+          label="File pattern"
+          value={config.pattern ?? '*'}
+          onChange={e => onChange({ pattern: e.target.value })}
+          size="small"
+          sx={{ flex: 2 }}
+          placeholder="*.parquet"
+        />
+      </Box>
+
+      {/* Format */}
+      <Box sx={{ display: 'flex', gap: 1 }}>
+        <FormControl size="small" sx={{ flex: 1 }}>
+          <InputLabel>Format</InputLabel>
+          <Select
+            label="Format"
+            value={config.format ?? 'auto'}
+            onChange={e => onChange({ format: e.target.value })}
+          >
+            {S3_FORMATS.map(f => <MenuItem key={f} value={f}>{f}</MenuItem>)}
+          </Select>
+        </FormControl>
+        {config.format === 'csv' && (
+          <TextField
+            label="CSV sep"
+            value={config.csv_sep ?? ','}
+            onChange={e => onChange({ csv_sep: e.target.value })}
+            size="small"
+            sx={{ flex: 1 }}
+          />
+        )}
+      </Box>
+
+      {/* Target table */}
+      <Divider />
+      <Typography variant="caption" color="text.secondary" fontWeight={600} sx={{ textTransform: 'uppercase', fontSize: '0.62rem', letterSpacing: '0.06em' }}>
+        Target Spark Table
+      </Typography>
+      <Box sx={{ display: 'flex', gap: 1 }}>
+        <TextField
+          label="Database"
+          value={config.target_db ?? 'default'}
+          onChange={e => onChange({ target_db: e.target.value })}
+          size="small"
+          sx={{ flex: 1 }}
+        />
+        <TextField
+          label="Table *"
+          value={config.target_table ?? ''}
+          onChange={e => onChange({ target_table: e.target.value })}
+          size="small"
+          sx={{ flex: 2 }}
+          required
+          error={!config.target_table}
+        />
+      </Box>
+      <FormControl size="small" fullWidth>
+        <InputLabel>Write mode</InputLabel>
+        <Select
+          label="Write mode"
+          value={config.write_mode ?? 'overwrite'}
+          onChange={e => onChange({ write_mode: e.target.value })}
+        >
+          {S3_WRITE_MODES.map(m => <MenuItem key={m} value={m}>{m}</MenuItem>)}
+        </Select>
+      </FormControl>
+
+      {/* Optional SQL transform */}
+      <Box
+        sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer' }}
+        onClick={() => setShowSql(v => !v)}
+      >
+        {showSql ? <ExpandLess sx={{ fontSize: 14, color: 'text.secondary' }} /> : <ExpandMore sx={{ fontSize: 14, color: 'text.secondary' }} />}
+        <Typography variant="caption" color="text.secondary" fontWeight={600}>SQL Transform (optional)</Typography>
+      </Box>
+      <Collapse in={showSql}>
+        <TextField
+          label="Transform SQL"
+          multiline
+          minRows={3}
+          value={config.transform_sql ?? ''}
+          onChange={e => onChange({ transform_sql: e.target.value })}
+          size="small"
+          fullWidth
+          placeholder="SELECT * FROM {source} WHERE date >= '2026-01-01'"
+          helperText="Use {source} to reference the raw ingested data."
+          inputProps={{ style: { fontFamily: 'monospace', fontSize: '0.75rem' } }}
+        />
+      </Collapse>
+    </Box>
+  )
+}
+
 function DWExtractForm({
   config, onChange, connections, sqlFiles,
 }: {
@@ -1775,6 +1945,9 @@ function PropertiesPanel({
       )}
       {node.data.nodeType === 'jdbc_extract' && (
         <JdbcExtractForm config={node.data.config} onChange={onChange} connections={connections} sqlFiles={sqlFiles} dictionaries={dictionaries} onOpenSqlEditor={onOpenSqlEditor} />
+      )}
+      {node.data.nodeType === 's3_extract' && (
+        <S3ExtractForm config={node.data.config} onChange={onChange} connections={connections} />
       )}
       {node.data.nodeType === 'filter' && (
         <FilterForm config={node.data.config} onChange={onChange} />

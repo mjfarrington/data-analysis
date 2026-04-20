@@ -76,6 +76,7 @@ class RunStatus(str, enum.Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     FAILED = "failed"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
@@ -436,6 +437,7 @@ class ConnectionType(str, enum.Enum):
     REST = "rest"
     OTHER = "other"
     DATAWAREHOUSE = "datawarehouse"
+    S3 = "s3"
 
 
 class Connection(Base):

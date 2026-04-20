@@ -278,6 +278,7 @@ export interface Connection {
 
 export const pipelinesApi = {
   list: () => api.get<Pipeline[]>('/etl/pipelines').then(r => r.data),
+  get: (id: number) => api.get<Pipeline>(`/etl/pipelines/${id}`).then(r => r.data),
   create: (data: Partial<Pipeline>) =>
     api.post<Pipeline>('/etl/pipelines', data).then(r => r.data),
   update: (id: number, data: Partial<Pipeline>) =>
@@ -299,6 +300,7 @@ export const runsApi = {
   list: () => api.get<RunSummary[]>('/etl/runs').then(r => r.data),
   get: (id: number) => api.get<RunDetail>(`/etl/runs/${id}`).then(r => r.data),
   cancel: (id: number) => api.post(`/etl/runs/${id}/cancel`),
+  retrySparkLoad: (id: number) => api.post(`/etl/runs/${id}/retry-spark-load`).then(r => r.data),
   delete: (id: number) => api.delete(`/etl/runs/${id}`),
   clearAll: (pipelineId?: number) =>
     api.delete<{ deleted: number }>('/etl/runs', { params: pipelineId != null ? { pipeline_id: pipelineId } : {} }).then(r => r.data),
@@ -461,6 +463,19 @@ export const connectionsApi = {
     chunk_size: number
     selected_keys?: string[]
   }) => api.post<ForeachEntryResult[]>(`/connections/${id}/foreach-extract`, body).then(r => r.data),
+  /** Test a datawarehouse-type connection using the bespoke library. */
+  testDW: (id: number) =>
+    api.post<{ ok: boolean; latency_ms: number; message: string }>(`/connections/${id}/test-dw`).then(r => r.data),
+  /** Stream a datawarehouse extract as SSE. Returns the raw fetch Response so the caller can read body as a stream. */
+  extractDWUrl: (id: number) => `${api.defaults.baseURL}/connections/${id}/extract-dw`,
+  /** Test an S3-type connection by checking bucket accessibility. */
+  testS3: (id: number) =>
+    api.post<{ ok: boolean; latency_ms: number; message: string }>(`/connections/${id}/test-s3`).then(r => r.data),
+  /** List S3 files matching a prefix + pattern. */
+  s3List: (id: number, body: { prefix?: string; pattern?: string; max_keys?: number }) =>
+    api.post<{ count: number; keys: string[] }>(`/connections/${id}/s3-list`, body).then(r => r.data),
+  /** Returns the S3 ingest SSE URL for streaming with fetch(). */
+  s3IngestUrl: (id: number) => `${api.defaults.baseURL}/connections/${id}/s3-ingest`,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
