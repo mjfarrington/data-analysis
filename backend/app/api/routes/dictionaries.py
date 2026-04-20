@@ -10,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.models.etl import Dictionary
+from app.models.etl import Dictionary, DictionaryEntry
 from app.schemas.etl import (
     DictionaryCreate, DictionaryUpdate, DictionaryOut,
+    DictionaryEntryCreate, DictionaryEntryUpdate, DictionaryEntryOut,
 )
 
 router = APIRouter(prefix="/dictionaries", tags=["Dictionaries"])
@@ -67,4 +68,48 @@ async def delete_dictionary(dict_id: int, db: AsyncSession = Depends(get_db)):
     if not d:
         raise HTTPException(status_code=404, detail="Dictionary not found")
     await db.delete(d)
+    await db.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry sub-resource
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _get_dict(dict_id: int, db: AsyncSession) -> Dictionary:
+    d = await db.get(Dictionary, dict_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="Dictionary not found")
+    return d
+
+
+@router.post("/{dict_id}/entries", response_model=DictionaryEntryOut, status_code=201)
+async def add_entry(dict_id: int, data: DictionaryEntryCreate, db: AsyncSession = Depends(get_db)):
+    await _get_dict(dict_id, db)
+    entry = DictionaryEntry(dictionary_id=dict_id, **data.model_dump())
+    db.add(entry)
+    await db.commit()
+    await db.refresh(entry)
+    return entry
+
+
+@router.put("/{dict_id}/entries/{entry_id}", response_model=DictionaryEntryOut)
+async def update_entry(dict_id: int, entry_id: int, data: DictionaryEntryUpdate, db: AsyncSession = Depends(get_db)):
+    await _get_dict(dict_id, db)
+    entry = await db.get(DictionaryEntry, entry_id)
+    if not entry or entry.dictionary_id != dict_id:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    for field, val in data.model_dump(exclude_none=True).items():
+        setattr(entry, field, val)
+    await db.commit()
+    await db.refresh(entry)
+    return entry
+
+
+@router.delete("/{dict_id}/entries/{entry_id}", status_code=204)
+async def delete_entry(dict_id: int, entry_id: int, db: AsyncSession = Depends(get_db)):
+    await _get_dict(dict_id, db)
+    entry = await db.get(DictionaryEntry, entry_id)
+    if not entry or entry.dictionary_id != dict_id:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    await db.delete(entry)
     await db.commit()

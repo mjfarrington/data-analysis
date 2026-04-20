@@ -9,7 +9,7 @@ import {
   Search, PlayArrow, TableChart, FolderOpen, ExpandMore, ChevronRight,
   Storage, FilterList, ArrowUpward, ArrowDownward, UnfoldMore,
   KeyboardArrowLeft, KeyboardArrowRight, Description, Visibility,
-  Refresh, LinkOff, Link as LinkIcon, DeleteOutline,
+  Refresh, LinkOff, Link as LinkIcon, DeleteOutlined,
 } from '@mui/icons-material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { dataApi, DataTable, QueryResult, CatalogTable } from '../api/client'
@@ -788,7 +788,7 @@ export default function DataExplorer() {
                                 </Typography>
                                 <Tooltip title="Drop all temp views" placement="right">
                                   <IconButton size="small" onClick={handleDropAllViews} sx={{ p: 0.25, color: 'error.main', opacity: 0.6, '&:hover': { opacity: 1 } }}>
-                                    <DeleteOutline sx={{ fontSize: 12 }} />
+                                    <DeleteOutlined sx={{ fontSize: 12 }} />
                                   </IconButton>
                                 </Tooltip>
                               </Box>
@@ -818,7 +818,7 @@ export default function DataExplorer() {
                                         onClick={e => handleDropView(ct.name, e)}
                                         sx={{ p: 0.25, opacity: 0, transition: 'opacity 0.15s', color: 'error.main', flexShrink: 0 }}
                                       >
-                                        <DeleteOutline sx={{ fontSize: 13 }} />
+                                        <DeleteOutlined sx={{ fontSize: 13 }} />
                                       </IconButton>
                                     </Tooltip>
                                   </Box>

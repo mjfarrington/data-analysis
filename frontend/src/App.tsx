@@ -8,13 +8,18 @@ import { useThemeStore } from './store/theme'
 
 import AppShell from './components/AppShell'
 import Login from './pages/Login'
+import Dashboard from './pages/Dashboard'
 import Pipelines from './pages/Pipelines'
 import PipelineEditor from './pages/PipelineEditor'
 import Workflows from './pages/Workflows'
+import TransformJobs from './pages/TransformJobs'
 import SqlFiles from './pages/SqlFiles'
 import Notebooks from './pages/Notebooks'
 import Dictionaries from './pages/Dictionaries'
+import Catalogues from './pages/Catalogues'
 import DataExplorer from './pages/DataExplorer'
+import DataBrowser from './pages/DataBrowser'
+import Connections from './pages/Connections'
 import RunHistory from './pages/RunHistory'
 import Services from './pages/Services'
 import Settings from './pages/Settings'
@@ -41,7 +46,7 @@ function AppRoutes() {
     <Routes>
       <Route
         path="/login"
-        element={user ? <Navigate to="/pipelines" replace /> : <Login />}
+        element={user ? <Navigate to="/dashboard" replace /> : <Login />}
       />
       <Route
         path="/"
@@ -51,19 +56,24 @@ function AppRoutes() {
           </AuthGuard>
         }
       >
-        <Route index element={<Navigate to="/pipelines" replace />} />
+        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route path="dashboard" element={<Dashboard />} />
         <Route path="pipelines" element={<Pipelines />} />
         <Route path="pipelines/:id/edit" element={<PipelineEditor />} />
         <Route path="workflows" element={<Workflows />} />
+        <Route path="transform-jobs" element={<TransformJobs />} />
         <Route path="sql-files" element={<SqlFiles />} />
         <Route path="notebooks" element={<Notebooks />} />
         <Route path="dictionaries" element={<Dictionaries />} />
+        <Route path="catalogues" element={<Catalogues />} />
         <Route path="explorer" element={<DataExplorer />} />
+        <Route path="data-browser" element={<DataBrowser />} />
+        <Route path="connections" element={<Connections />} />
         <Route path="runs" element={<RunHistory />} />
         <Route path="services" element={<Services />} />
         <Route path="settings" element={<Settings />} />
       </Route>
-      <Route path="*" element={<Navigate to="/pipelines" replace />} />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   )
 }

@@ -72,10 +72,9 @@ export interface RunDetail extends RunSummary {
 }
 
 export interface ChainStep {
-  order: number
   type: 'pipeline' | 'transform'
   pipeline_id?: number
-  job_id?: number
+  transform_job_id?: number
   label: string
 }
 
@@ -84,6 +83,9 @@ export interface ETLChain {
   name: string
   description?: string
   status?: string
+  last_run_at?: string
+  last_run_duration_s?: number
+  last_error?: string
   steps: ChainStep[]
 }
 
@@ -91,16 +93,32 @@ export interface TransformJob {
   id: number
   name: string
   description?: string
-  job_type: string
+  tags: string[]
+  source_database?: string
+  source_table: string
+  transform_type: 'sql' | 'notebook'
+  sql_content?: string
+  sql_file_id?: number
+  sql_file_name?: string
+  notebook_file_id?: number
+  notebook_file_name?: string
+  target_database?: string
+  target_table: string
+  target_mode: string
   status: string
-  source_table?: string
-  target_table?: string
+  last_run_at?: string
+  last_run_duration_s?: number
+  last_run_rows?: number
+  last_error?: string
+  created_at: string
+  updated_at: string
 }
 
 export interface NotebookCell {
   id: string
   type: 'code' | 'markdown'
   content: string
+  language?: string  // explicit override; undefined = auto-detect
 }
 
 export interface NotebookFile {

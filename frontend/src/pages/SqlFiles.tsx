@@ -34,7 +34,7 @@ export default function SqlFiles() {
 
   const { data: files = [], isLoading } = useQuery({
     queryKey: ['sql-files'],
-    queryFn: sqlFilesApi.list,
+    queryFn: () => sqlFilesApi.list(),
   })
 
   const createMut = useMutation({

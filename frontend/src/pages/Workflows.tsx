@@ -13,6 +13,7 @@ import {
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { transformApi, pipelinesApi, ETLChain, ChainStep } from '../api/client'
+import StatusChip from '../components/StatusChip'
 
 function StepTypeIcon({ type }: { type: string }) {
   return type === 'pipeline'
@@ -38,11 +39,11 @@ function WorkflowDialog({ open, onClose, initial, onSave }: WorkflowDialogProps)
   const { data: jobs = [] } = useQuery({ queryKey: ['transform-jobs'], queryFn: transformApi.listJobs })
 
   function addStep() {
-    setSteps(s => [...s, { order: s.length + 1, type: 'pipeline', label: `Step ${s.length + 1}` }])
+    setSteps(s => [...s, { type: 'pipeline', label: `Step ${s.length + 1}` }])
   }
 
   function removeStep(i: number) {
-    setSteps(s => s.filter((_, idx) => idx !== i).map((step, idx) => ({ ...step, order: idx + 1 })))
+    setSteps(s => s.filter((_, idx) => idx !== i))
   }
 
   function updateStep(i: number, patch: Partial<ChainStep>) {
@@ -81,7 +82,7 @@ function WorkflowDialog({ open, onClose, initial, onSave }: WorkflowDialogProps)
             </Typography>
             <TextField
               select label="Type" value={step.type}
-              onChange={e => updateStep(i, { type: e.target.value as 'pipeline' | 'transform', pipeline_id: undefined, job_id: undefined })}
+              onChange={e => updateStep(i, { type: e.target.value as 'pipeline' | 'transform', pipeline_id: undefined, transform_job_id: undefined })}
               size="small" sx={{ width: 130 }}
             >
               <MenuItem value="pipeline">Pipeline</MenuItem>
@@ -97,8 +98,8 @@ function WorkflowDialog({ open, onClose, initial, onSave }: WorkflowDialogProps)
               </TextField>
             ) : (
               <TextField
-                select label="Transform Job" value={step.job_id ?? ''}
-                onChange={e => updateStep(i, { job_id: Number(e.target.value), label: jobs.find(j => j.id === Number(e.target.value))?.name ?? step.label })}
+                select label="Transform Job" value={step.transform_job_id ?? ''}
+                onChange={e => updateStep(i, { transform_job_id: Number(e.target.value), label: jobs.find(j => j.id === Number(e.target.value))?.name ?? step.label })}
                 size="small" sx={{ flex: 1 }}
               >
                 {jobs.map(j => <MenuItem key={j.id} value={j.id}>{j.name}</MenuItem>)}
@@ -212,12 +213,7 @@ export default function Workflows() {
                     </Box>
 
                     {runResult && (
-                      <Chip
-                        label={runResult.status}
-                        size="small"
-                        color={runResult.status === 'completed' ? 'success' : runResult.status === 'failed' ? 'error' : 'info'}
-                        sx={{ mt: 1 }}
-                      />
+                      <StatusChip status={runResult.status} />
                     )}
 
                     <Collapse in={expanded}>

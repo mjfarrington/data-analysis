@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, ConfigDict
 # ─────────────────────────────────────────────────────────────────────────────
 class ExtractConfig(BaseModel):
     # Source selector
-    source_type: str = "grpc"  # grpc | jdbc | datawarehouse | json | csv
+    source_type: str = "datawarehouse"  # jdbc | datawarehouse | json | csv
 
     # Unified application list — used by ALL source types.
     # Each entry: {"name": "<display name>", "id": "<app_id>"}
@@ -64,12 +64,22 @@ class ExtractConfig(BaseModel):
     job_name: Optional[str] = None
 
 
+class TransformStep(BaseModel):
+    """One step in a canvas-derived transform pipeline."""
+    node_id: str = ""
+    node_type: str  # filter | sort | aggregate | lookup | join | sql_transform
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
 class TransformConfig(BaseModel):
+    # Legacy simple transforms (still applied first for backward compatibility)
     filters: dict[str, Any] = Field(default_factory=dict)
     drop_columns: list[str] = Field(default_factory=list)
     rename_columns: dict[str, str] = Field(default_factory=dict)
-    dedup: bool = True
-    dedup_keys: list[str] = Field(default_factory=lambda: ["id"])
+    dedup: bool = False
+    dedup_keys: list[str] = Field(default_factory=list)
+    # Canvas-derived ordered transform pipeline (applied after legacy transforms)
+    transforms_pipeline: list[TransformStep] = Field(default_factory=list)
 
 
 class LoadConfig(BaseModel):
@@ -96,6 +106,7 @@ class PipelineBase(BaseModel):
     extract_config: ExtractConfig = Field(default_factory=ExtractConfig)
     transform_config: TransformConfig = Field(default_factory=TransformConfig)
     load_config: LoadConfig = Field(default_factory=LoadConfig)
+    canvas_config: Optional[dict] = Field(default_factory=dict)
     schedule: Optional[str] = None
     schedule_enabled: bool = False
 
@@ -112,6 +123,7 @@ class PipelineUpdate(BaseModel):
     extract_config: Optional[ExtractConfig] = None
     transform_config: Optional[TransformConfig] = None
     load_config: Optional[LoadConfig] = None
+    canvas_config: Optional[dict] = None
     schedule: Optional[str] = None
     schedule_enabled: Optional[bool] = None
 
@@ -190,7 +202,9 @@ class RunStepSummary(BaseModel):
     id: int
     run_id: int
     step_order: int
-    step_type: str           # extract | transform | load
+    step_type: str           # "extract", "load", or any canvas node_type
+    step_label: Optional[str] = None
+    parent_step_id: Optional[int] = None
     status: str              # pending | running | completed | failed | cancelled | skipped
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
@@ -310,8 +324,10 @@ class ErrorRecord(BaseModel):
 # Notebook file schemas
 # ─────────────────────────────────────────────────────────────────────────────
 class NotebookCell(BaseModel):
+    id: Optional[str] = None
     type: str = "code"   # "code" | "markdown"
-    source: str = ""
+    content: str = ""
+    language: Optional[str] = None  # explicit override; None = auto-detect
 
 
 class NotebookFileBase(BaseModel):
@@ -655,3 +671,62 @@ class DictionaryOut(DictionaryBase):
     created_at: datetime
     updated_at: datetime
     entries: list[DictionaryEntryOut] = []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metadata Catalogue schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+COLUMN_TYPES = [
+    "string", "integer", "long", "float", "double",
+    "decimal", "date", "datetime", "boolean", "binary",
+]
+
+
+class CatalogueColumnBase(BaseModel):
+    name: str
+    data_type: str = "string"
+    nullable: bool = True
+    description: Optional[str] = None
+    position: int = 0
+
+
+class CatalogueColumnCreate(CatalogueColumnBase):
+    pass
+
+
+class CatalogueColumnUpdate(BaseModel):
+    name: Optional[str] = None
+    data_type: Optional[str] = None
+    nullable: Optional[bool] = None
+    description: Optional[str] = None
+    position: Optional[int] = None
+
+
+class CatalogueColumnOut(CatalogueColumnBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    catalogue_id: int
+    created_at: datetime
+
+
+class CatalogueBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+class CatalogueCreate(CatalogueBase):
+    pass
+
+
+class CatalogueUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class CatalogueOut(CatalogueBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    columns: list[CatalogueColumnOut] = []

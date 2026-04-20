@@ -67,6 +67,166 @@ async def _push_log(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Canvas transform pipeline executor
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _execute_transform_step(
+    records: list[dict],
+    step_type: str,
+    config: dict,
+    lookup_tables: Optional[dict[int, dict[str, str]]] = None,
+) -> tuple[list[dict], str]:
+    """Execute one canvas transform node. Returns (records, summary_message)."""
+    if not records:
+        return records, f"[{step_type}] 0 records in — skipped"
+
+    n_in = len(records)
+
+    if step_type == "filter":
+        conditions: list[dict] = config.get("conditions", [])
+        logic = (config.get("logic") or "AND").upper()
+        result = []
+        for r in records:
+            evals: list[bool] = []
+            for cond in conditions:
+                col = cond.get("column", "")
+                op  = cond.get("operator", "=")
+                val = str(cond.get("value", ""))
+                raw = r.get(col)
+                rv  = str(raw) if raw is not None else ""
+                try:
+                    if op == "=":         evals.append(rv == val)
+                    elif op == "!=":      evals.append(rv != val)
+                    elif op == ">":       evals.append(float(rv) > float(val))
+                    elif op == "<":       evals.append(float(rv) < float(val))
+                    elif op == ">=":      evals.append(float(rv) >= float(val))
+                    elif op == "<=":      evals.append(float(rv) <= float(val))
+                    elif op == "LIKE":    evals.append(val.replace("%", "").lower() in rv.lower())
+                    elif op == "IN":      evals.append(rv in {v.strip() for v in val.split(",")})
+                    elif op == "IS NULL": evals.append(raw is None or rv == "")
+                    else:                 evals.append(True)
+                except (ValueError, TypeError):
+                    evals.append(False)
+            keep = (all(evals) if evals else True) if logic == "AND" else (any(evals) if evals else True)
+            if keep:
+                result.append(r)
+        dropped = n_in - len(result)
+        return result, f"[filter] {n_in:,} → {len(result):,} rows ({dropped:,} removed, logic={logic})"
+
+    elif step_type == "sort":
+        columns: list[dict] = config.get("columns", [])
+        for s in reversed(columns):
+            col  = s.get("column", "")
+            desc = (s.get("direction") or "asc").lower() == "desc"
+
+            def _key(r: dict, c: str = col) -> tuple:
+                v = r.get(c)
+                if v is None:
+                    return (1, "")
+                try:
+                    return (0, float(v))
+                except (ValueError, TypeError):
+                    return (0, str(v).lower())
+
+            records = sorted(records, key=_key, reverse=desc)
+        col_names = ", ".join(f"{s.get('column')} {'↓' if (s.get('direction','asc')=='desc') else '↑'}" for s in columns)
+        return records, f"[sort] {n_in:,} rows sorted by {col_names or '—'}"
+
+    elif step_type == "aggregate":
+        group_by: list[str] = config.get("group_by", [])
+        aggregations: list[dict] = config.get("aggregations", [])
+        if not aggregations:
+            return records, f"[aggregate] no aggregations configured — skipped"
+        import pandas as pd
+        df = pd.DataFrame(records)
+        if not group_by:
+            # Global aggregation across all rows
+            row: dict = {}
+            for agg in aggregations:
+                col   = agg.get("column", "")
+                fn    = (agg.get("function") or "sum").lower()
+                alias = agg.get("alias") or col
+                if col not in df.columns:
+                    continue
+                try:
+                    num = pd.to_numeric(df[col], errors="coerce")
+                    if fn == "sum":             row[alias] = float(num.sum())
+                    elif fn in ("avg", "mean"): row[alias] = float(num.mean())
+                    elif fn == "count":         row[alias] = int(df[col].count())
+                    elif fn == "min":           row[alias] = num.min()
+                    elif fn == "max":           row[alias] = num.max()
+                    elif fn == "first":         row[alias] = df[col].iloc[0] if len(df) > 0 else None
+                except Exception:
+                    pass
+            result_rows = [row] if row else records
+            return result_rows, f"[aggregate] {n_in:,} rows → 1 row (global)"
+        else:
+            valid_gb = [c for c in group_by if c in df.columns]
+            if not valid_gb:
+                return records, f"[aggregate] group_by columns not found in data — skipped"
+            agg_dict: dict[str, str] = {}
+            renames: dict[str, str] = {}
+            fn_map = {"avg": "mean", "average": "mean"}
+            for agg in aggregations:
+                col   = agg.get("column", "")
+                fn    = (agg.get("function") or "sum").lower()
+                alias = agg.get("alias") or col
+                if col in df.columns:
+                    agg_dict[col] = fn_map.get(fn, fn)
+                    renames[col]  = alias
+            if not agg_dict:
+                return records, f"[aggregate] no valid columns — skipped"
+            try:
+                grouped = df.groupby(valid_gb).agg(agg_dict).reset_index()
+                grouped = grouped.rename(columns=renames)
+                result_rows = grouped.to_dict(orient="records")
+                return result_rows, f"[aggregate] {n_in:,} → {len(result_rows):,} groups by {valid_gb}"
+            except Exception as exc:
+                return records, f"[aggregate] failed: {exc} — skipped"
+
+    elif step_type == "lookup":
+        dict_id_raw = config.get("dict_id")
+        match_col = config.get("match_column", "")
+        out_col   = config.get("output_column", "")
+        default   = config.get("default_value", "")
+        if not dict_id_raw or not match_col or not out_col:
+            return records, f"[lookup] incomplete config — skipped"
+        try:
+            dict_id = int(dict_id_raw)
+        except (ValueError, TypeError):
+            return records, f"[lookup] invalid dict_id — skipped"
+        lut = (lookup_tables or {}).get(dict_id, {})
+        if not lut:
+            return records, f"[lookup] dict {dict_id} not found or empty — skipped"
+        hits = 0
+        for r in records:
+            key  = str(r.get(match_col, ""))
+            mapped = lut.get(key)
+            if mapped is not None:
+                hits += 1
+            r[out_col] = mapped if mapped is not None else default
+        return records, f"[lookup] {hits:,}/{n_in:,} rows matched dict {dict_id} → '{out_col}'"
+
+    elif step_type in ("join", "sql_transform", "notebook_transform"):
+        return records, f"[{step_type}] not supported in current execution mode — skipped"
+
+    return records, f"[{step_type}] unknown type — skipped"
+
+
+def _execute_transform_pipeline(
+    records: list[dict],
+    steps: list,
+    lookup_tables: Optional[dict[int, dict[str, str]]] = None,
+) -> tuple[list[dict], list[str]]:
+    """Apply an ordered list of TransformStep objects. Returns (records, log_messages)."""
+    messages: list[str] = []
+    for step in steps:
+        records, msg = _execute_transform_step(records, step.node_type, step.config, lookup_tables)
+        messages.append(msg)
+    return records, messages
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Transform
 # ─────────────────────────────────────────────────────────────────────────────
 def _apply_transforms(records: list[dict], cfg: TransformConfig) -> list[dict]:
@@ -259,7 +419,9 @@ def _read_jdbc_sync(
             f"SELECT * FROM ({stripped}) AS _etl_src "
             f"WHERE {date_column} = :biz_date"
         )
-        params["biz_date"] = date_str
+        # Normalise to ISO (YYYY-MM-DD) for broadest DB compatibility
+        d_norm = date_str.replace("-", "").replace("/", "")
+        params["biz_date"] = f"{d_norm[:4]}-{d_norm[4:6]}-{d_norm[6:8]}" if len(d_norm) == 8 else date_str
 
     with engine.connect() as conn:
         df = pd.read_sql(text(query), conn, params=params)
@@ -580,17 +742,22 @@ def _chunk_records(records: list[dict], chunk_size: int) -> list[list[dict]]:
 # Date list helper
 # ─────────────────────────────────────────────────────────────────────────────
 def _resolve_dates(cfg: ExtractConfig, business_date: Optional[str] = None) -> list[str]:
-    dates: list[str] = list(cfg.dates or [])
+    def _compact(s: str) -> str:
+        """Normalise any date string to compact YYYYMMDD (strip dashes/slashes)."""
+        return s.replace("-", "").replace("/", "")
+
+    dates: list[str] = [_compact(d) for d in (cfg.dates or [])]
     if not dates and cfg.date_from and cfg.date_to:
         from datetime import date, timedelta as td
         d = date.fromisoformat(cfg.date_from)
         end = date.fromisoformat(cfg.date_to)
         while d <= end:
-            dates.append(d.isoformat())
+            dates.append(d.strftime("%Y%m%d"))
             d += td(days=1)
     if not dates:
         # Prefer the business_date from execution context; fall back to today
-        dates = [business_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")]
+        raw = business_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        dates = [_compact(raw)]
     return dates
 
 
@@ -648,36 +815,54 @@ async def execute_pipeline(
         await log("Pipeline started", step="init")
         await log(f"Source: {extract_cfg.source_type.upper()}", step="init")
 
-        # ── Initialise per-step run tracking rows ─────────────────────────────
-        step_rows: dict[StepType, RunStep] = {}
-        for order, stype in enumerate([StepType.EXTRACT, StepType.TRANSFORM, StepType.LOAD]):
-            rs = RunStep(
+        # ── Initialise per-node run tracking rows ────────────────────────────
+        # Build the step list from the actual canvas pipeline:
+        #   extract → each transform node (filter/sort/…) → load
+        _LABEL_MAP = {
+            "filter": "Filter", "join": "Join", "sort": "Sort",
+            "lookup": "Lookup", "sql_transform": "SQL Transform",
+            "aggregate": "Aggregate", "notebook_transform": "Notebook Transform",
+        }
+        _step_specs: list[tuple[str, str, str]] = []  # (key, step_type, label)
+        _step_specs.append(("extract", "extract", "Extract"))
+        for _xs in transform_cfg.transforms_pipeline:
+            _xkey = f"xform_{_xs.node_id}" if getattr(_xs, 'node_id', None) else f"xform_{_xs.node_type}"
+            _step_specs.append((_xkey, _xs.node_type, _LABEL_MAP.get(_xs.node_type, _xs.node_type.replace('_', ' ').title())))
+        _step_specs.append(("load", "load", "Load"))
+
+        step_rows: dict[str, RunStep] = {}
+        for _order, (_key, _stype, _label) in enumerate(_step_specs):
+            _rs = RunStep(
                 run_id=run_id,
-                step_order=order,
-                step_type=stype,
+                step_order=_order,
+                step_type=_stype,
+                step_label=_label,
                 status=RunStatus.PENDING,
             )
-            db.add(rs)
-            step_rows[stype] = rs
+            db.add(_rs)
+            step_rows[_key] = _rs
+        await db.flush()   # populate .id fields before creating children
         await db.commit()
 
-        # Helpers to transition step status (idempotent for RUNNING transition)
-        _step_started: set[StepType] = set()
+        # Counter for dynamically inserted step rows (app/chunk); starts after static steps
+        _dynamic_order = len(_step_specs)
 
-        async def _begin_step(stype: StepType) -> None:
-            if stype in _step_started:
+        # Helpers to transition step status (idempotent for RUNNING transition)
+        _step_started: set[str] = set()
+
+        async def _begin_step(key: str) -> None:
+            if key in _step_started:
                 return
-            _step_started.add(stype)
-            rs = step_rows[stype]
+            _step_started.add(key)
+            rs = step_rows[key]
             rs.status = RunStatus.RUNNING
             rs.started_at = datetime.now(timezone.utc)
             await db.commit()
-            # Broadcast step status change via log broadcast so live consumers see it
             try:
                 _log_broadcast.put_nowait({
                     "run_id": run_id,
                     "step_update": {
-                        "step_type": stype.value,
+                        "step_type": rs.step_type,
                         "status": RunStatus.RUNNING.value,
                         "started_at": rs.started_at.isoformat(),
                     },
@@ -686,13 +871,13 @@ async def execute_pipeline(
                 pass
 
         async def _finish_step(
-            stype: StepType,
+            key: str,
             status: RunStatus,
             records_in: int = 0,
             records_out: int = 0,
             error_message: Optional[str] = None,
         ) -> None:
-            rs = step_rows[stype]
+            rs = step_rows[key]
             rs.status = status
             rs.finished_at = datetime.now(timezone.utc)
             if rs.started_at:
@@ -719,6 +904,31 @@ async def execute_pipeline(
         rows_per_seg = extract_cfg.rows_per_segment
         job_name = (extract_cfg.job_name or "PIPELINE").strip() or "PIPELINE"
 
+        # Pre-load any dictionaries needed by lookup steps
+        lookup_tables: dict[int, dict[str, str]] = {}
+        lookup_steps = [s for s in transform_cfg.transforms_pipeline if s.node_type == "lookup"]
+        for step in lookup_steps:
+            dict_id_raw = step.config.get("dict_id")
+            if not dict_id_raw:
+                continue
+            try:
+                dict_id = int(dict_id_raw)
+            except (ValueError, TypeError):
+                continue
+            if dict_id in lookup_tables:
+                continue
+            try:
+                from app.models.etl import Dictionary, DictionaryEntry
+                dict_obj = await db.get(Dictionary, dict_id)
+                if dict_obj:
+                    from sqlalchemy import select
+                    rows = await db.execute(select(DictionaryEntry).where(DictionaryEntry.dictionary_id == dict_id))
+                    entries = rows.scalars().all()
+                    lookup_tables[dict_id] = {str(e.key): str(e.value) for e in entries}
+                    await log(f"Loaded lookup dict {dict_id}: {len(lookup_tables[dict_id])} entries", step="init")
+            except Exception as exc:
+                await log(f"Could not load lookup dict {dict_id}: {exc}", level="WARN", step="init")
+
         total_extracted = 0
         total_transformed = 0
         total_loaded = 0
@@ -734,23 +944,44 @@ async def execute_pipeline(
                 if str(a.get("id", "")).strip()
             ] or [(fallback_app_id, "")]
 
+            # Start the single extract parent step before any app iterations
+            await _begin_step("extract")
+
             for app_id, app_name in app_list:
+                # ── Create an app-level step (child of extract) ─────────────────
+                _app_key = f"app_{app_id}"
+                _app_label = app_name.strip() if app_name and app_name.strip() else str(app_id)
+                _app_rs = RunStep(
+                    run_id=run_id,
+                    step_order=_dynamic_order,
+                    step_type="app",
+                    step_label=_app_label,
+                    parent_step_id=step_rows["extract"].id,
+                    status=RunStatus.RUNNING,
+                    started_at=datetime.now(timezone.utc),
+                )
+                _dynamic_order += 1
+                db.add(_app_rs)
+                await db.flush()   # populate .id so chunks can reference it
+                await db.commit()  # visible to API polls immediately
+                step_rows[_app_key] = _app_rs
+
+                _app_extracted = 0
 
                 for date_str in dates:
                     await log(
                         f"Extracting {source.upper()} date={date_str}"
-                        + (f" app={app_name or app_id}" if app_id or app_name else ""),
+                        + (f" app={_app_label}" if app_id else ""),
                         step="extract",
                         extra={"date": date_str, "source": source},
                     )
-                    await _begin_step(StepType.EXTRACT)
 
                     if source == "jdbc":
                         all_records = await _extract_jdbc(
                             extract_cfg, date_str, log, db,
                             business_date=business_date, app_id=app_id,
                         )
-                        _dw_segment_delay = 0.0
+                        _dw_segment_delay = 5.0  # simulate processing time per chunk
                     elif source == "datawarehouse":
                         all_records, _dw_segment_delay = await _extract_datawarehouse(
                             extract_cfg, date_str, log, db,
@@ -758,17 +989,23 @@ async def execute_pipeline(
                             rows_per_segment=rows_per_seg,
                         )
                     else:
+                        if source not in ("csv", "json"):
+                            raise ValueError(
+                                f"Source type '{source}' is not supported. "
+                                "Please edit the pipeline and select a valid source (JDBC, DataWarehouse, CSV or JSON)."
+                            )
                         all_records = await _extract_file(extract_cfg, log)
                         _dw_segment_delay = 0.0
 
                     total_extracted += len(all_records)
+                    _app_extracted += len(all_records)
                     run.records_extracted = total_extracted
 
                     chunks = _chunk_records(all_records, rows_per_seg)
                     n_segs = len(chunks)
 
                     await log(
-                        f"  {len(all_records):,} records → {n_segs} segment"
+                        f"  {len(all_records):,} records → {n_segs} chunk"
                         f"{'s' if n_segs != 1 else ''} of {rows_per_seg:,} rows",
                         step="extract",
                         extra={"total_records": len(all_records), "segments": n_segs},
@@ -778,8 +1015,23 @@ async def execute_pipeline(
                         await log("  No records — skipping load", level="WARN", step="load")
                         continue
 
-                    _seg_delay = _dw_segment_delay if source == "datawarehouse" else 0.0
+                    _seg_delay = _dw_segment_delay
                     for seg_idx, chunk in enumerate(chunks):
+                        _ckey = f"chunk_{app_id}_{seg_idx + 1}"
+                        # Create chunk step RUNNING right now — truly dynamic, one at a time
+                        _crs = RunStep(
+                            run_id=run_id,
+                            step_order=_dynamic_order,
+                            step_type="chunk",
+                            step_label=f"Chunk {seg_idx + 1}",
+                            parent_step_id=_app_rs.id,
+                            status=RunStatus.RUNNING,
+                            started_at=datetime.now(timezone.utc),
+                        )
+                        _dynamic_order += 1
+                        db.add(_crs)
+                        await db.flush()  # get .id before processing
+                        step_rows[_ckey] = _crs
                         job = ExtractJob(
                             run_id=run_id,
                             application_id=app_id,
@@ -790,21 +1042,33 @@ async def execute_pipeline(
                             started_at=datetime.now(timezone.utc),
                         )
                         db.add(job)
-                        await db.commit()  # visible as RUNNING immediately
+                        await db.commit()  # chunk step + job visible immediately
                         if _seg_delay:
                             await log(
-                                f"  Processing segment {seg_idx + 1}/{n_segs}…",
-                                step="load",
+                                f"  Chunk {seg_idx + 1}/{n_segs}: {len(chunk):,} records"
+                                + (f" — waiting {_seg_delay:.0f}s…" if _seg_delay else ""),
+                                step="extract",
                             )
                             await asyncio.sleep(_seg_delay)
                         try:
-                            await _begin_step(StepType.TRANSFORM)
+                            # Apply legacy simple transforms first
                             transformed = _apply_transforms(chunk, transform_cfg)
+                            # Execute each canvas transform node as its own tracked step
+                            if transform_cfg.transforms_pipeline:
+                                for _xs in transform_cfg.transforms_pipeline:
+                                    _xkey = f"xform_{_xs.node_id}" if getattr(_xs, 'node_id', None) else f"xform_{_xs.node_type}"
+                                    await _begin_step(_xkey)
+                                    n_before = len(transformed)
+                                    transformed, xmsg = _execute_transform_step(
+                                        transformed, _xs.node_type, _xs.config, lookup_tables
+                                    )
+                                    await log(f"  {xmsg}", step=_xs.node_type)
+                                    await _finish_step(_xkey, RunStatus.COMPLETED, records_in=n_before, records_out=len(transformed))
                             total_transformed += len(transformed)
                             run.records_transformed = total_transformed
                             output_path = ""
                             if transformed:
-                                await _begin_step(StepType.LOAD)
+                                await _begin_step("load")
                                 output_path = await _load_segment(
                                     transformed, app_id, date_str, seg_idx, load_cfg, log, job_name=job_name
                                 )
@@ -823,16 +1087,14 @@ async def execute_pipeline(
                                 step="load",
                                 extra={"segment": seg_idx, "records": len(transformed)},
                             )
+                            await _finish_step(_ckey, RunStatus.COMPLETED, records_in=len(chunk), records_out=len(transformed))
                         except Exception as exc:
                             tb = traceback.format_exc()
                             job.status = RunStatus.FAILED
                             job.error_message = str(exc)
                             job.finished_at = datetime.now(timezone.utc)
-                            await log(
-                                f"  seg={seg_idx} FAILED: {exc}",
-                                level="ERROR",
-                                step="load",
-                            )
+                            await log(f"  seg={seg_idx} FAILED: {exc}", level="ERROR", step="load")
+                            await _finish_step(_ckey, RunStatus.FAILED, error_message=str(exc))
                             db.add(ServiceError(
                                 service="etl_engine",
                                 level="ERROR",
@@ -856,6 +1118,10 @@ async def execute_pipeline(
                         except Exception as exc:
                             await log(f"  Spark table skipped: {exc}", level="WARN")
 
+                # Finish app step after all dates for this app are done
+                await _finish_step(_app_key, RunStatus.COMPLETED,
+                                   records_in=0, records_out=_app_extracted)
+
         run.status = RunStatus.COMPLETED
         run.finished_at = datetime.now(timezone.utc)
         if run.started_at:
@@ -867,17 +1133,16 @@ async def execute_pipeline(
             step="done",
         )
         # Finalise step statuses — any step not yet started is skipped (e.g. empty source)
-        for stype, records_in, records_out in [
-            (StepType.EXTRACT, 0, total_extracted),
-            (StepType.TRANSFORM, total_extracted, total_transformed),
-            (StepType.LOAD, total_transformed, total_loaded),
-        ]:
-            rs = step_rows[stype]
-            if rs.status in (RunStatus.RUNNING,):
-                await _finish_step(stype, RunStatus.COMPLETED, records_in=records_in, records_out=records_out)
-            elif rs.status == RunStatus.PENDING:
-                # Never started (e.g. no data)
-                rs.status = RunStatus.SKIPPED
+        for _key, _rs in step_rows.items():
+            if _rs.status == RunStatus.RUNNING:
+                if _key == "load":
+                    await _finish_step(_key, RunStatus.COMPLETED, records_in=total_transformed, records_out=total_loaded)
+                elif _key == "extract":
+                    await _finish_step(_key, RunStatus.COMPLETED, records_in=0, records_out=total_extracted)
+                else:
+                    await _finish_step(_key, RunStatus.COMPLETED)
+            elif _rs.status == RunStatus.PENDING:
+                _rs.status = RunStatus.SKIPPED
         await db.commit()
 
     except asyncio.CancelledError:
@@ -885,13 +1150,13 @@ async def execute_pipeline(
         run.finished_at = datetime.now(timezone.utc)
         await log("Pipeline cancelled", level="WARN", step="done")
         # Mark all in-progress or pending steps as cancelled
-        for stype in [StepType.EXTRACT, StepType.TRANSFORM, StepType.LOAD]:
-            rs = step_rows.get(stype)
-            if rs and rs.status in (RunStatus.RUNNING, RunStatus.PENDING):
-                rs.status = RunStatus.CANCELLED
-                if rs.status == RunStatus.RUNNING and rs.started_at:
-                    rs.finished_at = datetime.now(timezone.utc)
-                    rs.duration_seconds = (rs.finished_at - rs.started_at).total_seconds()
+        for _rs in step_rows.values():
+            if _rs.status in (RunStatus.RUNNING, RunStatus.PENDING):
+                was_running = _rs.status == RunStatus.RUNNING
+                _rs.status = RunStatus.CANCELLED
+                if was_running and _rs.started_at:
+                    _rs.finished_at = datetime.now(timezone.utc)
+                    _rs.duration_seconds = (_rs.finished_at - _rs.started_at).total_seconds()
         await db.commit()
         raise
 
@@ -903,13 +1168,11 @@ async def execute_pipeline(
         run.error_traceback = tb
         await log(f"Pipeline FAILED: {exc}", level="ERROR", step="done")
         # Mark the currently-running step as failed; pending steps as skipped
-        for stype in [StepType.EXTRACT, StepType.TRANSFORM, StepType.LOAD]:
-            rs = step_rows.get(stype)
-            if rs:
-                if rs.status == RunStatus.RUNNING:
-                    await _finish_step(stype, RunStatus.FAILED, error_message=str(exc))
-                elif rs.status == RunStatus.PENDING:
-                    rs.status = RunStatus.SKIPPED
+        for _key, _rs in step_rows.items():
+            if _rs.status == RunStatus.RUNNING:
+                await _finish_step(_key, RunStatus.FAILED, error_message=str(exc))
+            elif _rs.status == RunStatus.PENDING:
+                _rs.status = RunStatus.SKIPPED
         db.add(ServiceError(
             service="etl_engine",
             level="ERROR",
@@ -924,8 +1187,26 @@ async def execute_pipeline(
 
 
 async def cancel_run(run_id: int) -> bool:
+    # First try to cancel the live asyncio task
     task = _active_runs.get(run_id)
     if task and not task.done():
         task.cancel()
         return True
-    return False
+
+    # Fall back: force-cancel directly in the DB (handles backend restarts /
+    # tasks that died without cleaning up their status).
+    from app.core.database import AsyncSessionLocal
+    from sqlalchemy import update, and_
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            update(ETLRun)
+            .where(and_(ETLRun.id == run_id, ETLRun.status == RunStatus.RUNNING))
+            .values(status=RunStatus.CANCELLED, finished_at=datetime.now(timezone.utc))
+        )
+        await db.execute(
+            update(RunStep)
+            .where(and_(RunStep.run_id == run_id, RunStep.status == RunStatus.RUNNING))
+            .values(status=RunStatus.CANCELLED, finished_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
+        return result.rowcount > 0

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import {
-  Box, Typography, Grid, Card, CardContent, CardActions, Chip, Button,
+  Box, Typography, Grid, Card, CardContent, CardActions, Button,
   CircularProgress, alpha, Tooltip, Collapse, IconButton,
   Divider, Table, TableHead, TableRow, TableCell, TableBody, Alert,
   LinearProgress,
@@ -11,6 +11,7 @@ import {
 } from '@mui/icons-material'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { servicesApi, ServiceInfo, SparkTestItem } from '../api/client'
+import StatusChip from '../components/StatusChip'
 
 function statusColor(status: string): string {
   switch (status.toLowerCase()) {
@@ -131,8 +132,7 @@ function ServiceCard({ service }: { service: ServiceInfo }) {
         </Box>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', mb: 0.5 }}>
-          <Chip label={service.status} size="small"
-            sx={{ bgcolor: alpha(color, 0.1), color, border: `1px solid ${alpha(color, 0.35)}`, fontWeight: 700, fontSize: '0.7rem', height: 20 }} />
+          <StatusChip status={service.status} />
           {service.message && (
             <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1 }}>{service.message}</Typography>
           )}
@@ -165,14 +165,6 @@ function ServiceCard({ service }: { service: ServiceInfo }) {
       </CardActions>
     </Card>
   )
-}
-
-function testItemColor(status: string) {
-  switch (status) {
-    case 'passed': return '#3fb950'
-    case 'failed': return '#f85149'
-    default: return '#d29922'
-  }
 }
 
 function SparkTestPanel() {
@@ -238,13 +230,11 @@ function SparkTestPanel() {
               </TableHead>
               <TableBody>
                 {testMut.data.tests.map((item: SparkTestItem) => {
-                  const c = testItemColor(item.status)
                   return (
                     <TableRow key={item.name}>
                       <TableCell sx={{ fontWeight: 500, fontFamily: 'monospace', fontSize: '0.8rem' }}>{item.name}</TableCell>
                       <TableCell>
-                        <Chip label={item.status} size="small"
-                          sx={{ bgcolor: alpha(c, 0.1), color: c, border: `1px solid ${alpha(c, 0.3)}`, fontWeight: 700, fontSize: '0.68rem', height: 18 }} />
+                        <StatusChip status={item.status} />
                       </TableCell>
                       <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem', color: 'text.secondary' }}>
                         {item.duration_ms.toFixed(0)}ms

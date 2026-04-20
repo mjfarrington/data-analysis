@@ -8,6 +8,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions,
 } from '@mui/material'
 import {
+  Dashboard as DashboardIcon,
   AccountTree as PipelinesIcon,
   Schema as SchemaIcon,
   Code as CodeIcon,
@@ -26,6 +27,9 @@ import {
   Brightness4,
   Brightness7,
   Water,
+  Cable as CableIcon,
+  FolderOpen as FolderOpenIcon,
+  TableChart as TableChartIcon,
 } from '@mui/icons-material'
 import { useQuery } from '@tanstack/react-query'
 import { servicesApi, contextApi } from '../api/client'
@@ -48,10 +52,17 @@ interface NavSection {
 
 const NAV: NavSection[] = [
   {
+    section: 'Overview',
+    items: [
+      { label: 'Dashboard', path: '/dashboard', icon: <DashboardIcon fontSize="small" /> },
+    ],
+  },
+  {
     section: 'Build',
     items: [
       { label: 'Pipelines', path: '/pipelines', icon: <PipelinesIcon fontSize="small" /> },
       { label: 'Workflows', path: '/workflows', icon: <SchemaIcon fontSize="small" /> },
+      { label: 'Transform Jobs', path: '/transform-jobs', icon: <Water fontSize="small" /> },
     ],
   },
   {
@@ -60,12 +71,20 @@ const NAV: NavSection[] = [
       { label: 'SQL Files', path: '/sql-files', icon: <CodeIcon fontSize="small" /> },
       { label: 'Notebooks', path: '/notebooks', icon: <LibraryBooksIcon fontSize="small" /> },
       { label: 'Dictionaries', path: '/dictionaries', icon: <BookIcon fontSize="small" /> },
+      { label: 'Catalogues', path: '/catalogues', icon: <TableChartIcon fontSize="small" /> },
     ],
   },
   {
     section: 'Explore',
     items: [
       { label: 'Data Explorer', path: '/explorer', icon: <StorageIcon fontSize="small" /> },
+      { label: 'Data Browser',  path: '/data-browser', icon: <FolderOpenIcon fontSize="small" /> },
+    ],
+  },
+  {
+    section: 'Platform',
+    items: [
+      { label: 'Connections', path: '/connections', icon: <CableIcon fontSize="small" /> },
     ],
   },
   {

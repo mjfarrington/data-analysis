@@ -59,6 +59,73 @@ def _resolve_ns_prefix(ctx: ExecutionContext | None) -> str:
     return _DEFAULT_NS_PREFIX
 
 
+async def _apply_canvas_to_extract_cfg(
+    pipeline: "ETLPipeline",
+    base_cfg: "ExtractConfig",
+    db: AsyncSession,
+) -> "ExtractConfig":
+    """Read canvas nodes and override ExtractConfig with the actual visual configuration.
+
+    The canvas is the source of truth.  The stored extract_config is a legacy
+    field that may be stale.  This function reads:
+      - iterator node  → app list (from dictionary entries for selected_keys)
+      - jdbc_extract   → source_type, connection, SQL, chunk_size
+    """
+    from app.schemas.etl import ExtractConfig as _ExtractConfig
+    from sqlalchemy import select as _sel
+    canvas = pipeline.canvas_config or {}
+    nodes = canvas.get("nodes", [])
+    updates: dict = {}
+
+    for node in nodes:
+        data = node.get("data", {})
+        node_type = data.get("nodeType", "")
+        cfg = data.get("config", {})
+
+        if node_type == "iterator":
+            dict_id = cfg.get("dictionary_id")
+            selected_keys = [str(k) for k in (cfg.get("selected_keys") or []) if not str(k).isdigit()]
+            if dict_id and selected_keys:
+                from app.models.etl import DictionaryEntry
+                rows = await db.execute(
+                    _sel(DictionaryEntry)
+                    .where(DictionaryEntry.dictionary_id == int(dict_id))
+                    .where(DictionaryEntry.key.in_(selected_keys))
+                )
+                entries = rows.scalars().all()
+                # Preserve order of selected_keys
+                entry_map = {e.key: e for e in entries}
+                apps = [
+                    {"id": str(entry_map[k].key), "name": str(entry_map[k].value)}
+                    for k in selected_keys
+                    if k in entry_map
+                ]
+                if apps:
+                    updates["apps"] = apps
+
+        elif node_type == "jdbc_extract":
+            updates["source_type"] = "jdbc"
+            conn_id = cfg.get("connection_id")
+            if conn_id is not None:
+                updates["jdbc_connection_id"] = int(conn_id)
+            sql = cfg.get("sql")
+            if sql:
+                updates["jdbc_sql"] = sql
+            sql_file_id = cfg.get("sql_file_id")
+            if sql_file_id:
+                updates["jdbc_sql_file_id"] = int(sql_file_id)
+            chunk_size = cfg.get("chunk_size")
+            if chunk_size:
+                updates["rows_per_segment"] = int(chunk_size)
+            date_fmt = cfg.get("date_format")
+            if date_fmt:
+                updates["jdbc_date_var_format"] = date_fmt
+
+    if updates:
+        return base_cfg.model_copy(update=updates)
+    return base_cfg
+
+
 def _build_context_response(ctx: ExecutionContext) -> ExecutionContextResponse:
     derived = None
     if ctx.business_date:
@@ -182,6 +249,8 @@ async def trigger_run(
 
     from app.schemas.etl import ExtractConfig, TransformConfig, LoadConfig
     extract_cfg = body.extract_config or ExtractConfig(**(pipeline.extract_config or {}))
+    # Always merge canvas node configuration on top — canvas is source of truth
+    extract_cfg = await _apply_canvas_to_extract_cfg(pipeline, extract_cfg, db)
     transform_cfg = TransformConfig(**(pipeline.transform_config or {}))
     load_cfg = LoadConfig(**(pipeline.load_config or {}))
 
@@ -281,6 +350,36 @@ async def cancel_run_endpoint(run_id: int, db: AsyncSession = Depends(get_db)):
             detail="Run not active or already completed",
         )
     return {"message": f"Cancellation requested for run {run_id}"}
+
+
+@router.delete("/runs/{run_id}", status_code=204)
+async def delete_run(run_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ETLRun).where(ETLRun.id == run_id))
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status in (RunStatus.RUNNING, RunStatus.PENDING):
+        raise HTTPException(status_code=409, detail="Cannot delete an active run. Cancel it first.")
+    await db.delete(run)
+    await db.commit()
+
+
+@router.delete("/runs", status_code=200)
+async def clear_run_history(
+    pipeline_id: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete all non-active runs, optionally scoped to a pipeline."""
+    q = select(ETLRun).where(ETLRun.status.not_in([RunStatus.RUNNING, RunStatus.PENDING]))
+    if pipeline_id is not None:
+        q = q.where(ETLRun.pipeline_id == pipeline_id)
+    result = await db.execute(q)
+    runs = result.scalars().all()
+    count = len(runs)
+    for run in runs:
+        await db.delete(run)
+    await db.commit()
+    return {"deleted": count}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

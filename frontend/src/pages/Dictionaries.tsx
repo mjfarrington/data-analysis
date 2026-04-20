@@ -3,8 +3,8 @@ import {
   Box, Typography, Button, Table, TableHead, TableRow, TableCell,
   TableBody, TextField, List, ListItem, ListItemButton, ListItemText,
   Chip, Dialog, DialogTitle, DialogContent, DialogActions,
-  CircularProgress, IconButton, Tooltip, Alert, Divider,
-  useTheme, alpha,
+  CircularProgress, IconButton, Tooltip, Divider,
+  useTheme,
 } from '@mui/material'
 import { Add, Delete, Edit, Save, Close } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -22,6 +22,8 @@ export default function Dictionaries() {
   const [newDictOpen, setNewDictOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
+  const [newKeyLabel, setNewKeyLabel] = useState('Key')
+  const [newValueLabel, setNewValueLabel] = useState('Value')
   const [editingEntry, setEditingEntry] = useState<{ id: number | 'new'; data: EditingEntry } | null>(null)
 
   const { data: dicts = [], isLoading } = useQuery({
@@ -35,19 +37,14 @@ export default function Dictionaries() {
       qc.invalidateQueries({ queryKey: ['dictionaries'] })
       setSelected(dict)
       setNewDictOpen(false)
-      setNewName('')
-      setNewDesc('')
+      setNewName(''); setNewDesc(''); setNewKeyLabel('Key'); setNewValueLabel('Value')
     },
   })
 
   const updateDictMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: Partial<Dictionary> }) =>
       dictionariesApi.update(id, data),
-    onSuccess: (dict) => {
-      qc.invalidateQueries({ queryKey: ['dictionaries'] })
-      setSelected(dict)
-      setEditingEntry(null)
-    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['dictionaries'] }) },
   })
 
   const deleteDictMut = useMutation({
@@ -58,6 +55,30 @@ export default function Dictionaries() {
     },
   })
 
+  const addEntryMut = useMutation({
+    mutationFn: ({ dictId, data }: { dictId: number; data: { key: string; value: string } }) =>
+      dictionariesApi.addEntry(dictId, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dictionaries'] })
+      setEditingEntry(null)
+    },
+  })
+
+  const updateEntryMut = useMutation({
+    mutationFn: ({ dictId, entryId, data }: { dictId: number; entryId: number; data: { key?: string; value?: string } }) =>
+      dictionariesApi.updateEntry(dictId, entryId, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dictionaries'] })
+      setEditingEntry(null)
+    },
+  })
+
+  const deleteEntryMut = useMutation({
+    mutationFn: ({ dictId, entryId }: { dictId: number; entryId: number }) =>
+      dictionariesApi.deleteEntry(dictId, entryId),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['dictionaries'] }) },
+  })
+
   // Keep selected in sync with fresh data
   const currentDict = selected ? dicts.find(d => d.id === selected.id) ?? selected : null
 
@@ -65,24 +86,16 @@ export default function Dictionaries() {
     if (!currentDict || !editingEntry) return
     const { id, data } = editingEntry
     if (!data.key.trim()) return
-
-    let entries: DictionaryEntry[]
     if (id === 'new') {
-      entries = [...currentDict.entries, { id: Date.now(), key: data.key, value: data.value }]
+      addEntryMut.mutate({ dictId: currentDict.id, data: { key: data.key, value: data.value } })
     } else {
-      entries = currentDict.entries.map(e =>
-        e.id === id ? { ...e, key: data.key, value: data.value } : e
-      )
+      updateEntryMut.mutate({ dictId: currentDict.id, entryId: id, data: { key: data.key, value: data.value } })
     }
-    updateDictMut.mutate({ id: currentDict.id, data: { entries } })
   }
 
-  function deleteEntry(entryId: number) {
+  function deleteEntry(entry: DictionaryEntry) {
     if (!currentDict) return
-    updateDictMut.mutate({
-      id: currentDict.id,
-      data: { entries: currentDict.entries.filter(e => e.id !== entryId) },
-    })
+    deleteEntryMut.mutate({ dictId: currentDict.id, entryId: entry.id })
   }
 
   return (
@@ -156,6 +169,23 @@ export default function Dictionaries() {
               {currentDict.description && (
                 <Typography variant="body2" color="text.secondary">{currentDict.description}</Typography>
               )}
+              <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center' }}>
+                <Typography variant="caption" color="text.disabled" sx={{ mr: 0.25 }}>Columns:</Typography>
+                <TextField
+                  size="small"
+                  value={currentDict.key_label}
+                  onChange={e => updateDictMut.mutate({ id: currentDict.id, data: { key_label: e.target.value } })}
+                  inputProps={{ style: { fontSize: '0.72rem', padding: '2px 6px', fontFamily: 'monospace' } }}
+                  sx={{ width: 110 }}
+                />
+                <TextField
+                  size="small"
+                  value={currentDict.value_label}
+                  onChange={e => updateDictMut.mutate({ id: currentDict.id, data: { value_label: e.target.value } })}
+                  inputProps={{ style: { fontSize: '0.72rem', padding: '2px 6px', fontFamily: 'monospace' } }}
+                  sx={{ width: 110 }}
+                />
+              </Box>
             </Box>
             <Button
               size="small"
@@ -185,8 +215,8 @@ export default function Dictionaries() {
             <Table size="small" sx={{ bgcolor: 'background.paper', borderRadius: 1.5, overflow: 'hidden' }}>
               <TableHead>
                 <TableRow>
-                  <TableCell>Key</TableCell>
-                  <TableCell>Value</TableCell>
+                  <TableCell>{currentDict.key_label}</TableCell>
+                  <TableCell>{currentDict.value_label}</TableCell>
                   <TableCell width={80}>Actions</TableCell>
                 </TableRow>
               </TableHead>
@@ -236,7 +266,7 @@ export default function Dictionaries() {
                             <IconButton size="small" onClick={() => setEditingEntry({ id: entry.id, data: { key: entry.key, value: entry.value } })}>
                               <Edit fontSize="small" />
                             </IconButton>
-                            <IconButton size="small" color="error" onClick={() => deleteEntry(entry.id)}>
+                            <IconButton size="small" color="error" onClick={() => deleteEntry(entry)}>
                               <Delete fontSize="small" />
                             </IconButton>
                           </Box>
@@ -253,7 +283,7 @@ export default function Dictionaries() {
                         value={editingEntry.data.key}
                         onChange={e => setEditingEntry(prev => prev ? { ...prev, data: { ...prev.data, key: e.target.value } } : prev)}
                         size="small"
-                        placeholder="key"
+                        placeholder={currentDict.key_label.toLowerCase()}
                         autoFocus
                       />
                     </TableCell>
@@ -262,7 +292,7 @@ export default function Dictionaries() {
                         value={editingEntry.data.value}
                         onChange={e => setEditingEntry(prev => prev ? { ...prev, data: { ...prev.data, value: e.target.value } } : prev)}
                         size="small"
-                        placeholder="value"
+                        placeholder={currentDict.value_label.toLowerCase()}
                         fullWidth
                       />
                     </TableCell>
@@ -301,13 +331,20 @@ export default function Dictionaries() {
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '16px !important' }}>
           <TextField label="Name" value={newName} onChange={e => setNewName(e.target.value)} size="small" fullWidth autoFocus />
           <TextField label="Description" value={newDesc} onChange={e => setNewDesc(e.target.value)} size="small" fullWidth multiline rows={2} />
+          <Divider />
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <TextField label="Key Column Label" value={newKeyLabel} onChange={e => setNewKeyLabel(e.target.value)} size="small" fullWidth
+              helperText='e.g. "app_id"' />
+            <TextField label="Value Column Label" value={newValueLabel} onChange={e => setNewValueLabel(e.target.value)} size="small" fullWidth
+              helperText='e.g. "app_name"' />
+          </Box>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setNewDictOpen(false)}>Cancel</Button>
           <Button
             variant="contained"
             disabled={!newName.trim() || createDictMut.isPending}
-            onClick={() => createDictMut.mutate({ name: newName, description: newDesc, entries: [] })}
+            onClick={() => createDictMut.mutate({ name: newName, description: newDesc, key_label: newKeyLabel, value_label: newValueLabel, entries: [] })}
           >
             Create
           </Button>

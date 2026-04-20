@@ -104,6 +104,9 @@ class ETLPipeline(Base):
     # Load configuration  
     load_config: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
 
+    # Visual canvas state (set/read by the pipeline editor UI)
+    canvas_config: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+
     # Tags (list of strings stored as JSON)
     tags: Mapped[Optional[list]] = mapped_column(JSON, default=list)
 
@@ -216,20 +219,23 @@ class ExtractJob(Base):
 
 
 class RunStep(Base):
-    """Tracks the execution status of each logical step (extract / transform / load)
-    within a single ETL run.  Three rows are created per run — one per StepType —
-    and updated as the engine progresses through each phase."""
+    """Tracks the execution status of each pipeline step within a single ETL run.
+    Rows are created per canvas node (extract, each transform node, load) and updated
+    as the engine progresses through each phase."""
     __tablename__ = "run_steps"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     run_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("etl_runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # Ordering matches the execution sequence: 0=extract, 1=transform, 2=load
+    # Ordering matches the execution sequence
     step_order: Mapped[int] = mapped_column(Integer, nullable=False)
-    step_type: Mapped[str] = mapped_column(
-        SAEnum(StepType), nullable=False
-    )
+    # Free-form step type: "extract", "load", or any canvas node_type (filter, sort, …)
+    step_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Optional human-readable label (e.g. node label from canvas)
+    step_label: Mapped[Optional[str]] = mapped_column(String(200))
+    # Optional parent step id for tree hierarchy (app/chunk nesting under extract)
+    parent_step_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(
         SAEnum(RunStatus), default=RunStatus.PENDING, nullable=False
     )
@@ -505,3 +511,48 @@ class DictionaryEntry(Base):
     )
 
     dictionary: Mapped["Dictionary"] = relationship("Dictionary", back_populates="entries")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metadata Catalogue — named schema definitions with typed columns
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Catalogue(Base):
+    __tablename__ = "catalogues"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    columns: Mapped[list["CatalogueColumn"]] = relationship(
+        "CatalogueColumn", back_populates="catalogue",
+        cascade="all, delete-orphan", order_by="CatalogueColumn.position",
+    )
+
+
+class CatalogueColumn(Base):
+    __tablename__ = "catalogue_columns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    catalogue_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("catalogues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # string | integer | long | float | double | decimal | date | datetime | boolean | binary
+    data_type: Mapped[str] = mapped_column(String(50), nullable=False, default="string")
+    nullable: Mapped[bool] = mapped_column(Boolean, default=True)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    # Ordinal position (0-based) for display ordering
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    catalogue: Mapped["Catalogue"] = relationship("Catalogue", back_populates="columns")
+

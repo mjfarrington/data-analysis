@@ -2,16 +2,20 @@ import { useRef, useState } from 'react'
 import {
   alpha, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, FormControl, IconButton, InputLabel,
-  List, ListItem, ListItemButton, ListItemText, MenuItem, Paper, Select,
+  List, ListItem, ListItemButton, ListItemText, Menu, MenuItem, Paper, Select,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   TextField, Tooltip, Typography, useTheme,
 } from '@mui/material'
 import {
-  Add, Article, ArrowDownward, ArrowUpward, CheckCircleOutline, Code,
-  DataObject, DeleteOutline, Download, ErrorOutline, PlayArrow,
-  PlayCircleOutline, RestartAlt, Save,
+  Add, Article, ArrowDownward, ArrowUpward, CheckCircleOutlined, Code,
+  DataObject, DeleteOutlined, Download, Edit, ErrorOutlined, PlayArrow,
+  PlayCircleOutlined, RestartAlt, Save,
 } from '@mui/icons-material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import {
   CellOutput, DfPreview, ExportConfig, NotebookCell, NotebookFile, transformApi,
 } from '../api/client'
@@ -74,17 +78,17 @@ function CellOutputView({ out }: { out: CellOutput }) {
   return (
     <Box sx={{ borderTop: `1px solid ${theme.palette.divider}`, p: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
       {hasText && (
-        <Typography component="pre" sx={{ fontFamily: 'Consolas, monospace', fontSize: '0.78rem', color: 'text.secondary', m: 0, whiteSpace: 'pre-wrap' }}>
+        <Typography component="pre" sx={{ fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace', fontSize: '0.78rem', color: 'text.secondary', m: 0, whiteSpace: 'pre-wrap', letterSpacing: '0.01em', lineHeight: 1.65 }}>
           {out.stdout}
         </Typography>
       )}
       {hasError && (
         <Box sx={{ bgcolor: alpha('#f44336', 0.06), borderRadius: 1, p: 1, border: `1px solid ${alpha('#f44336', 0.3)}` }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
-            <ErrorOutline sx={{ fontSize: 14, color: 'error.main' }} />
+            <ErrorOutlined sx={{ fontSize: 14, color: 'error.main' }} />
             <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, color: 'error.main' }}>Error</Typography>
           </Box>
-          <Typography component="pre" sx={{ fontFamily: 'Consolas, monospace', fontSize: '0.75rem', color: 'error.dark', m: 0, whiteSpace: 'pre-wrap' }}>
+          <Typography component="pre" sx={{ fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace', fontSize: '0.75rem', color: 'error.dark', m: 0, whiteSpace: 'pre-wrap', letterSpacing: '0.01em', lineHeight: 1.65 }}>
             {out.error}
           </Typography>
         </Box>
@@ -107,6 +111,116 @@ function CellOutputView({ out }: { out: CellOutput }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // CellView
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Language detection for code cells
+// ─────────────────────────────────────────────────────────────────────────────
+const LANGUAGES: { value: string; label: string }[] = [
+  { value: 'python',     label: 'Python'     },
+  { value: 'sql',        label: 'SQL'        },
+  { value: 'json',       label: 'JSON'       },
+  { value: 'yaml',       label: 'YAML'       },
+  { value: 'bash',       label: 'Bash'       },
+  { value: 'javascript', label: 'JavaScript' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'text',       label: 'Plain text' },
+]
+
+function detectLanguage(content: string): string {
+  const t = content.trimStart()
+  if (!t) return 'python'
+  // JSON
+  if ((t.startsWith('{') || t.startsWith('[')) && /[{[][^]*[}\]]/.test(t)) return 'json'
+  // SQL keywords
+  if (/^(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|WITH|MERGE|EXPLAIN|TRUNCATE)\b/i.test(t)) return 'sql'
+  // YAML
+  if (/^[\w-]+:\s+\S/.test(t) || /^---\n/.test(t)) return 'yaml'
+  // Bash/shell
+  if (/^(#!\/usr\/bin\/env\s+\w+|#!\/bin\/(bash|sh|zsh)|echo |export |source |\$\()/.test(t)) return 'bash'
+  // JavaScript/TypeScript heuristic
+  if (/^(import |export |const |let |var |function |class |interface |type )\b/.test(t) && !/^#/.test(t)) {
+    return /:\s*(string|number|boolean|void|any)\b|<[A-Z]/.test(t) ? 'typescript' : 'javascript'
+  }
+  return 'python'
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MarkdownRenderer — renders markdown with GFM + syntax highlighting
+// ─────────────────────────────────────────────────────────────────────────────
+function MarkdownRenderer({ content }: { content: string }) {
+  const theme = useTheme()
+  const isDark = theme.palette.mode === 'dark'
+  return (
+    <Box
+      sx={{
+        px: 2.5, py: 1.5,
+        '& h1,& h2,& h3,& h4,& h5,& h6': {
+          mt: 1.5, mb: 0.75, fontWeight: 700, lineHeight: 1.3,
+          color: 'text.primary',
+          borderBottom: 1, borderColor: 'divider', pb: 0.5,
+        },
+        '& h1': { fontSize: '1.5rem' },
+        '& h2': { fontSize: '1.25rem' },
+        '& h3': { fontSize: '1.1rem' },
+        '& h4,& h5,& h6': { fontSize: '1rem' },
+        '& p': { mt: 0, mb: 1, lineHeight: 1.7, color: 'text.primary', fontSize: '0.9rem' },
+        '& ul,& ol': { pl: 3, mb: 1 },
+        '& li': { mb: 0.25, fontSize: '0.9rem', color: 'text.primary', lineHeight: 1.6 },
+        '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
+        '& blockquote': {
+          borderLeft: `3px solid`,
+          borderLeftColor: 'primary.main',
+          ml: 0, pl: 2, py: 0.25, my: 1,
+          color: 'text.secondary',
+          bgcolor: isDark ? alpha('#6366f1', 0.06) : alpha('#6366f1', 0.04),
+          borderRadius: '0 4px 4px 0',
+          '& p': { mb: 0 },
+        },
+        '& :not(pre) > code': {
+          fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
+          fontSize: '0.8rem',
+          px: 0.6, py: 0.15,
+          borderRadius: 0.5,
+          bgcolor: isDark ? alpha('#fff', 0.08) : alpha('#000', 0.06),
+          color: isDark ? '#e2b96b' : '#c0392b',
+        },
+        '& pre': { my: 1, borderRadius: 1.5, overflow: 'hidden', '& > div': { m: '0 !important', borderRadius: '6px !important' } },
+        '& table': { width: '100%', borderCollapse: 'collapse', mb: 1.5, fontSize: '0.85rem' },
+        '& th': { textAlign: 'left', fontWeight: 700, py: 0.75, px: 1.5, bgcolor: isDark ? alpha('#fff', 0.05) : alpha('#000', 0.04), borderBottom: 2, borderColor: 'divider' },
+        '& td': { py: 0.6, px: 1.5, borderBottom: 1, borderColor: 'divider' },
+        '& tr:last-child td': { borderBottom: 'none' },
+        '& hr': { border: 'none', borderTop: 1, borderColor: 'divider', my: 1.5 },
+        '& strong': { fontWeight: 700 },
+        '& em': { fontStyle: 'italic', color: 'text.secondary' },
+      }}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          code({ className, children, ...rest }) {
+            const match = /language-(\w+)/.exec(className || '')
+            const inline = !match
+            if (inline) {
+              return <code className={className} {...rest}>{children}</code>
+            }
+            return (
+              <SyntaxHighlighter
+                style={isDark ? oneDark : oneLight}
+                language={match[1]}
+                PreTag="div"
+                customStyle={{ margin: 0, borderRadius: 6, fontSize: '0.82rem' }}
+              >
+                {String(children).replace(/\n$/, '')}
+              </SyntaxHighlighter>
+            )
+          },
+        }}
+      >
+        {content || '*Empty markdown cell — click edit to add content*'}
+      </ReactMarkdown>
+    </Box>
+  )
+}
+
 interface CellViewProps {
   cell: NotebookCell
   output: CellOutput | null
@@ -123,12 +237,23 @@ interface CellViewProps {
 function CellView({ cell, output, running, onUpdate, onDelete, onMoveUp, onMoveDown, onRun, canMoveUp, canMoveDown }: CellViewProps) {
   const theme = useTheme()
   const textRef = useRef<HTMLTextAreaElement>(null)
+  const [mdEditing, setMdEditing] = useState(false)
+  const [codeEditing, setCodeEditing] = useState(false)
+  const [langAnchor, setLangAnchor] = useState<HTMLElement | null>(null)
   const lineCount = Math.max(3, cell.content.split('\n').length)
   const isError = output?.error != null
   const isOk = output && !isError
+  const isMarkdown = cell.type === 'markdown'
+  const resolvedLang = cell.language ?? detectLanguage(cell.content)
+  const langLabel = LANGUAGES.find(l => l.value === resolvedLang)?.label ?? resolvedLang
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); if (cell.type === 'code') onRun(); return }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault()
+      if (isMarkdown) { setMdEditing(false); return }
+      onRun(); return
+    }
+    if (e.key === 'Escape' && isMarkdown) { setMdEditing(false); return }
     if (e.key === 'Tab') {
       e.preventDefault()
       const ta = e.currentTarget
@@ -144,11 +269,46 @@ function CellView({ cell, output, running, onUpdate, onDelete, onMoveUp, onMoveD
       {/* Header */}
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1.5, py: 0.4, bgcolor: alpha(theme.palette.background.paper, 0.7), borderBottom: `1px solid ${theme.palette.divider}` }}>
         <Chip
-          icon={cell.type === 'code' ? <Code sx={{ fontSize: '0.75rem !important' }} /> : <Article sx={{ fontSize: '0.75rem !important' }} />}
-          label={cell.type} size="small"
+          icon={isMarkdown ? <Article sx={{ fontSize: '0.75rem !important' }} /> : <Code sx={{ fontSize: '0.75rem !important' }} />}
+          label={isMarkdown ? 'markdown' : 'code'} size="small"
           sx={{ fontSize: '0.62rem', height: 18, cursor: 'pointer' }}
-          onClick={() => onUpdate({ type: cell.type === 'code' ? 'markdown' : 'code' })}
+          onClick={() => { onUpdate({ type: isMarkdown ? 'code' : 'markdown' }); setMdEditing(false) }}
         />
+        {!isMarkdown && (
+          <>
+            <Chip
+              label={cell.language ? langLabel : `${langLabel} ·auto`}
+              size="small"
+              variant={cell.language ? 'filled' : 'outlined'}
+              onClick={(e) => setLangAnchor(e.currentTarget)}
+              sx={{ fontSize: '0.6rem', height: 18, cursor: 'pointer', fontFamily: '"JetBrains Mono", monospace', letterSpacing: 0 }}
+            />
+            <Menu
+              anchorEl={langAnchor}
+              open={Boolean(langAnchor)}
+              onClose={() => setLangAnchor(null)}
+              slotProps={{ paper: { sx: { minWidth: 140 } } }}
+            >
+              <MenuItem
+                dense
+                selected={!cell.language}
+                onClick={() => { onUpdate({ language: undefined }); setLangAnchor(null) }}
+              >
+                <Typography sx={{ fontSize: '0.8rem', fontStyle: 'italic', color: 'text.secondary' }}>Auto-detect</Typography>
+              </MenuItem>
+              <Divider sx={{ my: 0.5 }} />
+              {LANGUAGES.map(l => (
+                <MenuItem
+                  key={l.value} dense
+                  selected={cell.language === l.value}
+                  onClick={() => { onUpdate({ language: l.value }); setLangAnchor(null) }}
+                >
+                  <Typography sx={{ fontSize: '0.82rem', fontFamily: '"JetBrains Mono", monospace' }}>{l.label}</Typography>
+                </MenuItem>
+              ))}
+            </Menu>
+          </>
+        )}
         {output && (
           <Typography sx={{ fontSize: '0.65rem', color: isError ? 'error.main' : 'success.main', ml: 0.5 }}>
             {isError ? 'error' : `${output.execution_time_ms}ms`}
@@ -157,7 +317,13 @@ function CellView({ cell, output, running, onUpdate, onDelete, onMoveUp, onMoveD
         <Box sx={{ flex: 1 }} />
         <Tooltip title="Move up"><span><IconButton size="small" onClick={onMoveUp} disabled={!canMoveUp} sx={{ p: 0.3 }}><ArrowUpward sx={{ fontSize: 13 }} /></IconButton></span></Tooltip>
         <Tooltip title="Move down"><span><IconButton size="small" onClick={onMoveDown} disabled={!canMoveDown} sx={{ p: 0.3 }}><ArrowDownward sx={{ fontSize: 13 }} /></IconButton></span></Tooltip>
-        {cell.type === 'code' && (
+        {isMarkdown ? (
+          <Tooltip title={mdEditing ? 'Preview (⌘Enter)' : 'Edit'}>
+            <IconButton size="small" onClick={() => setMdEditing(v => !v)} sx={{ p: 0.3, color: mdEditing ? 'primary.main' : 'text.secondary' }}>
+              {mdEditing ? <Article sx={{ fontSize: 15 }} /> : <Edit sx={{ fontSize: 14 }} />}
+            </IconButton>
+          </Tooltip>
+        ) : (
           <Tooltip title="Run cell (⌘Enter)">
             <IconButton size="small" color="primary" onClick={onRun} disabled={running} sx={{ p: 0.3 }}>
               {running ? <CircularProgress size={12} /> : <PlayArrow sx={{ fontSize: 15 }} />}
@@ -166,29 +332,83 @@ function CellView({ cell, output, running, onUpdate, onDelete, onMoveUp, onMoveD
         )}
         <Tooltip title="Delete cell">
           <IconButton size="small" color="error" onClick={onDelete} sx={{ p: 0.3 }}>
-            <DeleteOutline sx={{ fontSize: 14 }} />
+            <DeleteOutlined sx={{ fontSize: 14 }} />
           </IconButton>
         </Tooltip>
       </Box>
 
-      {/* Editor */}
-      <Box
-        ref={textRef}
-        component="textarea"
-        value={cell.content}
-        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onUpdate({ content: e.target.value })}
-        onKeyDown={handleKeyDown}
-        spellCheck={false}
-        rows={lineCount}
-        sx={{
-          width: '100%', resize: 'vertical', border: 'none', outline: 'none',
-          bgcolor: theme.palette.mode === 'dark' ? (cell.type === 'code' ? '#0d1117' : alpha('#1c2230', 0.5)) : (cell.type === 'code' ? '#f8f9fa' : '#fafbfc'),
-          color: 'text.primary',
-          fontFamily: cell.type === 'code' ? '"JetBrains Mono", "Fira Code", Consolas, monospace' : '"Inter", sans-serif',
-          fontSize: cell.type === 'code' ? '0.84rem' : '0.9rem',
-          lineHeight: 1.75, p: 1.5, display: 'block', boxSizing: 'border-box',
-        }}
-      />
+      {/* Markdown: preview or editor */}
+      {isMarkdown ? (
+        mdEditing ? (
+          <Box
+            ref={textRef}
+            component="textarea"
+            value={cell.content}
+            autoFocus
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onUpdate({ content: e.target.value })}
+            onKeyDown={handleKeyDown}
+            onBlur={() => setMdEditing(false)}
+            spellCheck
+            rows={Math.max(4, lineCount)}
+            sx={{
+              width: '100%', resize: 'vertical', border: 'none', outline: 'none',
+              bgcolor: theme.palette.mode === 'dark' ? alpha('#1c2230', 0.6) : '#fafbfc',
+              color: 'text.primary',
+              fontFamily: '"Inter", system-ui, sans-serif',
+              fontSize: '0.9rem', lineHeight: 1.75, p: 2, display: 'block', boxSizing: 'border-box',
+            }}
+          />
+        ) : (
+          <Box onClick={() => setMdEditing(true)} sx={{ cursor: 'text', minHeight: 40 }}>
+            <MarkdownRenderer content={cell.content} />
+          </Box>
+        )
+      ) : (
+        /* Code cell — syntax-highlighted view or textarea editor */
+        codeEditing ? (
+          <Box
+            ref={textRef}
+            component="textarea"
+            value={cell.content}
+            autoFocus
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onUpdate({ content: e.target.value })}
+            onKeyDown={handleKeyDown}
+            onBlur={() => setCodeEditing(false)}
+            spellCheck={false}
+            rows={lineCount}
+            sx={{
+              width: '100%', resize: 'vertical', border: 'none', outline: 'none',
+              bgcolor: theme.palette.mode === 'dark' ? '#0d1117' : '#f6f8fa',
+              color: theme.palette.mode === 'dark' ? '#c9d1d9' : '#24292f',
+              fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
+              fontSize: '0.84rem', lineHeight: 1.75, p: '12px 14px', display: 'block', boxSizing: 'border-box',
+              caretColor: theme.palette.mode === 'dark' ? '#58a6ff' : '#0969da',
+              letterSpacing: '0.02em',
+            }}
+          />
+        ) : (
+          <Box
+            onClick={() => setCodeEditing(true)}
+            sx={{ cursor: 'text', minHeight: 52, '& > div': { m: '0 !important', borderRadius: '0 !important' } }}
+          >
+            <SyntaxHighlighter
+              style={theme.palette.mode === 'dark' ? oneDark : oneLight}
+              language={resolvedLang}
+              PreTag="div"
+              customStyle={{
+                margin: 0, borderRadius: 0,
+                fontSize: '0.84rem', lineHeight: 1.75, padding: '12px 14px',
+                fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
+                minHeight: 52,
+                background: theme.palette.mode === 'dark' ? '#0d1117' : '#f6f8fa',
+              }}
+              codeTagProps={{ style: { fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace', letterSpacing: '0.02em' } }}
+            >
+              {cell.content || '# click to edit'}
+            </SyntaxHighlighter>
+          </Box>
+        )
+      )}
 
       {/* Output */}
       {output && <CellOutputView out={output} />}
@@ -261,7 +481,13 @@ export default function Notebooks() {
 
   function openNotebook(nb: NotebookFile) {
     setSelected(nb); setTitle(nb.name)
-    setCells(nb.cells.length > 0 ? nb.cells : [{ id: genId(), type: 'code', content: DEFAULT_CODE_PREAMBLE }])
+    // Normalise cells from API: backend may return {source, type} without id
+    const normalized = nb.cells.map((c: any) => ({
+      id: c.id ?? genId(),
+      type: (c.type ?? 'code') as 'code' | 'markdown',
+      content: c.content ?? c.source ?? '',
+    }))
+    setCells(normalized.length > 0 ? normalized : [{ id: genId(), type: 'code', content: DEFAULT_CODE_PREAMBLE }])
     setOutputs({}); setSessionDirty(false); setExportStatus(null)
   }
 
@@ -347,7 +573,7 @@ export default function Notebooks() {
                     secondaryAction={
                       <Tooltip title="Delete">
                         <IconButton size="small" edge="end" sx={{ mr: 0.5, opacity: 0.35, '&:hover': { opacity: 1 } }} onClick={e => { e.stopPropagation(); deleteMut.mutate(nb.id) }}>
-                          <DeleteOutline sx={{ fontSize: 14 }} />
+                          <DeleteOutlined sx={{ fontSize: 14 }} />
                         </IconButton>
                       </Tooltip>
                     }
@@ -390,7 +616,7 @@ export default function Notebooks() {
             <Tooltip title="Run all cells">
               <span>
                 <Button size="small" color="primary" variant="contained"
-                  startIcon={runningAll ? <CircularProgress size={12} color="inherit" /> : <PlayCircleOutline sx={{ fontSize: 15 }} />}
+                  startIcon={runningAll ? <CircularProgress size={12} color="inherit" /> : <PlayCircleOutlined sx={{ fontSize: 15 }} />}
                   onClick={() => handleRunAll(false)} disabled={anyRunning || codeCellCount === 0} sx={{ fontSize: '0.73rem', py: 0.3 }}>
                   Run All
                 </Button>
@@ -417,10 +643,10 @@ export default function Notebooks() {
             <Box sx={{ px: 2, py: 0.4, display: 'flex', alignItems: 'center', gap: 1, bgcolor: exportStatus?.startsWith('✓') ? alpha(theme.palette.success.main, 0.08) : exportStatus?.startsWith('Export failed') ? alpha(theme.palette.error.main, 0.08) : alpha(theme.palette.warning.main, 0.07), borderBottom: `1px solid ${theme.palette.divider}` }}>
               {exportStatus
                 ? <>
-                    {exportStatus.startsWith('✓') && <CheckCircleOutline sx={{ fontSize: 13, color: 'success.main' }} />}
-                    {exportStatus.startsWith('Export failed') && <ErrorOutline sx={{ fontSize: 13, color: 'error.main' }} />}
+                    {exportStatus.startsWith('✓') && <CheckCircleOutlined sx={{ fontSize: 13, color: 'success.main' }} />}
+                    {exportStatus.startsWith('Export failed') && <ErrorOutlined sx={{ fontSize: 13, color: 'error.main' }} />}
                     <Typography sx={{ fontSize: '0.73rem', color: exportStatus.startsWith('✓') ? 'success.dark' : 'error.dark', flex: 1 }}>{exportStatus}</Typography>
-                    <IconButton size="small" sx={{ p: 0.3 }} onClick={() => setExportStatus(null)}><DeleteOutline sx={{ fontSize: 12 }} /></IconButton>
+                    <IconButton size="small" sx={{ p: 0.3 }} onClick={() => setExportStatus(null)}><DeleteOutlined sx={{ fontSize: 12 }} /></IconButton>
                   </>
                 : <Typography sx={{ fontSize: '0.72rem', color: 'warning.dark' }}>Session may be out of date — re-run to refresh</Typography>
               }
