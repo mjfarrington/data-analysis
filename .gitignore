@@ -2,8 +2,8 @@
 # Spark distribution — downloaded binary, excluded from git
 # Configuration lives in conf/spark/ (tracked)
 # =============================================================================
-spark/
-spark-*/
+/spark/
+/spark-*/
 
 # =============================================================================
 # Generated data
@@ -49,3 +49,5 @@ dist/
 # macOS
 # =============================================================================
 .DS_Store
+data/spark/events/*
+data/spark/warehouse/*
