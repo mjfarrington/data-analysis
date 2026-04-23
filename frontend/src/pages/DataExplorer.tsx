@@ -258,6 +258,8 @@ export default function DataExplorer() {
   const [filesOpen, setFilesOpen] = useState(() => _treeState.filesOpen)
   const [expandedDbs, setExpandedDbs] = useState<Set<string>>(() => new Set(_treeState.expandedDbs))
   const [expandedDates, setExpandedDates] = useState<Set<string>>(() => new Set(_treeState.expandedDates))
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const [rightCollapsed, setRightCollapsed] = useState(false)
 
   // Spark connection UI state
   const [sparkBusy, setSparkBusy] = useState(false)
@@ -487,6 +489,17 @@ export default function DataExplorer() {
     _treeState.expandedDates = new Set(expandedDates)
   }, [catalogOpen, filesOpen, expandedDbs, expandedDates])
 
+  useEffect(() => {
+    const onToggleLeft = () => setLeftCollapsed(v => !v)
+    const onToggleRight = () => setRightCollapsed(v => !v)
+    window.addEventListener('workspace-panel-toggle-left', onToggleLeft)
+    window.addEventListener('workspace-panel-toggle-right', onToggleRight)
+    return () => {
+      window.removeEventListener('workspace-panel-toggle-left', onToggleLeft)
+      window.removeEventListener('workspace-panel-toggle-right', onToggleRight)
+    }
+  }, [])
+
   // ── Tree toggles ─────────────────────────────────────────────────────────────
 
   function toggleDb(db: string) {
@@ -559,15 +572,23 @@ export default function DataExplorer() {
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <Box sx={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+      <Box sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
 
       {/* ── LEFT PANEL ───────────────────────────────────────────────────────── */}
+      {!leftCollapsed && (
       <Box sx={{
         width: 280, flexShrink: 0,
         bgcolor: leftBg,
         borderRight: `1px solid ${theme.palette.divider}`,
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}>
+        <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}` }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, letterSpacing: '0.01em' }}>
+            Data Explorer
+          </Typography>
+        </Box>
+
         {/* Search */}
         <Box sx={{ p: 1, borderBottom: `1px solid ${theme.palette.divider}` }}>
           <TextField
@@ -840,8 +861,10 @@ export default function DataExplorer() {
 
         </Box>
       </Box>
+      )}
 
       {/* ── RIGHT PANEL ──────────────────────────────────────────────────────── */}
+      {!rightCollapsed && (
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
 
         {/* Shortcut toolbar */}
@@ -1120,6 +1143,8 @@ export default function DataExplorer() {
           )}
 
         </Box>
+      </Box>
+      )}
       </Box>
     </Box>
   )

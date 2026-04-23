@@ -19,30 +19,59 @@ export interface WorkspaceTemplateProps {
   rightPanelWidth?: number
   leftPanelLabel?: string
   rightPanelLabel?: string
+  showPanelControlsRow?: boolean
 }
 
+export const workspaceSidebarSurfaceSx = (theme: Theme) => ({
+  bgcolor: '#0d1117',
+  color: '#c9d1d9',
+  '& .MuiDivider-root': {
+    borderColor: alpha('#ffffff', 0.08),
+  },
+})
+
 export const workspaceSidebarSectionLabelSx: SxProps<Theme> = {
-  px: 1.25,
-  py: 0.375,
-  fontSize: '0.62rem',
+  px: 1.5,
+  py: 0.5,
+  fontSize: '0.72rem',
   textTransform: 'uppercase',
   letterSpacing: '0.06em',
-  color: 'text.secondary',
+  color: '#8b949e',
   fontWeight: 700,
 }
 
-export const workspaceSidebarItemButtonSx: SxProps<Theme> = {
-  minHeight: 28,
-  px: 1,
-  py: 0.375,
-  borderRadius: 1,
-  gap: 0.75,
+export const workspaceSidebarItemButtonSx: SxProps<Theme> = (theme) => {
+  const hoverBg = alpha('#ffffff', 0.06)
+  const selectedBg = alpha(theme.palette.primary.main, 0.2)
+  return {
+    minHeight: 26,
+    px: 1.5,
+    py: 0.35,
+    borderRadius: 0,
+    gap: 0.75,
+    color: '#c9d1d9',
+    borderLeft: '2px solid transparent',
+    '& .MuiSvgIcon-root': {
+      color: '#8b949e',
+    },
+    '&:hover': {
+      bgcolor: hoverBg,
+    },
+    '&.Mui-selected': {
+      bgcolor: selectedBg,
+      borderLeftColor: theme.palette.primary.main,
+    },
+    '&.Mui-selected:hover': {
+      bgcolor: selectedBg,
+    },
+  }
 }
 
 export const workspaceSidebarItemTextSx: SxProps<Theme> = {
-  fontSize: '0.76rem',
+  fontSize: '0.72rem',
   fontWeight: 500,
-  lineHeight: 1.2,
+  lineHeight: 1.3,
+  color: '#c9d1d9',
 }
 
 const DEFAULT_LAYOUT: WorkspaceLayoutState = {
@@ -107,6 +136,7 @@ export default function WorkspaceTemplate({
   rightPanelWidth = 300,
   leftPanelLabel = 'files panel',
   rightPanelLabel = 'versions panel',
+  showPanelControlsRow = true,
 }: WorkspaceTemplateProps) {
   const theme = useTheme()
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -156,63 +186,78 @@ export default function WorkspaceTemplate({
     )
   }, [storageKey, leftSidebarWidth, leftCollapsed, rightCollapsed])
 
+  useEffect(() => {
+    const onToggleLeft = () => setLeftCollapsed(v => !v)
+    const onToggleRight = () => setRightCollapsed(v => !v)
+    window.addEventListener('workspace-panel-toggle-left', onToggleLeft)
+    window.addEventListener('workspace-panel-toggle-right', onToggleRight)
+    return () => {
+      window.removeEventListener('workspace-panel-toggle-left', onToggleLeft)
+      window.removeEventListener('workspace-panel-toggle-right', onToggleRight)
+    }
+  }, [])
+
   return (
     <Box ref={rootRef} sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 0.5,
-          px: 1.25,
-          py: 0.5,
-          borderBottom: `1px solid ${theme.palette.divider}`,
-          bgcolor: alpha(theme.palette.background.paper, 0.9),
-          flexShrink: 0,
-        }}
-      >
-        <Box sx={{ flex: 1 }} />
-        <Tooltip title={leftCollapsed ? `Show ${leftPanelLabel}` : `Hide ${leftPanelLabel}`}>
-          <IconButton
-            size="small"
-            onClick={() => setLeftCollapsed(v => !v)}
-            sx={{
-              color: leftCollapsed ? 'text.secondary' : 'primary.main',
-              border: '1px solid',
-              borderColor: leftCollapsed ? 'divider' : alpha(theme.palette.primary.main, 0.35),
-              borderRadius: 1,
-            }}
-          >
-            <PanelSideIcon side="left" active={!leftCollapsed} />
-          </IconButton>
-        </Tooltip>
-        <Tooltip title={rightCollapsed ? `Show ${rightPanelLabel}` : `Hide ${rightPanelLabel}`}>
-          <IconButton
-            size="small"
-            onClick={() => setRightCollapsed(v => !v)}
-            sx={{
-              color: rightCollapsed ? 'text.secondary' : 'primary.main',
-              border: '1px solid',
-              borderColor: rightCollapsed ? 'divider' : alpha(theme.palette.primary.main, 0.35),
-              borderRadius: 1,
-            }}
-          >
-            <PanelSideIcon side="right" active={!rightCollapsed} />
-          </IconButton>
-        </Tooltip>
-      </Box>
+      {showPanelControlsRow && (
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.5,
+            px: 1.25,
+            py: 0.5,
+            borderBottom: `1px solid ${theme.palette.divider}`,
+            bgcolor: alpha(theme.palette.background.paper, 0.9),
+            flexShrink: 0,
+          }}
+        >
+          <Box sx={{ flex: 1 }} />
+          <Tooltip title={leftCollapsed ? `Show ${leftPanelLabel}` : `Hide ${leftPanelLabel}`}>
+            <IconButton
+              size="small"
+              onClick={() => setLeftCollapsed(v => !v)}
+              sx={{
+                color: leftCollapsed ? 'text.secondary' : 'primary.main',
+                border: '1px solid',
+                borderColor: leftCollapsed ? 'divider' : alpha(theme.palette.primary.main, 0.35),
+                borderRadius: 1,
+              }}
+            >
+              <PanelSideIcon side="left" active={!leftCollapsed} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title={rightCollapsed ? `Show ${rightPanelLabel}` : `Hide ${rightPanelLabel}`}>
+            <IconButton
+              size="small"
+              onClick={() => setRightCollapsed(v => !v)}
+              sx={{
+                color: rightCollapsed ? 'text.secondary' : 'primary.main',
+                border: '1px solid',
+                borderColor: rightCollapsed ? 'divider' : alpha(theme.palette.primary.main, 0.35),
+                borderRadius: 1,
+              }}
+            >
+              <PanelSideIcon side="right" active={!rightCollapsed} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      )}
 
       <Box sx={{ display: 'flex', flex: 1, minHeight: 0 }}>
         {!leftCollapsed && (
           <Box
-            sx={{
-              width: leftSidebarWidth,
-              flexShrink: 0,
-              minWidth: 0,
-              bgcolor: 'background.paper',
-              borderRight: `1px solid ${theme.palette.divider}`,
-              display: 'flex',
-              flexDirection: 'column',
-            }}
+            sx={[
+              workspaceSidebarSurfaceSx,
+              {
+                width: leftSidebarWidth,
+                flexShrink: 0,
+                minWidth: 0,
+                borderRight: `1px solid ${theme.palette.divider}`,
+                display: 'flex',
+                flexDirection: 'column',
+              },
+            ]}
           >
             {renderLeftPanel()}
           </Box>

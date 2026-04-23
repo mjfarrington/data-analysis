@@ -34,6 +34,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { servicesApi, contextApi } from '../api/client'
 import { useAuthStore } from '../store/auth'
 import { useThemeStore, ThemeMode, Density } from '../store/theme'
+import { PanelSideIcon } from './workspace/WorkspaceTemplate'
 
 const SIDEBAR_FULL = 220
 const SIDEBAR_MINI = 56
@@ -93,17 +94,27 @@ const NAV: NavSection[] = [
   },
 ]
 
-function ServiceDots({ overall }: { overall: string }) {
+function ServiceDots({ overall, onClick }: { overall: string; onClick?: () => void }) {
   const color =
     overall === 'healthy' ? 'success' :
     overall === 'degraded' ? 'warning' : 'error'
   return (
-    <Tooltip title={`Services: ${overall}`}>
+    <Tooltip title={`Services: ${overall} (open services)`}>
       <Box
+        role="button"
+        tabIndex={0}
+        onClick={onClick}
+        onKeyDown={(e) => {
+          if ((e.key === 'Enter' || e.key === ' ') && onClick) {
+            e.preventDefault()
+            onClick()
+          }
+        }}
         sx={{
           width: 8, height: 8, borderRadius: '50%',
           bgcolor: `${color}.main`,
           boxShadow: `0 0 5px currentColor`,
+          cursor: onClick ? 'pointer' : 'default',
         }}
       />
     </Tooltip>
@@ -119,6 +130,17 @@ export default function AppShell() {
   const [dateInput, setDateInput] = useState('')
   const navigate = useNavigate()
   const location = useLocation()
+
+  const panelControls = (() => {
+    if (location.pathname.startsWith('/sql-files')) return { left: true, right: true }
+    if (location.pathname.startsWith('/notebooks')) return { left: true, right: true }
+    if (location.pathname.startsWith('/explorer')) return { left: true, right: true }
+    if (location.pathname.startsWith('/dictionaries')) return { left: true, right: false }
+    return { left: false, right: false }
+  })()
+
+  const toggleLeftPanel = () => window.dispatchEvent(new CustomEvent('workspace-panel-toggle-left'))
+  const toggleRightPanel = () => window.dispatchEvent(new CustomEvent('workspace-panel-toggle-right'))
   const user = useAuthStore(s => s.user)
   const logout = useAuthStore(s => s.logout)
   const setMode = useThemeStore(s => s.setMode)
@@ -366,6 +388,9 @@ export default function AppShell() {
           }}
         >
           <Toolbar variant="dense" sx={{ minHeight: 44, gap: 1.5 }}>
+            {/* Service health */}
+            {services && <ServiceDots overall={services.overall} onClick={() => navigate('/services')} />}
+
             {/* Business date — click to edit */}
             <Chip
               icon={<CalendarToday sx={{ fontSize: '0.72rem !important' }} />}
@@ -422,8 +447,43 @@ export default function AppShell() {
               </Box>
             </Popover>
 
-            {/* Service health */}
-            {services && <ServiceDots overall={services.overall} />}
+            {/* Panel controls */}
+            {(panelControls.left || panelControls.right) && (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                {panelControls.left && (
+                  <Tooltip title="Toggle left sidebar">
+                    <IconButton
+                      size="small"
+                      onClick={toggleLeftPanel}
+                      sx={{
+                        color: 'text.secondary',
+                        border: '1px solid',
+                        borderColor: 'divider',
+                        borderRadius: 1,
+                      }}
+                    >
+                      <PanelSideIcon side="left" active />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {panelControls.right && (
+                  <Tooltip title="Toggle right sidebar">
+                    <IconButton
+                      size="small"
+                      onClick={toggleRightPanel}
+                      sx={{
+                        color: 'text.secondary',
+                        border: '1px solid',
+                        borderColor: 'divider',
+                        borderRadius: 1,
+                      }}
+                    >
+                      <PanelSideIcon side="right" active />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
+            )}
           </Toolbar>
         </AppBar>
 

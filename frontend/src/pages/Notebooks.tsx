@@ -972,6 +972,7 @@ export default function Notebooks() {
     <>
       <WorkspaceTemplate
         storageKey="notebook-workspace-layout"
+        showPanelControlsRow={false}
         defaultLayout={{ leftSidebarWidth: 290, leftCollapsed: false, rightCollapsed: false }}
         leftPanelLabel="notebooks panel"
         rightPanelLabel="versions panel"
@@ -981,17 +982,33 @@ export default function Notebooks() {
             <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column', gap: 1 }}>
               <Box sx={{ display: 'flex', alignItems: 'center' }}>
                 <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Notebook Workspace</Typography>
+                <Box sx={{ flex: 1 }} />
+                <Tooltip title="New notebook">
+                  <IconButton
+                    size="small"
+                    onClick={() => {
+                      createMut.mutate({
+                        name: `Notebook ${notebooks.length + 1}`,
+                        cells: [{ id: genId(), type: 'code', content: DEFAULT_CODE_PREAMBLE }],
+                      })
+                    }}
+                    disabled={createMut.isPending}
+                  >
+                    <Add sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Tooltip>
               </Box>
               <TextField
-                placeholder="Search notebooks..."
+                placeholder="Search notebooks…"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 size="small"
                 fullWidth
                 slotProps={{
                   input: {
-                    startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment>,
+                    startAdornment: <InputAdornment position="start"><Search sx={{ fontSize: 16 }} /></InputAdornment>,
                   },
+                  htmlInput: { style: { fontSize: '0.78rem', paddingTop: 4, paddingBottom: 4 } },
                 }}
               />
             </Box>
@@ -1047,22 +1064,6 @@ export default function Notebooks() {
                   )}
                 </List>
               )}
-            </Box>
-            <Box sx={{ p: 1.5, borderTop: `1px solid ${theme.palette.divider}` }}>
-              <Button
-                startIcon={<Add />}
-                fullWidth
-                size="small"
-                onClick={() => {
-                  createMut.mutate({
-                    name: `Notebook ${notebooks.length + 1}`,
-                    cells: [{ id: genId(), type: 'code', content: DEFAULT_CODE_PREAMBLE }],
-                  })
-                }}
-                disabled={createMut.isPending}
-              >
-                New Notebook
-              </Button>
             </Box>
           </>
         )}

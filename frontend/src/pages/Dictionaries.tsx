@@ -1,14 +1,19 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Box, Typography, Button, Table, TableHead, TableRow, TableCell,
   TableBody, TextField, List, ListItem, ListItemButton, ListItemText,
   Chip, Dialog, DialogTitle, DialogContent, DialogActions,
-  CircularProgress, IconButton, Tooltip, Divider,
+  CircularProgress, IconButton, Tooltip, Divider, InputAdornment,
   useTheme,
 } from '@mui/material'
-import { Add, Delete, Edit, Save, Close } from '@mui/icons-material'
+import { Add, Delete, Edit, Save, Close, Search } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { dictionariesApi, Dictionary, DictionaryEntry } from '../api/client'
+import {
+  workspaceSidebarItemButtonSx,
+  workspaceSidebarItemTextSx,
+  workspaceSidebarSurfaceSx,
+} from '../components/workspace/WorkspaceTemplate'
 
 interface EditingEntry {
   key: string
@@ -25,6 +30,8 @@ export default function Dictionaries() {
   const [newKeyLabel, setNewKeyLabel] = useState('Key')
   const [newValueLabel, setNewValueLabel] = useState('Value')
   const [editingEntry, setEditingEntry] = useState<{ id: number | 'new'; data: EditingEntry } | null>(null)
+  const [leftSearch, setLeftSearch] = useState('')
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
 
   const { data: dicts = [], isLoading } = useQuery({
     queryKey: ['dictionaries'],
@@ -81,6 +88,11 @@ export default function Dictionaries() {
 
   // Keep selected in sync with fresh data
   const currentDict = selected ? dicts.find(d => d.id === selected.id) ?? selected : null
+  const filteredDicts = dicts.filter(d => {
+    const q = leftSearch.trim().toLowerCase()
+    if (!q) return true
+    return d.name.toLowerCase().includes(q) || (d.description ?? '').toLowerCase().includes(q)
+  })
 
   function saveEntry() {
     if (!currentDict || !editingEntry) return
@@ -98,19 +110,55 @@ export default function Dictionaries() {
     deleteEntryMut.mutate({ dictId: currentDict.id, entryId: entry.id })
   }
 
+  useEffect(() => {
+    const onToggleLeft = () => setLeftCollapsed(v => !v)
+    window.addEventListener('workspace-panel-toggle-left', onToggleLeft)
+    return () => {
+      window.removeEventListener('workspace-panel-toggle-left', onToggleLeft)
+    }
+  }, [])
+
   return (
     <Box sx={{ display: 'flex', height: '100%' }}>
       {/* Left panel */}
+      {!leftCollapsed && (
       <Box
-        sx={{
-          width: 260, flexShrink: 0,
-          bgcolor: 'background.paper',
-          borderRight: `1px solid ${theme.palette.divider}`,
-          display: 'flex', flexDirection: 'column',
-        }}
+        sx={[
+          workspaceSidebarSurfaceSx,
+          {
+            width: 260, flexShrink: 0,
+            borderRight: `1px solid ${theme.palette.divider}`,
+            display: 'flex', flexDirection: 'column',
+          },
+        ]}
       >
         <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}` }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Dictionaries</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, letterSpacing: '0.01em' }}>Dictionaries</Typography>
+            <Box sx={{ flex: 1 }} />
+            <Tooltip title="New dictionary">
+              <IconButton size="small" onClick={() => setNewDictOpen(true)}>
+                <Add sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          </Box>
+          <TextField
+            placeholder="Search dictionaries…"
+            value={leftSearch}
+            onChange={e => setLeftSearch(e.target.value)}
+            size="small"
+            fullWidth
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <Search sx={{ fontSize: 16 }} />
+                  </InputAdornment>
+                ),
+              },
+              htmlInput: { style: { fontSize: '0.78rem', paddingTop: 4, paddingBottom: 4 } },
+            }}
+          />
         </Box>
 
         <Box sx={{ flex: 1, overflowY: 'auto' }}>
@@ -118,36 +166,31 @@ export default function Dictionaries() {
             <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress size={24} /></Box>
           ) : (
             <List dense disablePadding>
-              {dicts.map(dict => (
+              {filteredDicts.map(dict => (
                 <ListItem key={dict.id} disablePadding>
                   <ListItemButton
                     selected={currentDict?.id === dict.id}
                     onClick={() => setSelected(dict)}
-                    sx={{ px: 2, py: 1 }}
+                    sx={workspaceSidebarItemButtonSx}
                   >
                     <ListItemText
-                      primary={<Typography variant="body2" noWrap sx={{ fontWeight: 500 }}>{dict.name}</Typography>}
-                      secondary={dict.description ? <Typography variant="caption" noWrap>{dict.description}</Typography> : null}
+                      primary={<Typography variant="body2" noWrap sx={workspaceSidebarItemTextSx}>{dict.name}</Typography>}
+                      secondary={dict.description ? <Typography variant="caption" noWrap sx={{ color: '#8b949e' }}>{dict.description}</Typography> : null}
                     />
                     <Chip label={dict.entries.length} size="small" sx={{ fontSize: '0.65rem', height: 18 }} />
                   </ListItemButton>
                 </ListItem>
               ))}
-              {dicts.length === 0 && (
+              {filteredDicts.length === 0 && (
                 <Box sx={{ p: 3, textAlign: 'center', color: 'text.secondary' }}>
-                  <Typography variant="body2">No dictionaries</Typography>
+                  <Typography variant="body2">{leftSearch ? 'No matches' : 'No dictionaries'}</Typography>
                 </Box>
               )}
             </List>
           )}
         </Box>
-
-        <Box sx={{ p: 1.5, borderTop: `1px solid ${theme.palette.divider}` }}>
-          <Button startIcon={<Add />} fullWidth size="small" onClick={() => setNewDictOpen(true)}>
-            New Dictionary
-          </Button>
-        </Box>
       </Box>
+      )}
 
       {/* Right panel */}
       {currentDict ? (

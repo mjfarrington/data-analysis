@@ -11,9 +11,9 @@ import {
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { sqlFilesApi, SqlFile, SqlFileVersion } from '../api/client'
-import Editor, { OnMount } from '@monaco-editor/react'
+import Editor, { BeforeMount, OnMount } from '@monaco-editor/react'
 import {
-  PanelSideIcon,
+  workspaceSidebarSurfaceSx,
   workspaceSidebarItemButtonSx,
   workspaceSidebarItemTextSx,
   workspaceSidebarSectionLabelSx,
@@ -460,7 +460,31 @@ export default function SqlFiles() {
     }
   }, [leftResizing])
 
+  const beforeEditorMount: BeforeMount = (monaco) => {
+    monaco.editor.defineTheme('sql-workspace-dark', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [],
+      colors: {
+        'editor.background': '#0d1117',
+        'editorGutter.background': '#0d1117',
+        'editorLineNumber.foreground': '#6e7681',
+        'editorLineNumber.activeForeground': '#c9d1d9',
+      },
+    })
+    monaco.editor.defineTheme('sql-workspace-light', {
+      base: 'vs',
+      inherit: true,
+      rules: [],
+      colors: {
+        'editor.background': '#ffffff',
+        'editorGutter.background': '#ffffff',
+      },
+    })
+  }
+
   const onEditorMount: OnMount = (editor, monaco) => {
+
     editor.onDidChangeCursorPosition((e: any) => {
       setCursor({ line: e.position.lineNumber, column: e.position.column })
     })
@@ -488,6 +512,17 @@ export default function SqlFiles() {
       JSON.stringify({ openFileIds, activeFileId }),
     )
   }, [openFileIds, activeFileId])
+
+  useEffect(() => {
+    const onToggleLeft = () => setLeftCollapsed(v => !v)
+    const onToggleRight = () => setRightCollapsed(v => !v)
+    window.addEventListener('workspace-panel-toggle-left', onToggleLeft)
+    window.addEventListener('workspace-panel-toggle-right', onToggleRight)
+    return () => {
+      window.removeEventListener('workspace-panel-toggle-left', onToggleLeft)
+      window.removeEventListener('workspace-panel-toggle-right', onToggleRight)
+    }
+  }, [])
 
   useEffect(() => {
     if (activeFileId == null || !activeFile) return
@@ -586,62 +621,20 @@ export default function SqlFiles() {
   }
 
   return (
-    <Box ref={rootRef} sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Dedicated panel controls row (VS Code-like separation) */}
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 0.5,
-          px: 1.25,
-          py: 0.5,
-          borderBottom: `1px solid ${theme.palette.divider}`,
-          bgcolor: alpha(theme.palette.background.paper, 0.9),
-          flexShrink: 0,
-        }}
-      >
-        <Box sx={{ flex: 1 }} />
-        <Tooltip title={leftCollapsed ? 'Show files panel' : 'Hide files panel'}>
-          <IconButton
-            size="small"
-            onClick={() => setLeftCollapsed(v => !v)}
-            sx={{
-              color: leftCollapsed ? 'text.secondary' : 'primary.main',
-              border: '1px solid',
-              borderColor: leftCollapsed ? 'divider' : alpha(theme.palette.primary.main, 0.35),
-              borderRadius: 1,
-            }}
-          >
-            <PanelSideIcon side="left" active={!leftCollapsed} />
-          </IconButton>
-        </Tooltip>
-        <Tooltip title={rightCollapsed ? 'Show versions panel' : 'Hide versions panel'}>
-          <IconButton
-            size="small"
-            onClick={() => setRightCollapsed(v => !v)}
-            sx={{
-              color: rightCollapsed ? 'text.secondary' : 'primary.main',
-              border: '1px solid',
-              borderColor: rightCollapsed ? 'divider' : alpha(theme.palette.primary.main, 0.35),
-              borderRadius: 1,
-            }}
-          >
-            <PanelSideIcon side="right" active={!rightCollapsed} />
-          </IconButton>
-        </Tooltip>
-      </Box>
-
+    <Box ref={rootRef} sx={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
       <Box sx={{ display: 'flex', flex: 1, minHeight: 0 }}>
       {/* Left panel: folder tree */}
       {!leftCollapsed && (
       <Box
-        sx={{
-          width: leftSidebarWidth, flexShrink: 0,
-          minWidth: 0,
-          bgcolor: 'background.paper',
-          borderRight: `1px solid ${theme.palette.divider}`,
-          display: 'flex', flexDirection: 'column',
-        }}
+        sx={[
+          workspaceSidebarSurfaceSx,
+          {
+            width: leftSidebarWidth, flexShrink: 0,
+            minWidth: 0,
+            borderRight: `1px solid ${theme.palette.divider}`,
+            display: 'flex', flexDirection: 'column',
+          },
+        ]}
       >
         <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
           <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -670,8 +663,9 @@ export default function SqlFiles() {
             sx={{ minWidth: 0 }}
             slotProps={{
               input: {
-                startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment>,
+                startAdornment: <InputAdornment position="start"><Search sx={{ fontSize: 16 }} /></InputAdornment>,
               },
+              htmlInput: { style: { fontSize: '0.78rem', paddingTop: 4, paddingBottom: 4 } },
             }}
           />
         </Box>
@@ -744,7 +738,7 @@ export default function SqlFiles() {
 
       {/* Right panel: editor + version controller */}
       {activeFile && activeDraft ? (
-        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           {/* Open file tabs */}
           <Box
             sx={{
@@ -900,33 +894,36 @@ export default function SqlFiles() {
           </Box>
 
           <Box sx={{ flex: 1, display: 'flex', minHeight: 0 }}>
-            <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-              <Editor
-                height="100%"
-                language="sql"
-                value={activeDraft.content}
-                onChange={(v) => updateActiveDraft({ content: v ?? '' })}
-                onMount={onEditorMount}
-                theme={theme.palette.mode === 'dark' ? 'vs-dark' : 'vs'}
-                options={{
-                  minimap: { enabled: true, scale: 1, maxColumn: 160 },
-                  fontFamily: 'JetBrains Mono, Fira Code, ui-monospace, monospace',
-                  fontLigatures: true,
-                  fontSize: 13,
-                  lineHeight: 21,
-                  wordWrap: 'off',
-                  scrollBeyondLastLine: false,
-                  smoothScrolling: true,
-                  cursorBlinking: 'smooth',
-                  renderLineHighlight: 'gutter',
-                  bracketPairColorization: { enabled: true },
-                  suggest: { showKeywords: true },
-                  quickSuggestions: true,
-                  tabSize: 2,
-                  insertSpaces: true,
-                  padding: { top: 10, bottom: 10 },
-                }}
-              />
+            <Box sx={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                <Editor
+                  height="100%"
+                  language="sql"
+                  value={activeDraft.content}
+                  onChange={(v) => updateActiveDraft({ content: v ?? '' })}
+                  beforeMount={beforeEditorMount}
+                  onMount={onEditorMount}
+                  theme={theme.palette.mode === 'dark' ? 'sql-workspace-dark' : 'sql-workspace-light'}
+                  options={{
+                    minimap: { enabled: true, scale: 1, maxColumn: 160 },
+                    fontFamily: 'JetBrains Mono, Fira Code, ui-monospace, monospace',
+                    fontLigatures: true,
+                    fontSize: 13,
+                    lineHeight: 21,
+                    wordWrap: 'off',
+                    scrollBeyondLastLine: false,
+                    smoothScrolling: true,
+                    cursorBlinking: 'smooth',
+                    renderLineHighlight: 'gutter',
+                    bracketPairColorization: { enabled: true },
+                    suggest: { showKeywords: true },
+                    quickSuggestions: true,
+                    tabSize: 2,
+                    insertSpaces: true,
+                    padding: { top: 10, bottom: 10 },
+                  }}
+                />
+              </Box>
               <Box
                 sx={{
                   display: 'flex',
@@ -936,6 +933,10 @@ export default function SqlFiles() {
                   py: 0.5,
                   borderTop: `1px solid ${theme.palette.divider}`,
                   bgcolor: 'background.paper',
+                  flexShrink: 0,
+                  position: 'sticky',
+                  bottom: 0,
+                  zIndex: 2,
                 }}
               >
                 <Chip label={activeDraft.file_type} size="small" sx={{ height: 18, fontSize: '0.62rem' }} />
