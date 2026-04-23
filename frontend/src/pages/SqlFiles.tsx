@@ -16,6 +16,7 @@ import Editor, { OnMount } from '@monaco-editor/react'
 const FILE_TYPES = ['extract', 'transform', 'load', 'utility']
 const ROOT_KEY = '__root__'
 const SQL_WORKSPACE_LAYOUT_KEY = 'sql-workspace-layout'
+const SQL_WORKSPACE_TABS_KEY = 'sql-workspace-open-tabs'
 
 interface SqlWorkspaceLayout {
   leftSidebarWidth: number
@@ -29,10 +30,20 @@ interface SqlDraft {
   content: string
 }
 
+interface SqlWorkspaceTabsState {
+  openFileIds: number[]
+  activeFileId: number | null
+}
+
 const DEFAULT_LAYOUT: SqlWorkspaceLayout = {
   leftSidebarWidth: 320,
   leftCollapsed: false,
   rightCollapsed: false,
+}
+
+const DEFAULT_TABS_STATE: SqlWorkspaceTabsState = {
+  openFileIds: [],
+  activeFileId: null,
 }
 
 function loadSqlWorkspaceLayout(): SqlWorkspaceLayout {
@@ -41,12 +52,32 @@ function loadSqlWorkspaceLayout(): SqlWorkspaceLayout {
     if (!raw) return DEFAULT_LAYOUT
     const parsed = JSON.parse(raw) as Partial<SqlWorkspaceLayout>
     return {
-      leftSidebarWidth: Math.max(240, Math.min(560, Number(parsed.leftSidebarWidth ?? DEFAULT_LAYOUT.leftSidebarWidth))),
+      leftSidebarWidth: Math.max(170, Math.min(560, Number(parsed.leftSidebarWidth ?? DEFAULT_LAYOUT.leftSidebarWidth))),
       leftCollapsed: Boolean(parsed.leftCollapsed),
       rightCollapsed: Boolean(parsed.rightCollapsed),
     }
   } catch {
     return DEFAULT_LAYOUT
+  }
+}
+
+function loadSqlWorkspaceTabsState(): SqlWorkspaceTabsState {
+  try {
+    const raw = localStorage.getItem(SQL_WORKSPACE_TABS_KEY)
+    if (!raw) return DEFAULT_TABS_STATE
+    const parsed = JSON.parse(raw) as Partial<SqlWorkspaceTabsState>
+    const openFileIds = Array.isArray(parsed.openFileIds)
+      ? parsed.openFileIds
+          .map(v => Number(v))
+          .filter(v => Number.isInteger(v) && v > 0)
+      : []
+    const activeFileId = parsed.activeFileId == null ? null : Number(parsed.activeFileId)
+    return {
+      openFileIds,
+      activeFileId: Number.isInteger(activeFileId) && activeFileId > 0 ? activeFileId : null,
+    }
+  } catch {
+    return DEFAULT_TABS_STATE
   }
 }
 
@@ -77,6 +108,11 @@ function changedLineCount(current: string, other: string): number {
     if ((a[i] ?? '') !== (b[i] ?? '')) changed++
   }
   return changed
+}
+
+function isDraftDirty(file: SqlFile | undefined, draft: SqlDraft | undefined): boolean {
+  if (!file || !draft) return false
+  return file.name !== draft.name || file.file_type !== draft.file_type || file.content !== draft.content
 }
 
 function buildTree(files: SqlFile[], search: string): FolderNode {
@@ -162,12 +198,13 @@ function PanelSideIcon({ side, active }: { side: 'left' | 'right'; active: boole
 
 export default function SqlFiles() {
   const initialLayoutRef = useRef<SqlWorkspaceLayout>(loadSqlWorkspaceLayout())
+  const initialTabsRef = useRef<SqlWorkspaceTabsState>(loadSqlWorkspaceTabsState())
   const rootRef = useRef<HTMLDivElement | null>(null)
   const theme = useTheme()
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
-  const [openFileIds, setOpenFileIds] = useState<number[]>([])
-  const [activeFileId, setActiveFileId] = useState<number | null>(null)
+  const [openFileIds, setOpenFileIds] = useState<number[]>(initialTabsRef.current.openFileIds)
+  const [activeFileId, setActiveFileId] = useState<number | null>(initialTabsRef.current.activeFileId)
   const [drafts, setDrafts] = useState<Record<number, SqlDraft>>({})
   const [cursor, setCursor] = useState({ line: 1, column: 1 })
   const [creatingInPath, setCreatingInPath] = useState<string | null>(null)
@@ -269,6 +306,14 @@ export default function SqlFiles() {
   }
 
   function closeFile(fileId: number) {
+    const file = fileById.get(fileId)
+    const draft = drafts[fileId]
+    if (isDraftDirty(file, draft)) {
+      const label = (draft?.name ?? file?.name ?? `File ${fileId}`).split('/').pop()
+      const confirmed = window.confirm(`You have unsaved changes in "${label}". Close anyway?`)
+      if (!confirmed) return
+    }
+
     setOpenFileIds(prev => {
       const idx = prev.indexOf(fileId)
       const next = prev.filter(id => id !== fileId)
@@ -302,6 +347,14 @@ export default function SqlFiles() {
 
   const activeFile = activeFileId != null ? (fileById.get(activeFileId) ?? null) : null
   const activeDraft = activeFileId != null ? drafts[activeFileId] : undefined
+  const dirtyById = useMemo(() => {
+    const map = new Map<number, boolean>()
+    for (const id of openFileIds) {
+      map.set(id, isDraftDirty(fileById.get(id), drafts[id]))
+    }
+    return map
+  }, [openFileIds, fileById, drafts])
+  const activeDirty = activeFileId != null ? Boolean(dirtyById.get(activeFileId)) : false
 
   function handleSave() {
     if (!activeFile || !activeDraft) return
@@ -405,7 +458,7 @@ export default function SqlFiles() {
     const onMouseMove = (e: MouseEvent) => {
       const rect = rootRef.current?.getBoundingClientRect()
       if (!rect) return
-      const next = Math.max(240, Math.min(560, e.clientX - rect.left))
+      const next = Math.max(170, Math.min(560, e.clientX - rect.left))
       setLeftSidebarWidth(next)
     }
 
@@ -450,6 +503,13 @@ export default function SqlFiles() {
   }, [leftSidebarWidth, leftCollapsed, rightCollapsed])
 
   useEffect(() => {
+    localStorage.setItem(
+      SQL_WORKSPACE_TABS_KEY,
+      JSON.stringify({ openFileIds, activeFileId }),
+    )
+  }, [openFileIds, activeFileId])
+
+  useEffect(() => {
     if (activeFileId == null || !activeFile) return
     setDrafts(prev => {
       if (prev[activeFileId]) return prev
@@ -459,6 +519,30 @@ export default function SqlFiles() {
       }
     })
   }, [activeFileId, activeFile])
+
+  useEffect(() => {
+    if (files.length === 0) return
+    const validIds = new Set(files.map(f => f.id))
+    setOpenFileIds(prev => {
+      const next = prev.filter(id => validIds.has(id))
+      const unchanged = next.length === prev.length && next.every((id, idx) => id === prev[idx])
+      if (!unchanged) {
+        setDrafts(dPrev => {
+          const dNext = { ...dPrev }
+          prev.filter(id => !validIds.has(id)).forEach(id => { delete dNext[id] })
+          return dNext
+        })
+        return next
+      }
+      return prev
+    })
+    setActiveFileId(prev => {
+      if (prev != null && validIds.has(prev)) return prev
+      const nextOpen = openFileIds.filter(id => validIds.has(id))
+      const nextActive = nextOpen[0] ?? null
+      return prev === nextActive ? prev : nextActive
+    })
+  }, [files, openFileIds])
 
   const renderFolder = (folder: FolderNode, depth = 0): React.ReactNode => {
     const expanded = expandedFolders.has(folder.path)
@@ -573,12 +657,13 @@ export default function SqlFiles() {
       <Box
         sx={{
           width: leftSidebarWidth, flexShrink: 0,
+          minWidth: 0,
           bgcolor: 'background.paper',
           borderRight: `1px solid ${theme.palette.divider}`,
           display: 'flex', flexDirection: 'column',
         }}
       >
-        <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
           <Box sx={{ display: 'flex', alignItems: 'center' }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700, letterSpacing: '0.01em' }}>SQL Workspace</Typography>
             <Box sx={{ flex: 1 }} />
@@ -602,6 +687,7 @@ export default function SqlFiles() {
             onChange={e => setSearch(e.target.value)}
             size="small"
             fullWidth
+            sx={{ minWidth: 0 }}
             slotProps={{
               input: {
                 startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment>,
@@ -662,14 +748,26 @@ export default function SqlFiles() {
       {!leftCollapsed && (
         <Box
           onMouseDown={() => setLeftResizing(true)}
+          onDoubleClick={() => setLeftSidebarWidth(DEFAULT_LAYOUT.leftSidebarWidth)}
           sx={{
-            width: 6,
+            width: 10,
             cursor: 'col-resize',
             flexShrink: 0,
-            bgcolor: leftResizing ? alpha(theme.palette.primary.main, 0.18) : 'transparent',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: leftResizing ? alpha(theme.palette.primary.main, 0.22) : 'transparent',
             transition: 'background-color 120ms ease',
-            '&:hover': { bgcolor: alpha(theme.palette.primary.main, 0.12) },
+            '&:hover': { bgcolor: alpha(theme.palette.primary.main, 0.14) },
+            '&::after': {
+              content: '""',
+              width: 2,
+              height: 34,
+              borderRadius: 99,
+              bgcolor: leftResizing ? 'primary.main' : alpha(theme.palette.text.secondary, 0.35),
+            },
           }}
+          title="Drag to resize sidebar"
         />
       )}
 
@@ -695,6 +793,7 @@ export default function SqlFiles() {
               const draft = drafts[id]
               const label = draft?.name ?? file?.name ?? `File ${id}`
               const isActive = id === activeFileId
+              const isDirty = Boolean(dirtyById.get(id))
               return (
                 <Box
                   key={id}
@@ -716,8 +815,16 @@ export default function SqlFiles() {
                     onClick={() => setActiveFileId(id)}
                     sx={{ minWidth: 0, px: 0.25, py: 0, textTransform: 'none' }}
                   >
-                    <Typography variant="caption" noWrap sx={{ maxWidth: 180, color: 'text.primary' }}>
-                      {label.split('/').pop()}
+                    <Typography
+                      variant="caption"
+                      noWrap
+                      sx={{
+                        maxWidth: 180,
+                        color: isDirty ? 'warning.main' : 'text.primary',
+                        fontWeight: isDirty ? 700 : 400,
+                      }}
+                    >
+                      {label.split('/').pop()}{isDirty ? ' *' : ''}
                     </Typography>
                   </Button>
                   <IconButton size="small" onClick={() => closeFile(id)} sx={{ p: 0.2 }}>
@@ -757,6 +864,22 @@ export default function SqlFiles() {
             </TextField>
             <Box sx={{ flex: 1 }} />
             {saveMsg && <Typography variant="caption" color="success.main">{saveMsg}</Typography>}
+            {!saveMsg && activeDirty && (
+              <Chip
+                label="unsaved"
+                size="small"
+                sx={{
+                  height: 20,
+                  fontSize: '0.68rem',
+                  fontWeight: 700,
+                  textTransform: 'lowercase',
+                  bgcolor: alpha('#f59e0b', 0.18),
+                  color: '#d97706',
+                  border: `1px solid ${alpha('#f59e0b', 0.45)}`,
+                  '& .MuiChip-label': { px: 1 },
+                }}
+              />
+            )}
             {updateMut.isPending && <CircularProgress size={16} />}
             <TextField
               select
@@ -784,7 +907,7 @@ export default function SqlFiles() {
               startIcon={<Save />}
               variant="contained"
               onClick={handleSave}
-              disabled={updateMut.isPending}
+              disabled={updateMut.isPending || !activeDirty}
             >
               Save
             </Button>

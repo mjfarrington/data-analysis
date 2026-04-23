@@ -77,7 +77,7 @@ export default function Settings() {
     mutationFn: (labels: string[]) => sqlFilesApi.updateVersionLabels(labels),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sql-version-labels'] })
-      setSaveMsg('SQL version labels saved.')
+      setSaveMsg('Version labels saved.')
       setSaveErr('')
       setTimeout(() => setSaveMsg(''), 3000)
     },
@@ -176,10 +176,10 @@ export default function Settings() {
 
             <Divider sx={{ my: 2.5 }} />
             <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
-              SQL Version Labels
+              Version Labels
             </Typography>
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
-              Labels available in SQL Files version tagging. Provide a comma-separated list.
+              Labels available for version tagging. Provide a comma-separated list.
             </Typography>
             <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end', maxWidth: 520 }}>
               <TextField
