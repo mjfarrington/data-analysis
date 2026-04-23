@@ -41,6 +41,7 @@ import {
 import StatusChip from '../components/StatusChip'
 
 const DEFAULT_PIPELINE_CATEGORY = 'Unknown'
+const DEFAULT_PIPELINE_STATUS: Pipeline['status'] = 'draft'
 
 function normalizePipelineCategory(category?: string): string {
   const value = (category ?? '').trim()
@@ -2338,6 +2339,12 @@ export default function PipelineEditor() {
 
   const [pipelineName, setPipelineName] = useState('')
   const [pipelineCategory, setPipelineCategory] = useState(DEFAULT_PIPELINE_CATEGORY)
+  const [pipelineStatus, setPipelineStatus] = useState<Pipeline['status']>(DEFAULT_PIPELINE_STATUS)
+  const [editMetaOpen, setEditMetaOpen] = useState(false)
+  const [metaDraftName, setMetaDraftName] = useState('')
+  const [metaDraftCategory, setMetaDraftCategory] = useState(DEFAULT_PIPELINE_CATEGORY)
+  const [metaDraftStatus, setMetaDraftStatus] = useState<Pipeline['status']>(DEFAULT_PIPELINE_STATUS)
+  const [metaEditError, setMetaEditError] = useState('')
   const [deletePipelineConfirm, setDeletePipelineConfirm] = useState(false)
   const [nodes, setNodes, onNodesChange] = useNodesState<PipelineNodeData>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
@@ -2429,6 +2436,7 @@ export default function PipelineEditor() {
     if (!pipeline) return
     setPipelineName(pipeline.name)
     setPipelineCategory((pipeline.category ?? '').trim() || DEFAULT_PIPELINE_CATEGORY)
+    setPipelineStatus(pipeline.status ?? DEFAULT_PIPELINE_STATUS)
 
     const cc = pipeline.canvas_config as { nodes?: unknown[]; edges?: unknown[]; viewport?: Viewport } | undefined
     if (cc?.nodes && cc.nodes.length > 0) {
@@ -2514,6 +2522,7 @@ export default function PipelineEditor() {
       return pipelinesApi.update(Number(id), {
         name: pipelineName,
         category: pipelineCategory.trim() || DEFAULT_PIPELINE_CATEGORY,
+        status: pipelineStatus,
         canvas_config: {
           nodes: nodes.map(n => ({
             id: n.id, type: n.type, position: n.position,
@@ -2527,7 +2536,10 @@ export default function PipelineEditor() {
         transform_config: { transforms_pipeline },
       })
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['pipelines'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['pipelines'] })
+      qc.invalidateQueries({ queryKey: ['pipeline', id] })
+    },
   })
 
   // ── ReactFlow callbacks ──────────────────────────────────────────────────
@@ -2681,6 +2693,32 @@ export default function PipelineEditor() {
     setEdges(newEdges)
   }
 
+  function openMetaEditor() {
+    setMetaDraftName(pipelineName)
+    setMetaDraftCategory(pipelineCategory)
+    setMetaDraftStatus(pipelineStatus)
+    setMetaEditError('')
+    setEditMetaOpen(true)
+  }
+
+  function closeMetaEditor() {
+    setMetaEditError('')
+    setEditMetaOpen(false)
+  }
+
+  function applyMetaEditor() {
+    const nextName = metaDraftName.trim()
+    if (!nextName) {
+      setMetaEditError('Name is required')
+      return
+    }
+    setPipelineName(nextName)
+    setPipelineCategory(normalizePipelineCategory(metaDraftCategory))
+    setPipelineStatus(metaDraftStatus)
+    setEditMetaOpen(false)
+    setMetaEditError('')
+  }
+
   if (pipelineLoading) {
     return <Box sx={{ display: 'flex', justifyContent: 'center', p: 6 }}><CircularProgress /></Box>
   }
@@ -2704,35 +2742,25 @@ export default function PipelineEditor() {
             <ArrowBack sx={{ fontSize: 18 }} />
           </IconButton>
         </Tooltip>
-        <TextField
-          value={pipelineName}
-          onChange={e => setPipelineName(e.target.value)}
+        <Typography variant="body2" sx={{ fontWeight: 600, maxWidth: 340 }} noWrap>
+          {pipelineName || 'Untitled pipeline'}
+        </Typography>
+        <Chip
+          label={normalizePipelineCategory(pipelineCategory)}
           size="small"
-          variant="standard"
-          sx={{ '& input': { fontWeight: 600, fontSize: '0.95rem' } }}
-          placeholder="Pipeline name…"
-        />
-        <Autocomplete
-          freeSolo
-          options={categoryOptions}
-          value={pipelineCategory}
-          onInputChange={(_, value) => setPipelineCategory(value)}
-          sx={{ minWidth: 180 }}
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              size="small"
-              variant="standard"
-              placeholder="Category"
-            />
-          )}
+          sx={{ fontSize: '0.68rem', height: 20 }}
         />
         <Chip
-          label={pipeline?.status ?? 'draft'}
+          label={pipelineStatus}
           size="small"
-          color={pipeline?.status === 'active' ? 'success' : 'default'}
+          color={pipelineStatus === 'active' ? 'success' : 'default'}
           sx={{ fontSize: '0.7rem', height: 20 }}
         />
+        <Tooltip title="Edit pipeline details">
+          <IconButton size="small" onClick={openMetaEditor}>
+            <Edit sx={{ fontSize: 16 }} />
+          </IconButton>
+        </Tooltip>
         <Box sx={{ flex: 1 }} />
         <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.68rem' }}>
           {nodes.length} node{nodes.length !== 1 ? 's' : ''} · {edges.length} edge{edges.length !== 1 ? 's' : ''}
@@ -3109,6 +3137,58 @@ export default function PipelineEditor() {
         onClose={() => setSqlPanel(p => ({ ...p, open: false }))}
         onHeightChange={h => setSqlPanel(p => ({ ...p, height: h }))}
       />
+
+      <Dialog open={editMetaOpen} onClose={closeMetaEditor} maxWidth="sm" fullWidth>
+        <DialogTitle>Edit Pipeline Details</DialogTitle>
+        <DialogContent sx={{ pt: '16px !important' }}>
+          {metaEditError && <Alert severity="error" sx={{ mb: 1.5 }}>{metaEditError}</Alert>}
+          <TextField
+            label="Name"
+            value={metaDraftName}
+            onChange={e => {
+              setMetaDraftName(e.target.value)
+              if (metaEditError) setMetaEditError('')
+            }}
+            fullWidth
+            size="small"
+            autoFocus
+          />
+          <Autocomplete
+            freeSolo
+            options={categoryOptions}
+            value={metaDraftCategory}
+            onInputChange={(_, value) => setMetaDraftCategory(value)}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Category"
+                fullWidth
+                size="small"
+                sx={{ mt: 1.5 }}
+              />
+            )}
+          />
+          <Box sx={{ mt: 1.5 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+              Status
+            </Typography>
+            <Select
+              value={metaDraftStatus}
+              onChange={event => setMetaDraftStatus(event.target.value as Pipeline['status'])}
+              size="small"
+              fullWidth
+            >
+              <MenuItem value="active">Active</MenuItem>
+              <MenuItem value="inactive">Inactive</MenuItem>
+              <MenuItem value="draft">Draft</MenuItem>
+            </Select>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeMetaEditor}>Cancel</Button>
+          <Button variant="contained" onClick={applyMetaEditor}>Apply</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Delete pipeline confirm */}
       <Dialog open={deletePipelineConfirm} onClose={() => setDeletePipelineConfirm(false)} maxWidth="xs">
