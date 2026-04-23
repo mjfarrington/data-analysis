@@ -44,17 +44,38 @@ interface Props {
   live?: boolean
   /** Initial panel height in px */
   defaultHeight?: number
+  /** Dynamically size the panel to fill from its top position to the viewport bottom */
+  fillToBottom?: boolean
+  /** Padding from viewport bottom (px) when fillToBottom is true */
+  bottomPadding?: number
 }
 
-export default function RunLogPanel({ logs, live = false, defaultHeight = 220 }: Props) {
+export default function RunLogPanel({ logs, live = false, defaultHeight = 220, fillToBottom = false, bottomPadding = 16 }: Props) {
   const theme = useTheme()
   const scrollRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
   const [search, setSearch] = useState('')
   const [levelFilter, setLevelFilter] = useState<Set<string>>(new Set())
   const [stepFilter, setStepFilter] = useState('')
   const [autoScroll, setAutoScroll] = useState(live)
   const [copied, setCopied] = useState(false)
   const [height, setHeight] = useState(defaultHeight)
+
+  // When fillToBottom is requested, measure the panel's top and fill to viewport bottom
+  useEffect(() => {
+    if (!fillToBottom) return
+    function updateHeight() {
+      const el = panelRef.current
+      if (!el) return
+      const top = el.getBoundingClientRect().top
+      setHeight(Math.max(120, window.innerHeight - top - bottomPadding))
+    }
+    updateHeight()
+    window.addEventListener('resize', updateHeight)
+    // Also run once more after a short delay to handle Collapse animation
+    const t = setTimeout(updateHeight, 150)
+    return () => { window.removeEventListener('resize', updateHeight); clearTimeout(t) }
+  }, [fillToBottom, bottomPadding])
 
   // Unique steps for filter
   const steps = useMemo(() => {
@@ -132,7 +153,7 @@ export default function RunLogPanel({ logs, live = false, defaultHeight = 220 }:
   const borderColor = isDark ? '#30363d' : '#d0d7de'
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', borderTop: `1px solid ${borderColor}` }}>
+    <Box ref={panelRef} sx={{ display: 'flex', flexDirection: 'column', borderTop: `1px solid ${borderColor}` }}>
       {/* ── Toolbar ── */}
       <Box sx={{
         display: 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 0.5,

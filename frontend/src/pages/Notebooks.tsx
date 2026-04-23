@@ -561,7 +561,7 @@ export default function Notebooks() {
       {/* ── Sidebar ── */}
       <Box sx={{ width: 220, flexShrink: 0, bgcolor: 'background.paper', borderRight: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column' }}>
         <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}` }}>
-          <Typography variant="subtitle2" fontWeight={700}>Notebooks</Typography>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Notebooks</Typography>
         </Box>
         <Box sx={{ flex: 1, overflowY: 'auto' }}>
           {isLoading
@@ -580,10 +580,8 @@ export default function Notebooks() {
                   >
                     <ListItemButton selected={selected?.id === nb.id} onClick={() => openNotebook(nb)} sx={{ px: 2, py: 0.75, pr: 4 }}>
                       <ListItemText
-                        primary={nb.name}
-                        secondary={`${nb.cells.length} cells`}
-                        primaryTypographyProps={{ variant: 'body2', fontWeight: 500, noWrap: true }}
-                        secondaryTypographyProps={{ variant: 'caption' }}
+                        primary={<Typography variant="body2" noWrap sx={{ fontWeight: 500 }}>{nb.name}</Typography>}
+                        secondary={<Typography variant="caption">{`${nb.cells.length} cells`}</Typography>}
                       />
                     </ListItemButton>
                   </ListItem>

@@ -3,6 +3,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter
@@ -46,6 +47,59 @@ async def _check_http(name: str, url: str, timeout: float = 5.0) -> ServiceInfo:
         )
 
 
+async def _check_tcp(name: str, host: str, port: int, timeout: float = 5.0) -> ServiceInfo:
+    """Check whether a TCP port is accepting connections."""
+    t0 = time.perf_counter()
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        latency = (time.perf_counter() - t0) * 1000
+        return ServiceInfo(
+            name=name,
+            status="healthy",
+            url=f"{host}:{port}",
+            latency_ms=round(latency, 2),
+            message=f"Port {port} open",
+        )
+    except Exception as exc:
+        return ServiceInfo(
+            name=name,
+            status="unhealthy",
+            url=f"{host}:{port}",
+            latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+            message=str(exc),
+        )
+
+
+def _check_derby(metastore_dir: Path) -> ServiceInfo:
+    """Determine Derby metastore health from lock-file presence."""
+    db_lck = metastore_dir / "db.lck"
+    dbex_lck = metastore_dir / "dbex.lck"
+    if not metastore_dir.exists():
+        return ServiceInfo(
+            name="Derby Metastore",
+            status="unhealthy",
+            message="Metastore directory not found",
+        )
+    if db_lck.exists() or dbex_lck.exists():
+        return ServiceInfo(
+            name="Derby Metastore",
+            status="healthy",
+            message="Lock file present — metastore active",
+        )
+    return ServiceInfo(
+        name="Derby Metastore",
+        status="degraded",
+        message="Metastore directory exists but no lock file",
+    )
+
+
 async def _spark_master_details() -> dict:
     """Fetch worker core/memory totals from Spark Master REST API."""
     try:
@@ -73,10 +127,12 @@ async def _spark_master_details() -> dict:
 
 @router.get("/status", response_model=ServicesStatus)
 async def get_services_status():
+    metastore_dir = Path(settings.DATA_DIR) / "spark" / "metastore_db"
     tasks = [
         _check_http("Spark Master", f"{settings.SPARK_MASTER_WEBUI}/api/v1/applications"),
         _check_http("Spark Worker", f"{settings.SPARK_WORKER_WEBUI}/json/"),
         _check_http("Spark History", f"{settings.SPARK_HISTORY_WEBUI}/api/v1/applications"),
+        _check_tcp("Spark Thrift Server", settings.SPARK_THRIFT_HOST, settings.SPARK_THRIFT_PORT),
         _spark_master_details(),
     ]
 
@@ -107,6 +163,9 @@ async def get_services_status():
             message=connect_result.get("message"),
         )
     )
+
+    # Derby metastore check (sync — file I/O only)
+    services.append(_check_derby(metastore_dir))
 
     # FastAPI backend self-check (always healthy if we reached here)
     services.append(

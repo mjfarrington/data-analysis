@@ -1,4 +1,5 @@
 import { useCallback, useState, useMemo, useEffect, useRef, createContext, useContext } from 'react'
+import RunDetailPanel, { formatDuration, formatRunDate } from '../components/RunDetailPanel'
 import { useParams, useNavigate } from 'react-router-dom'
 import ReactFlow, {
   Background, MiniMap,
@@ -7,13 +8,14 @@ import ReactFlow, {
   Handle, Position, MarkerType, Panel,
   ReactFlowInstance, Viewport, useReactFlow, useStore,
 } from 'reactflow'
+// @ts-expect-error side-effect stylesheet import provided by reactflow at build time
 import 'reactflow/dist/style.css'
 import {
   Box, Typography, Button, IconButton, Tooltip,
   TextField, Select, MenuItem, FormControl, InputLabel,
   Divider, Chip, CircularProgress, alpha, useTheme,
   Tab, Tabs, Switch, FormControlLabel,
-  List, ListItem, ListItemText, ListItemSecondaryAction,
+  List, ListItemButton, ListItemText, ListItemSecondaryAction,
   Dialog, DialogTitle, DialogContent, DialogActions,
   ToggleButton, ToggleButtonGroup, Alert, Collapse,
   Paper, InputAdornment, Table, TableHead, TableRow,
@@ -28,14 +30,15 @@ import {
   EditNote, Info, Dataset as DatasetIcon, Visibility,
   Loop as LoopIcon, CheckBox, CheckBoxOutlineBlank,
   ZoomIn, ZoomOut, CenterFocusStrong, LibraryBooks,
-  CloudDownload as S3Icon,
+  CloudDownload as S3Icon, FirstPage, LastPage,
 } from '@mui/icons-material'
 import { Checkbox, ListItemIcon } from '@mui/material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   pipelinesApi, connectionsApi, sqlFilesApi, dictionariesApi, transformApi,
-  Pipeline, Connection, SqlFile, Dictionary, PreviewResult, ForeachEntryResult, NotebookFile,
+  Pipeline, Connection, SqlFile, Dictionary, PreviewResult, ForeachEntryResult, NotebookFile, RunSummary,
 } from '../api/client'
+import StatusChip from '../components/StatusChip'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Node catalog
@@ -640,7 +643,7 @@ function SqlBottomPanel({
       {/* Header */}
       <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, pb: 0.5, flexShrink: 0, gap: 1 }}>
         <Code sx={{ fontSize: 15, color: 'primary.main' }} />
-        <Typography variant="caption" fontWeight={700} sx={{ flex: 1, fontSize: '0.75rem' }}>SQL Editor</Typography>
+        <Typography variant="caption" sx={{ flex: 1, fontSize: '0.75rem', fontWeight: 700 }}>SQL Editor</Typography>
         <Button
           size="small"
           variant="contained"
@@ -968,7 +971,7 @@ function JdbcExtractForm({
       <Box>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
           <Info sx={{ fontSize: 13, color: 'text.secondary' }} />
-          <Typography variant="caption" color="text.secondary" fontWeight={600}>Available SQL Variables</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Available SQL Variables</Typography>
         </Box>
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
           {BUILTIN_PARAMS.map(v => (
@@ -996,7 +999,7 @@ function JdbcExtractForm({
           onClick={() => setShowVars(v => !v)}
         >
           {showVars ? <ExpandLess sx={{ fontSize: 14, color: 'text.secondary' }} /> : <ExpandMore sx={{ fontSize: 14, color: 'text.secondary' }} />}
-          <Typography variant="caption" color="text.secondary" fontWeight={600} sx={{ fontSize: '0.72rem' }}>
+          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.72rem', fontWeight: 600 }}>
             Advanced Settings
           </Typography>
           {params.length > 0 && (
@@ -1010,7 +1013,7 @@ function JdbcExtractForm({
             {/* Parameters */}
             <Box>
               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.75 }}>
-                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.6rem' }}>
+                <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.6rem', fontWeight: 700 }}>
                   Injected Parameters
                 </Typography>
                 <Tooltip title="Add parameter">
@@ -1028,7 +1031,7 @@ function JdbcExtractForm({
                     value={p.key}
                     onChange={e => updateParam(i, 'key', e.target.value)}
                     sx={{ flex: 1 }}
-                    inputProps={{ style: { fontFamily: 'monospace', fontSize: '0.72rem' } }}
+                    slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.72rem' } } }}
                   />
                   <TextField
                     size="small"
@@ -1037,14 +1040,14 @@ function JdbcExtractForm({
                     onChange={e => updateParam(i, 'value', e.target.value)}
                     sx={{ flex: 1.5 }}
                     placeholder="2026-04-18 or APP001"
-                    inputProps={{ style: { fontSize: '0.72rem' } }}
+                    slotProps={{ htmlInput: { style: { fontSize: '0.72rem' } } }}
                   />
                   <IconButton size="small" onClick={() => removeParam(i)}><Close sx={{ fontSize: 13 }} /></IconButton>
                 </Box>
               ))}
               {dictionaries.length > 0 && (
                 <Box sx={{ mt: 0.5 }}>
-                  <Typography variant="caption" color="text.secondary" fontSize="0.62rem">
+                  <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem' }}>
                     Use dict entries: add <code>app_id</code> / <code>app_name</code> with values from your Dictionaries page.
                   </Typography>
                 </Box>
@@ -1182,7 +1185,7 @@ function S3ExtractForm({
 
       {/* Target table */}
       <Divider />
-      <Typography variant="caption" color="text.secondary" fontWeight={600} sx={{ textTransform: 'uppercase', fontSize: '0.62rem', letterSpacing: '0.06em' }}>
+      <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', fontSize: '0.62rem', letterSpacing: '0.06em', fontWeight: 600 }}>
         Target Spark Table
       </Typography>
       <Box sx={{ display: 'flex', gap: 1 }}>
@@ -1220,7 +1223,7 @@ function S3ExtractForm({
         onClick={() => setShowSql(v => !v)}
       >
         {showSql ? <ExpandLess sx={{ fontSize: 14, color: 'text.secondary' }} /> : <ExpandMore sx={{ fontSize: 14, color: 'text.secondary' }} />}
-        <Typography variant="caption" color="text.secondary" fontWeight={600}>SQL Transform (optional)</Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>SQL Transform (optional)</Typography>
       </Box>
       <Collapse in={showSql}>
         <TextField
@@ -1233,7 +1236,7 @@ function S3ExtractForm({
           fullWidth
           placeholder="SELECT * FROM {source} WHERE date >= '2026-01-01'"
           helperText="Use {source} to reference the raw ingested data."
-          inputProps={{ style: { fontFamily: 'monospace', fontSize: '0.75rem' } }}
+          slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.75rem' } } }}
         />
       </Collapse>
     </Box>
@@ -1300,7 +1303,7 @@ function DWExtractForm({
             sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer', mb: 0.5 }}
             onClick={() => setShowVars(v => !v)}
           >
-            <Typography variant="caption" fontWeight={600} color="text.secondary">SQL Preview</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>SQL Preview</Typography>
             {showVars ? <ExpandLess sx={{ fontSize: 14 }} /> : <ExpandMore sx={{ fontSize: 14 }} />}
           </Box>
           <Collapse in={showVars}>
@@ -1324,7 +1327,7 @@ function DWExtractForm({
           onClick={() => setShowVars(v => !v)}
         >
           <Info sx={{ fontSize: 13, color: 'text.secondary' }} />
-          <Typography variant="caption" color="text.secondary" fontWeight={600}>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
             Available SQL Variables
           </Typography>
         </Box>
@@ -1382,7 +1385,7 @@ function DWExtractForm({
             size="small"
             value={config.date_from ?? ''}
             onChange={e => onChange({ date_from: e.target.value })}
-            InputLabelProps={{ shrink: true }}
+            slotProps={{ inputLabel: { shrink: true } }}
             sx={{ flex: 1 }}
           />
           <TextField
@@ -1391,7 +1394,7 @@ function DWExtractForm({
             size="small"
             value={config.date_to ?? ''}
             onChange={e => onChange({ date_to: e.target.value })}
-            InputLabelProps={{ shrink: true }}
+            slotProps={{ inputLabel: { shrink: true } }}
             sx={{ flex: 1 }}
           />
         </Box>
@@ -1401,7 +1404,7 @@ function DWExtractForm({
 
       {/* Output format */}
       <Box>
-        <Typography variant="caption" fontWeight={600} color="text.secondary" display="block" mb={0.75}>
+        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, display: 'block', mb: 0.75 }}>
           Output Format
         </Typography>
         <ToggleButtonGroup
@@ -1439,7 +1442,7 @@ function DWExtractForm({
             value={config.sample_row_limit ?? 1000}
             onChange={e => onChange({ sample_row_limit: Number(e.target.value) })}
             sx={{ mt: 1 }}
-            inputProps={{ min: 1, max: 100000 }}
+            slotProps={{ htmlInput: { min: 1, max: 100000 } }}
             helperText="Rows returned when sample mode is enabled"
           />
         )}
@@ -1645,7 +1648,7 @@ function LoadParquetForm({ config, onChange }: {
         value={config.path_template ?? ''}
         onChange={e => onChange({ path_template: e.target.value })}
         placeholder="{business_date}/{pipeline_name}/{app_id}"
-        inputProps={{ style: { fontFamily: 'monospace', fontSize: '0.72rem' } }}
+        slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.72rem' } } }}
         helperText="Supports {app_id}, {app_name}, {business_date} from connected Iterator"
       />
       <TextField
@@ -1778,13 +1781,13 @@ function IteratorForm({ config, onChange, dictionaries, onRun }: {
             label={`${selectedDict.key_label} → $param`}
             value={config.key_param ?? selectedDict.key_label.toLowerCase().replace(/\s+/g, '_')}
             onChange={e => onChange({ key_param: e.target.value })}
-            inputProps={{ style: { fontFamily: 'monospace', fontSize: '0.72rem' } }}
+            slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.72rem' } } }}
             helperText="SQL param name for key column" />
           <TextField size="small" fullWidth
             label={`${selectedDict.value_label} → $param`}
             value={config.value_param ?? selectedDict.value_label.toLowerCase().replace(/\s+/g, '_')}
             onChange={e => onChange({ value_param: e.target.value })}
-            inputProps={{ style: { fontFamily: 'monospace', fontSize: '0.72rem' } }}
+            slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.72rem' } } }}
             helperText="SQL param name for value column" />
         </Box>
       )}
@@ -1795,8 +1798,8 @@ function IteratorForm({ config, onChange, dictionaries, onRun }: {
       {selectedDict ? (
         <Box>
           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5 }}>
-            <Typography variant="caption" fontWeight={700} color="text.secondary"
-              sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.6rem' }}>
+            <Typography variant="caption" color="text.secondary"
+              sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.6rem', fontWeight: 700 }}>
               Entries to iterate ({activeKeys.length} of {selectedDict.entries.length})
             </Typography>
             <Box sx={{ display: 'flex', gap: 0.5 }}>
@@ -2080,7 +2083,7 @@ function ConnectionsPanel({ onConnectionsChange }: { onConnectionsChange?: () =>
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <Box sx={{ px: 1.5, pt: 1, pb: 0.75, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Typography variant="caption" fontWeight={700} color="text.secondary" textTransform="uppercase" letterSpacing="0.07em" fontSize="0.6rem">
+        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', fontSize: '0.6rem' }}>
           Connections
         </Typography>
         <Tooltip title="New connection">
@@ -2253,7 +2256,7 @@ function SchemaPanel({
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', p: 1.5, gap: 1 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-        <Typography variant="caption" fontWeight={700} color="text.secondary" textTransform="uppercase" letterSpacing="0.07em" fontSize="0.6rem" sx={{ flex: 1 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', fontSize: '0.6rem', flex: 1 }}>
           Pipeline JSON — {pipelineName}
         </Typography>
         {editMode ? (
@@ -2287,7 +2290,7 @@ function SchemaPanel({
             '& .MuiInputBase-root': { fontFamily: 'monospace', fontSize: '0.72rem', alignItems: 'flex-start', height: '100%' },
             '& textarea': { height: '100% !important' },
           }}
-          inputProps={{ style: { whiteSpace: 'pre', overflowX: 'auto' } }}
+          slotProps={{ htmlInput: { style: { whiteSpace: 'pre', overflowX: 'auto' } } }}
         />
       ) : (
         <Box
@@ -2324,7 +2327,8 @@ export default function PipelineEditor() {
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
   const [selectedNode, setSelectedNode] = useState<Node<PipelineNodeData> | null>(null)
   const [rightTab, setRightTab] = useState(0)
-  const [rightPanelWidth, setRightPanelWidth] = useState(290)
+  const [rightPanelWidth, setRightPanelWidth] = useState(340)
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const rightPanelDragging = useRef(false)
   const [sqlPanel, setSqlPanel] = useState<SqlPanelState>({ ...CLOSED_PANEL })
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
@@ -2336,7 +2340,7 @@ export default function PipelineEditor() {
     const startWidth = rightPanelWidth
     const onMove = (mv: MouseEvent) => {
       if (!rightPanelDragging.current) return
-      const next = Math.max(220, Math.min(600, startWidth + (startX - mv.clientX)))
+      const next = Math.max(340, Math.min(600, startWidth + (startX - mv.clientX)))
       setRightPanelWidth(next)
     }
     const onUp = () => {
@@ -2378,6 +2382,21 @@ export default function PipelineEditor() {
     queryFn: transformApi.listNotebooks,
   })
 
+  const { data: pipelineRuns = [], isLoading: runsLoading } = useQuery<RunSummary[]>({
+    queryKey: ['pipeline-runs', id],
+    queryFn: () => pipelinesApi.getRuns(Number(id)),
+    enabled: !!id,
+    refetchInterval: (q) => {
+      const runs = (q.state.data as RunSummary[] | undefined) ?? []
+      return runs.some(r => r.status === 'running' || r.status === 'pending') ? 3000 : false
+    },
+  })
+
+  const recentRuns = useMemo(
+    () => [...pipelineRuns].sort((a, b) => b.id - a.id).slice(0, 20),
+    [pipelineRuns],
+  )
+
   // ── Load canvas state when pipeline arrives ──────────────────────────────
 
   useEffect(() => {
@@ -2406,9 +2425,16 @@ export default function PipelineEditor() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['pipelines'] }); navigate('/pipelines') },
   })
 
+  const [activeRunId, setActiveRunId] = useState<number | null>(null)
+
   const runMut = useMutation({
     mutationFn: () => pipelinesApi.run(Number(id)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['pipelines'] }),
+    onSuccess: (run) => {
+      setActiveRunId(run.id)
+      qc.invalidateQueries({ queryKey: ['pipelines'] })
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+      qc.invalidateQueries({ queryKey: ['pipeline-runs', id] })
+    },
   })
 
   const saveMut = useMutation({
@@ -2697,6 +2723,26 @@ export default function PipelineEditor() {
         </Tooltip>
       </Box>
 
+      {/* ── Layout row ──────────────────────────────────────────────── */}
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'flex-end',
+          px: 1,
+          py: 0.25,
+          flexShrink: 0,
+          bgcolor: 'background.paper',
+          borderBottom: `1px solid ${theme.palette.divider}`,
+        }}
+      >
+        <Tooltip title={rightPanelCollapsed ? 'Show right panel' : 'Hide right panel'}>
+          <IconButton size="small" onClick={() => setRightPanelCollapsed(v => !v)}>
+            {rightPanelCollapsed ? <FirstPage sx={{ fontSize: 16 }} /> : <LastPage sx={{ fontSize: 16 }} />}
+          </IconButton>
+        </Tooltip>
+      </Box>
+
       {/* ── Main body ──────────────────────────────────────────────────── */}
       <Box sx={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
@@ -2800,41 +2846,43 @@ export default function PipelineEditor() {
         </Box>
 
         {/* Right panel */}
-        <Box
-          sx={{
-            width: rightPanelWidth, flexShrink: 0,
-            bgcolor: 'background.paper',
-            borderLeft: `1px solid ${theme.palette.divider}`,
-            display: 'flex', flexDirection: 'column',
-            overflow: 'hidden',
-            position: 'relative',
-          }}
-        >
-          {/* Drag handle */}
+        {!rightPanelCollapsed && (
           <Box
-            onMouseDown={handleRightPanelMouseDown}
             sx={{
-              position: 'absolute', left: 0, top: 0, bottom: 0, width: 4,
-              cursor: 'col-resize', zIndex: 10,
-              '&:hover': { bgcolor: 'primary.main', opacity: 0.5 },
-            }}
-          />
-          <Tabs
-            value={rightTab}
-            onChange={(_, v) => setRightTab(v)}
-            variant="fullWidth"
-            sx={{
-              flexShrink: 0,
-              borderBottom: `1px solid ${theme.palette.divider}`,
-              '& .MuiTab-root': { fontSize: '0.7rem', minHeight: 36, textTransform: 'none' },
+              width: rightPanelWidth, flexShrink: 0,
+              bgcolor: 'background.paper',
+              borderLeft: `1px solid ${theme.palette.divider}`,
+              display: 'flex', flexDirection: 'column',
+              overflow: 'hidden',
+              position: 'relative',
             }}
           >
-            <Tab label="Properties" />
-            <Tab label="Connections" />
-            <Tab label="Schema" />
-          </Tabs>
+            {/* Drag handle */}
+            <Box
+              onMouseDown={handleRightPanelMouseDown}
+              sx={{
+                position: 'absolute', left: 0, top: 0, bottom: 0, width: 4,
+                cursor: 'col-resize', zIndex: 10,
+                '&:hover': { bgcolor: 'primary.main', opacity: 0.5 },
+              }}
+            />
+            <Tabs
+              value={rightTab}
+              onChange={(_, v) => setRightTab(v)}
+              variant="fullWidth"
+              sx={{
+                flexShrink: 0,
+                borderBottom: `1px solid ${theme.palette.divider}`,
+                '& .MuiTab-root': { fontSize: '0.66rem', minHeight: 36, textTransform: 'none', px: 0.75, minWidth: 0 },
+              }}
+            >
+              <Tab label="Properties" />
+              <Tab label="Runs" />
+              <Tab label="Connections" />
+              <Tab label="Schema" />
+            </Tabs>
 
-          <Box sx={{ flex: 1, overflowY: 'auto' }}>
+            <Box sx={{ flex: 1, overflowY: 'auto' }}>
             {/* Properties tab */}
             {rightTab === 0 && (
               selectedNode
@@ -2859,11 +2907,81 @@ export default function PipelineEditor() {
                 )
             )}
 
+            {/* Runs tab */}
+            {rightTab === 1 && (
+              <Box sx={{ p: 1.25 }}>
+                {runsLoading ? (
+                  <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+                    <CircularProgress size={18} />
+                  </Box>
+                ) : recentRuns.length === 0 ? (
+                  <Typography variant="caption" color="text.secondary" sx={{ px: 1, py: 0.5, display: 'block' }}>
+                    No runs yet for this pipeline.
+                  </Typography>
+                ) : (
+                  <List disablePadding>
+                    {recentRuns.map(run => {
+                      const selected = activeRunId === run.id
+                      return (
+                        <ListItemButton
+                          key={run.id}
+                          selected={selected}
+                          disableRipple
+                          onClick={() => setActiveRunId(run.id)}
+                          sx={{
+                            color: theme.palette.text.primary,
+                            borderRadius: 1,
+                            mb: 0.5,
+                            border: `1px solid ${theme.palette.divider}`,
+                            bgcolor: selected ? alpha(theme.palette.text.primary, 0.12) : 'transparent',
+                            '&.Mui-selected': {
+                              bgcolor: alpha(theme.palette.text.primary, 0.16),
+                              borderColor: alpha(theme.palette.text.primary, 0.32),
+                              color: theme.palette.text.primary,
+                            },
+                            '&.Mui-selected:hover': {
+                              bgcolor: `${alpha(theme.palette.text.primary, 0.22)} !important`,
+                            },
+                            '&.Mui-focusVisible': {
+                              bgcolor: `${alpha(theme.palette.text.primary, 0.22)} !important`,
+                            },
+                            '& .MuiTouchRipple-root': {
+                              display: 'none',
+                            },
+                            '& .MuiTypography-root': {
+                              color: theme.palette.text.primary,
+                            },
+                            '&:hover': {
+                              bgcolor: `${alpha(theme.palette.text.primary, 0.1)} !important`,
+                            },
+                          }}
+                        >
+                          <ListItemText
+                            primary={
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+                                <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>#{run.id}</Typography>
+                                <StatusChip status={run.status} />
+                              </Box>
+                            }
+                            secondary={
+                              <Typography variant="caption" sx={{ display: 'block', mt: 0.4, color: alpha(theme.palette.text.primary, 0.82) }}>
+                                {formatRunDate(run.started_at)} · {formatDuration(run.duration_seconds)}
+                              </Typography>
+                            }
+                          />
+                        </ListItemButton>
+                      )
+                    })}
+                  </List>
+                )}
+              </Box>
+            )}
+
             {/* Connections tab */}
-            {rightTab === 1 && <ConnectionsPanel />}
+            {rightTab === 2 && <ConnectionsPanel />}
 
             {/* Schema tab */}
-            {rightTab === 2 && (
+            {rightTab === 3 && (
               <SchemaPanel
                 nodes={nodes}
                 edges={edges}
@@ -2871,9 +2989,36 @@ export default function PipelineEditor() {
                 onApply={handleSchemaApply}
               />
             )}
+            </Box>
+          </Box>
+        )}
+      </Box>
+
+      {/* ── Run Detail Panel ────────────────────────────────────────── */}
+      {activeRunId != null && (
+        <Box sx={{ flexShrink: 0, maxHeight: '50vh', display: 'flex', flexDirection: 'column', borderTop: `1px solid ${theme.palette.divider}` }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', px: 2, py: 0.5, flexShrink: 0, bgcolor: 'background.paper', borderBottom: `1px solid ${theme.palette.divider}` }}>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Run #{activeRunId}</Typography>
+            <Box sx={{ flex: 1 }} />
+            <Tooltip title="Close run panel">
+              <IconButton size="small" onClick={() => setActiveRunId(null)}>
+                <Close sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          </Box>
+          <Box sx={{ overflowY: 'auto', flex: 1 }}>
+            <RunDetailPanel
+              runId={activeRunId}
+              disableGraphView
+              onCancelled={() => {
+                qc.invalidateQueries({ queryKey: ['pipelines'] })
+                qc.invalidateQueries({ queryKey: ['all-runs'] })
+                qc.invalidateQueries({ queryKey: ['pipeline-runs', id] })
+              }}
+            />
           </Box>
         </Box>
-      </Box>
+      )}
 
       {/* SQL Bottom Panel */}
       <SqlBottomPanel

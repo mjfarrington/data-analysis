@@ -1,303 +1,25 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Box, Typography, Table, TableHead, TableRow, TableCell, TableBody,
-  Chip, TextField, MenuItem, Button, CircularProgress, Collapse,
-  Alert, IconButton, Tooltip, alpha, useTheme,
+  TextField, MenuItem, Button, CircularProgress, Collapse,
+  IconButton, Tooltip, alpha, useTheme, Checkbox,
   Dialog, DialogTitle, DialogContent, DialogActions,
-  ToggleButtonGroup, ToggleButton,
 } from '@mui/material'
 import {
-  ExpandMore, ExpandLess, ChevronRight, Cancel, PlayArrow, Refresh, Delete,
-  AccountTree, FormatListBulleted,
+  ExpandMore, ExpandLess, Delete,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { runsApi, pipelinesApi, RunSummary, RunDetail, RunStep } from '../api/client'
+import { runsApi, pipelinesApi, RunSummary } from '../api/client'
 import { format, parseISO } from 'date-fns'
-import RunLogPanel from '../components/RunLogPanel'
 import StatusChip from '../components/StatusChip'
-import RunGraphView from '../components/RunGraphView'
+import RunDetailPanel, { formatDuration, formatRunDate as formatDate } from '../components/RunDetailPanel'
+import TableToolbar from '../components/TableToolbar'
+import SortableTableCell from '../components/SortableTableCell'
 
-// ── Step tree helpers (mirrors Pipelines.tsx InlineRunMonitor) ────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-interface StepNode { step: RunStep; children: StepNode[] }
-
-function buildStepTree(steps: RunStep[]): StepNode[] {
-  const byId = new Map<number, StepNode>()
-  for (const s of steps) byId.set(s.id, { step: s, children: [] })
-  const roots: StepNode[] = []
-  for (const node of byId.values()) {
-    const pid = node.step.parent_step_id
-    if (pid != null && byId.has(pid)) byId.get(pid)!.children.push(node)
-    else roots.push(node)
-  }
-  const sort = (ns: StepNode[]) => { ns.sort((a, b) => a.step.step_order - b.step.step_order); ns.forEach(n => sort(n.children)) }
-  sort(roots)
-  return roots
-}
-
-function derivedStatus(node: StepNode): string {
-  if (node.children.length === 0) return node.step.status
-  const cs = node.children.map(derivedStatus)
-  if (cs.some(s => s === 'failed')) return 'failed'
-  if (cs.some(s => s === 'running' || s === 'pending')) return 'running'
-  if (cs.every(s => s === 'completed')) return 'completed'
-  return node.step.status
-}
-
-const STEP_COLORS: Record<string, string> = {
-  extract: '#58a6ff', app: '#e3b341', chunk: '#a371f7',
-  load: '#3fb950', filter: '#f0883e', sort: '#f0883e',
-  join: '#f0883e', aggregate: '#f0883e', sql_transform: '#f0883e',
-}
-
-function StepDot({ status, color }: { status: string; color: string }) {
-  const size = 9
-  if (status === 'running') return <CircularProgress size={size + 1} thickness={4} sx={{ color, flexShrink: 0 }} />
-  const bg = status === 'completed' ? '#3fb950' : status === 'failed' ? '#f85149' : status === 'cancelled' ? '#6e7681' : undefined
-  return <Box sx={{ width: size, height: size, borderRadius: '50%', flexShrink: 0, bgcolor: bg, border: bg ? undefined : `1.5px solid ${alpha(color, 0.4)}` }} />
-}
-
-function StepTreeRow({ node, depth = 0 }: { node: StepNode; depth?: number }) {
-  const [open, setOpen] = useState(depth < 2)
-  const theme = useTheme()
-  const status = derivedStatus(node)
-  const prevStatusRef = useRef<string | null>(null)
-
-  // Collapse only when transitioning from an active state to terminal —
-  // NOT when already terminal on first render (e.g. viewing history).
-  useEffect(() => {
-    const prev = prevStatusRef.current
-    prevStatusRef.current = status
-    if (prev !== null && prev !== status &&
-        (status === 'completed' || status === 'failed' || status === 'cancelled')) {
-      setOpen(false)
-    }
-  }, [status])
-  const color = STEP_COLORS[node.step.step_type] ?? '#6e7681'
-  const hasChildren = node.children.length > 0
-  const done = node.children.filter(c => ['completed','failed','cancelled'].includes(derivedStatus(c))).length
-
-  return (
-    <>
-      <Box
-        onClick={hasChildren ? () => setOpen(o => !o) : undefined}
-        sx={{
-          display: 'flex', alignItems: 'center', gap: 1,
-          pl: `${8 + depth * 20}px`, pr: 1.5,
-          py: depth === 0 ? 0.75 : 0.5,
-          cursor: hasChildren ? 'pointer' : 'default',
-          borderTop: `1px solid ${alpha(theme.palette.divider, depth === 0 ? 0.6 : 0.2)}`,
-          bgcolor: depth === 1 ? alpha(theme.palette.background.default, 0.5)
-                : depth >= 2 ? alpha(theme.palette.background.default, 0.85)
-                : 'transparent',
-          '&:hover': hasChildren ? { bgcolor: alpha(theme.palette.action.hover, 0.7) } : {},
-        }}>
-        <Box sx={{ width: 14, flexShrink: 0, display: 'flex', alignItems: 'center' }}>
-          {hasChildren && (open
-            ? <ExpandMore sx={{ fontSize: 14, color: 'text.disabled' }} />
-            : <ChevronRight sx={{ fontSize: 14, color: 'text.disabled' }} />)}
-        </Box>
-        <StepDot status={status} color={color} />
-        <Box component="span" sx={{
-          fontSize: '0.62rem', fontWeight: 700, px: 0.75, py: 0.15,
-          borderRadius: 0.5, bgcolor: alpha(color, 0.15), color,
-          textTransform: 'uppercase', letterSpacing: '0.04em', flexShrink: 0,
-        }}>
-          {node.step.step_type}
-        </Box>
-        {node.step.step_label && (
-          <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1, minWidth: 0 }}>
-            {node.step.step_label}
-          </Typography>
-        )}
-        <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 1.5, flexShrink: 0 }}>
-          {hasChildren && node.children.length > 0 && (
-            <Typography variant="caption" color="text.disabled">
-              {done}/{node.children.length}
-            </Typography>
-          )}
-          {node.step.records_out != null && (
-            <Typography variant="caption" color="text.secondary">
-              {node.step.records_out.toLocaleString()} rows
-            </Typography>
-          )}
-          {node.step.duration_seconds != null && (
-            <Typography variant="caption" color="text.disabled" sx={{ minWidth: 36, textAlign: 'right' }}>
-              {node.step.duration_seconds < 60
-                ? `${node.step.duration_seconds.toFixed(1)}s`
-                : `${Math.floor(node.step.duration_seconds / 60)}m${(node.step.duration_seconds % 60).toFixed(0)}s`}
-            </Typography>
-          )}
-          <StatusChip status={status} />
-        </Box>
-      </Box>
-      {hasChildren && open && node.children.map(child => (
-        <StepTreeRow key={child.step.id} node={child} depth={depth + 1} />
-      ))}
-    </>
-  )
-}
-
-function formatDuration(seconds?: number): string {
-  if (seconds == null) return '—'
-  if (seconds < 60) return `${seconds.toFixed(1)}s`
-  return `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`
-}
-
-function formatDate(str?: string): string {
-  if (!str) return '—'
-  try { return format(parseISO(str.endsWith('Z') ? str : str + 'Z'), 'MMM d, HH:mm:ss') } catch { return str }
-}
-
-function RunDetailPanel({ runId }: { runId: number }) {
-  const theme = useTheme()
-  const qc = useQueryClient()
-  const terminal = ['completed', 'failed', 'cancelled', 'completed_with_warnings']
-  const [stepView, setStepView] = useState<'steps' | 'graph'>('steps')
-
-  const { data: run, isLoading } = useQuery<RunDetail>({
-    queryKey: ['run-detail', runId],
-    queryFn: () => runsApi.get(runId),
-    refetchInterval: r => {
-      const status = (r.state.data as RunDetail | undefined)?.status
-      return status && terminal.includes(status) ? false : 3000
-    },
-  })
-
-  const { data: pipeline } = useQuery({
-    queryKey: ['pipeline', run?.pipeline_id],
-    queryFn: () => pipelinesApi.get(run!.pipeline_id),
-    enabled: !!run?.pipeline_id,
-    staleTime: 120_000,
-  })
-
-  const cancelMut = useMutation({
-    mutationFn: () => runsApi.cancel(runId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['run-detail', runId] })
-      qc.invalidateQueries({ queryKey: ['run', runId] })
-      qc.invalidateQueries({ queryKey: ['pipelines'] })
-      qc.invalidateQueries({ queryKey: ['runs'] })
-    },
-  })
-
-  const retrySparkMut = useMutation({
-    mutationFn: () => runsApi.retrySparkLoad(runId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['run-detail', runId] })
-      qc.invalidateQueries({ queryKey: ['run', runId] })
-      qc.invalidateQueries({ queryKey: ['runs'] })
-      qc.invalidateQueries({ queryKey: ['all-runs'] })
-    },
-  })
-
-  const rerunMut = useMutation({
-    mutationFn: () => pipelinesApi.run(run!.pipeline_id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['all-runs'] })
-      qc.invalidateQueries({ queryKey: ['pipelines'] })
-    },
-  })
-
-  if (isLoading) return <Box sx={{ p: 2 }}><CircularProgress size={20} /></Box>
-  if (!run) return null
-
-  const isRunning = run.status === 'running' || run.status === 'pending'
-  const hasSparkWarning = run.status === 'completed_with_warnings'
-  const hasCanvas = !!(pipeline?.canvas_config as any)?.nodes?.length
-
-  return (
-    <Box sx={{ p: 2, bgcolor: alpha(theme.palette.background.paper, 0.5) }}>
-      <Box sx={{ display: 'flex', gap: 2, mb: 2, alignItems: 'center' }}>
-        <StatusChip status={run.status} />
-        <Typography variant="caption" color="text.secondary">Duration: {formatDuration(run.duration_seconds)}</Typography>
-        {run.records_extracted != null && <Typography variant="caption" color="text.secondary">Extracted: {run.records_extracted.toLocaleString()}</Typography>}
-        {run.records_loaded != null && <Typography variant="caption" color="text.secondary">Loaded: {run.records_loaded.toLocaleString()}</Typography>}
-        <Box sx={{ flex: 1 }} />
-        {isRunning && (
-          <Button size="small" color="error" startIcon={<Cancel />} onClick={() => cancelMut.mutate()}>
-            Cancel
-          </Button>
-        )}
-        {hasSparkWarning && (
-          <Button
-            size="small"
-            color="warning"
-            startIcon={retrySparkMut.isPending ? <CircularProgress size={14} color="inherit" /> : <Refresh />}
-            onClick={() => retrySparkMut.mutate()}
-            disabled={retrySparkMut.isPending}
-          >
-            Retry Spark Load
-          </Button>
-        )}
-      </Box>
-
-      {/* Steps / Graph toggle */}
-      {run.steps.length > 0 && (
-        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
-          <ToggleButtonGroup
-            value={stepView}
-            exclusive
-            onChange={(_, v) => v && setStepView(v)}
-            size="small"
-            sx={{ '& .MuiToggleButton-root': { py: 0.3, px: 1, fontSize: '0.7rem' } }}
-          >
-            <ToggleButton value="steps">
-              <FormatListBulleted sx={{ fontSize: 13, mr: 0.5 }} /> Steps
-            </ToggleButton>
-            <ToggleButton value="graph" disabled={!hasCanvas}>
-              <AccountTree sx={{ fontSize: 13, mr: 0.5 }} /> Graph
-            </ToggleButton>
-          </ToggleButtonGroup>
-        </Box>
-      )}
-
-      {hasSparkWarning && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
-          <strong>Spark table registration failed.</strong>{run.error_message ? ` ${run.error_message}` : ' Parquet data was saved successfully but could not be registered in the Spark catalog.'}
-          {' '}Use <strong>Retry Spark Load</strong> to re-attempt without re-extracting.
-          {retrySparkMut.isError && (
-            <Box component="span" sx={{ display: 'block', mt: 0.5, color: 'error.main' }}>
-              Retry failed: {(retrySparkMut.error as Error)?.message ?? 'Unknown error'}
-            </Box>
-          )}
-        </Alert>
-      )}
-
-      {/* Steps — hierarchical tree or graph */}
-      {run.steps.length > 0 && (
-        <Box sx={{ mb: 2 }}>
-          {stepView === 'steps' ? (
-            <Box sx={{ border: `1px solid ${theme.palette.divider}`, borderRadius: 1, overflow: 'hidden' }}>
-              {buildStepTree(run.steps).map(node => (
-                <StepTreeRow key={node.step.id} node={node} depth={0} />
-              ))}
-            </Box>
-          ) : pipeline ? (
-            <RunGraphView
-              run={run}
-              pipeline={pipeline}
-              onRerun={() => rerunMut.mutate()}
-              onRetrySparkLoad={() => retrySparkMut.mutate()}
-              retryPending={retrySparkMut.isPending}
-            />
-          ) : (
-            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
-              <CircularProgress size={20} />
-            </Box>
-          )}
-        </Box>
-      )}
-
-      {run.error_message && !hasSparkWarning && (
-        <Alert severity="error" sx={{ mb: 2 }}>{run.error_message}</Alert>
-      )}
-
-      {/* Logs */}
-      <RunLogPanel logs={run.logs} live={isRunning} defaultHeight={220} />
-    </Box>
-  )
-}
+type RunSortField = 'id' | 'pipeline' | 'status' | 'started' | 'duration' | 'extracted'
+type SortDir = 'asc' | 'desc'
 
 export default function RunHistory() {
   const theme = useTheme()
@@ -306,6 +28,17 @@ export default function RunHistory() {
   const [statusFilter, setStatusFilter] = useState('')
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const [clearConfirm, setClearConfirm] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [deleteSelectedConfirm, setDeleteSelectedConfirm] = useState(false)
+  const autoExpandedRef = useRef<number | null>(null)
+  const [search, setSearch] = useState('')
+  const [sortField, setSortField] = useState<RunSortField>('started')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+
+  function handleSort(field: RunSortField) {
+    setSortDir(d => field === sortField ? (d === 'asc' ? 'desc' : 'asc') : 'desc')
+    setSortField(field)
+  }
 
   const { data: runs = [], isLoading } = useQuery({
     queryKey: ['all-runs'],
@@ -318,10 +51,21 @@ export default function RunHistory() {
     },
   })
 
-  // Auto-expand the most recent active run
+  // Auto-expand active runs; auto-collapse them once they complete
   useEffect(() => {
     const active = runs.find(r => r.status === 'running' || r.status === 'pending')
-    if (active && expandedId === null) setExpandedId(active.id)
+    if (active) {
+      if (expandedId === null) {
+        setExpandedId(active.id)
+        autoExpandedRef.current = active.id
+      }
+    } else if (autoExpandedRef.current !== null) {
+      const wasExpanded = runs.find(r => r.id === autoExpandedRef.current)
+      if (wasExpanded && wasExpanded.status !== 'running' && wasExpanded.status !== 'pending') {
+        setExpandedId(prev => prev === autoExpandedRef.current ? null : prev)
+        autoExpandedRef.current = null
+      }
+    }
   }, [runs])
 
   const { data: pipelines = [] } = useQuery({
@@ -329,9 +73,20 @@ export default function RunHistory() {
     queryFn: pipelinesApi.list,
   })
 
+  const isDeletable = (run: RunSummary) => run.status !== 'running' && run.status !== 'pending'
+
   const deleteMut = useMutation({
     mutationFn: (id: number) => runsApi.delete(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['all-runs'] }),
+  })
+
+  const deleteSelectedMut = useMutation({
+    mutationFn: (ids: number[]) => Promise.all(ids.map(id => runsApi.delete(id))),
+    onSuccess: () => {
+      setSelectedIds(new Set())
+      setDeleteSelectedConfirm(false)
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+    },
   })
 
   const clearMut = useMutation({
@@ -344,11 +99,53 @@ export default function RunHistory() {
 
   const STATUSES = ['', 'running', 'pending', 'completed', 'failed', 'cancelled']
 
-  const filtered = runs.filter(run => {
-    const matchStatus = !statusFilter || run.status === statusFilter
-    const matchPipeline = !pipelineFilter || String((run as RunSummary & { pipeline_id?: number }).pipeline_id) === pipelineFilter
-    return matchStatus && matchPipeline
-  })
+  const filtered = runs
+    .filter(run => {
+      const extended = run as RunSummary & { pipeline_id?: number }
+      const pl = pipelines.find(p => p.id === extended.pipeline_id)
+      const matchStatus = !statusFilter || run.status === statusFilter
+      const matchPipeline = !pipelineFilter || String(extended.pipeline_id) === pipelineFilter
+      const matchSearch = !search ||
+        String(run.id).includes(search) ||
+        (pl?.name ?? '').toLowerCase().includes(search.toLowerCase())
+      return matchStatus && matchPipeline && matchSearch
+    })
+    .sort((a, b) => {
+      const ea = a as RunSummary & { pipeline_id?: number }
+      const eb = b as RunSummary & { pipeline_id?: number }
+      const pa = pipelines.find(p => p.id === ea.pipeline_id)
+      const pb = pipelines.find(p => p.id === eb.pipeline_id)
+      let cmp = 0
+      if (sortField === 'id') cmp = a.id - b.id
+      else if (sortField === 'pipeline') cmp = (pa?.name ?? '').localeCompare(pb?.name ?? '')
+      else if (sortField === 'status') cmp = a.status.localeCompare(b.status)
+      else if (sortField === 'started') {
+        const da = a.started_at ?? ''; const db2 = b.started_at ?? ''
+        cmp = da < db2 ? -1 : da > db2 ? 1 : 0
+      } else if (sortField === 'duration') cmp = (a.duration_seconds ?? 0) - (b.duration_seconds ?? 0)
+      else if (sortField === 'extracted') cmp = (a.records_extracted ?? 0) - (b.records_extracted ?? 0)
+      return sortDir === 'asc' ? cmp : -cmp
+    })
+
+  const deletableFiltered = filtered.filter(isDeletable)
+  const allDeletableSelected = deletableFiltered.length > 0 && deletableFiltered.every(r => selectedIds.has(r.id))
+  const someDeletableSelected = deletableFiltered.some(r => selectedIds.has(r.id))
+
+  const toggleSelectAll = () => {
+    if (allDeletableSelected) {
+      setSelectedIds(prev => {
+        const next = new Set(prev)
+        deletableFiltered.forEach(r => next.delete(r.id))
+        return next
+      })
+    } else {
+      setSelectedIds(prev => {
+        const next = new Set(prev)
+        deletableFiltered.forEach(r => next.add(r.id))
+        return next
+      })
+    }
+  }
 
   return (
     <Box sx={{ p: 3 }}>
@@ -357,9 +154,15 @@ export default function RunHistory() {
           <Typography variant="h5" fontWeight={700}>Run History</Typography>
           <Typography variant="body2" color="text.secondary">Monitor all pipeline executions</Typography>
         </Box>
-        <IconButton onClick={() => qc.invalidateQueries({ queryKey: ['all-runs'] })}>
-          <Refresh fontSize="small" />
-        </IconButton>
+        {selectedIds.size > 0 && (
+          <Button
+            size="small" color="error" startIcon={<Delete />}
+            onClick={() => setDeleteSelectedConfirm(true)}
+            sx={{ ml: 1 }}
+          >
+            Delete Selected ({selectedIds.size})
+          </Button>
+        )}
         <Tooltip title="Delete all non-active runs">
           <Button
             size="small" color="error" startIcon={<Delete />}
@@ -371,12 +174,18 @@ export default function RunHistory() {
         </Tooltip>
       </Box>
 
-      {/* Filters */}
-      <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
+      <TableToolbar
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search by run ID or pipeline…"
+        onRefresh={() => qc.invalidateQueries({ queryKey: ['all-runs'] })}
+        count={filtered.length}
+        total={runs.length}
+      >
         <TextField
           select label="Pipeline" value={pipelineFilter}
           onChange={e => setPipelineFilter(e.target.value)}
-          size="small" sx={{ width: 200 }}
+          size="small" sx={{ width: 180 }}
         >
           <MenuItem value="">All Pipelines</MenuItem>
           {pipelines.map(p => <MenuItem key={p.id} value={String(p.id)}>{p.name}</MenuItem>)}
@@ -384,11 +193,11 @@ export default function RunHistory() {
         <TextField
           select label="Status" value={statusFilter}
           onChange={e => setStatusFilter(e.target.value)}
-          size="small" sx={{ width: 160 }}
+          size="small" sx={{ width: 140 }}
         >
           {STATUSES.map(s => <MenuItem key={s} value={s}>{s || 'All'}</MenuItem>)}
         </TextField>
-      </Box>
+      </TableToolbar>
 
       {isLoading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', p: 6 }}><CircularProgress /></Box>
@@ -397,13 +206,22 @@ export default function RunHistory() {
           <Table size="small">
             <TableHead>
               <TableRow>
+                <TableCell width={40} padding="checkbox">
+                  <Checkbox
+                    size="small"
+                    indeterminate={someDeletableSelected && !allDeletableSelected}
+                    checked={allDeletableSelected}
+                    onChange={toggleSelectAll}
+                    disabled={deletableFiltered.length === 0}
+                  />
+                </TableCell>
                 <TableCell width={40} />
-                <TableCell>Run ID</TableCell>
-                <TableCell>Pipeline</TableCell>
-                <TableCell>Status</TableCell>
-                <TableCell>Started</TableCell>
-                <TableCell>Duration</TableCell>
-                <TableCell>Extracted</TableCell>
+                <SortableTableCell field="id" label="Run ID" current={sortField} dir={sortDir} onSort={handleSort} />
+                <SortableTableCell field="pipeline" label="Pipeline" current={sortField} dir={sortDir} onSort={handleSort} />
+                <SortableTableCell field="status" label="Status" current={sortField} dir={sortDir} onSort={handleSort} />
+                <SortableTableCell field="started" label="Started" current={sortField} dir={sortDir} onSort={handleSort} />
+                <SortableTableCell field="duration" label="Duration" current={sortField} dir={sortDir} onSort={handleSort} />
+                <SortableTableCell field="extracted" label="Extracted" current={sortField} dir={sortDir} onSort={handleSort} />
                 <TableCell>Loaded</TableCell>
                 <TableCell>Error</TableCell>
                 <TableCell width={48} />
@@ -416,6 +234,23 @@ export default function RunHistory() {
                 const expanded = expandedId === run.id
                 return [
                   <TableRow key={run.id} hover sx={{ cursor: 'pointer' }}>
+                    <TableCell padding="checkbox">
+                      {isDeletable(run) && (
+                        <Checkbox
+                          size="small"
+                          checked={selectedIds.has(run.id)}
+                          onChange={e => {
+                            e.stopPropagation()
+                            setSelectedIds(prev => {
+                              const next = new Set(prev)
+                              e.target.checked ? next.add(run.id) : next.delete(run.id)
+                              return next
+                            })
+                          }}
+                          onClick={e => e.stopPropagation()}
+                        />
+                      )}
+                    </TableCell>
                     <TableCell>
                       <IconButton size="small" onClick={() => setExpandedId(expanded ? null : run.id)}>
                         {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
@@ -466,7 +301,7 @@ export default function RunHistory() {
                     </TableCell>
                   </TableRow>,
                   <TableRow key={`${run.id}-detail`}>
-                    <TableCell colSpan={10} sx={{ p: 0, border: 0 }}>
+                    <TableCell colSpan={11} sx={{ p: 0, border: 0 }}>
                       <Collapse in={expanded} unmountOnExit>
                         <RunDetailPanel runId={run.id} />
                       </Collapse>
@@ -476,7 +311,7 @@ export default function RunHistory() {
               })}
               {filtered.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={10} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                  <TableCell colSpan={11} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                     No runs found
                   </TableCell>
                 </TableRow>
@@ -485,6 +320,26 @@ export default function RunHistory() {
           </Table>
         </Box>
       )}
+
+      {/* Delete selected confirm */}
+      <Dialog open={deleteSelectedConfirm} onClose={() => setDeleteSelectedConfirm(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Delete Selected Runs</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Delete {selectedIds.size} selected run{selectedIds.size !== 1 ? 's' : ''}? This cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteSelectedConfirm(false)}>Cancel</Button>
+          <Button
+            variant="contained" color="error"
+            disabled={deleteSelectedMut.isPending}
+            onClick={() => deleteSelectedMut.mutate(Array.from(selectedIds))}
+          >
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Clear history confirm */}
       <Dialog open={clearConfirm} onClose={() => setClearConfirm(false)} maxWidth="xs" fullWidth>

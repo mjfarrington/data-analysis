@@ -1,8 +1,8 @@
 import { useState, useRef } from 'react'
 import {
   Box, Typography, Button, IconButton, Tooltip,
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Paper, Chip, Dialog, DialogTitle, DialogContent, DialogActions,
+  Table, TableBody, TableCell, TableHead, TableRow,
+  Chip, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Select, MenuItem, FormControl, InputLabel,
   CircularProgress, Alert, Divider, Stack, LinearProgress,
 } from '@mui/material'
@@ -14,6 +14,8 @@ import {
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { connectionsApi, Connection } from '../api/client'
+import TableToolbar from '../components/TableToolbar'
+import SortableTableCell from '../components/SortableTableCell'
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -580,6 +582,7 @@ function S3IngestPanel({ conn, onClose }: { conn: Connection; onClose: () => voi
 // ───────────────────────────────────────────────────────────────────────────────
 
 export default function Connections() {
+  const qc = useQueryClient()
   const { data: connections = [], isLoading } = useQuery({
     queryKey: ['connections'],
     queryFn: connectionsApi.list,
@@ -591,6 +594,33 @@ export default function Connections() {
   const [testResults,  setTestResults]  = useState<Record<number, TestResult>>({})
   const [testingId,    setTestingId]    = useState<number | null>(null)
   const [s3IngestConn, setS3IngestConn] = useState<Connection | null>(null)
+  const [search,       setSearch]       = useState('')
+  const [sortField,    setSortField]    = useState<'name' | 'type' | 'status'>('name')
+  const [sortDir,      setSortDir]      = useState<'asc' | 'desc'>('asc')
+
+  function handleSort(field: 'name' | 'type' | 'status') {
+    setSortDir(d => field === sortField ? (d === 'asc' ? 'desc' : 'asc') : 'asc')
+    setSortField(field)
+  }
+
+  const displayed = connections
+    .filter(c =>
+      !search ||
+      c.name.toLowerCase().includes(search.toLowerCase()) ||
+      c.conn_type.toLowerCase().includes(search.toLowerCase()) ||
+      (c.host ?? '').toLowerCase().includes(search.toLowerCase())
+    )
+    .sort((a, b) => {
+      let cmp = 0
+      if (sortField === 'name') cmp = a.name.localeCompare(b.name)
+      else if (sortField === 'type') cmp = a.conn_type.localeCompare(b.conn_type)
+      else if (sortField === 'status') {
+        const sa = testResults[a.id]?.ok ? 1 : testResults[a.id] ? -1 : 0
+        const sb = testResults[b.id]?.ok ? 1 : testResults[b.id] ? -1 : 0
+        cmp = sa - sb
+      }
+      return sortDir === 'asc' ? cmp : -cmp
+    })
 
   const handleTest = async (conn: Connection) => {
     setTestingId(conn.id)
@@ -628,6 +658,15 @@ export default function Connections() {
         </Button>
       </Box>
 
+      <TableToolbar
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search connections…"
+        onRefresh={() => qc.invalidateQueries({ queryKey: ['connections'] })}
+        count={displayed.length}
+        total={connections.length}
+      />
+
       {isLoading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', mt: 8 }}>
           <CircularProgress />
@@ -638,21 +677,21 @@ export default function Connections() {
           <Typography color="text.secondary">No connections yet. Create one to get started.</Typography>
         </Paper>
       ) : (
-        <TableContainer component={Paper} variant="outlined">
+        <Box sx={{ bgcolor: 'background.paper', borderRadius: 2, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
           <Table size="small">
             <TableHead>
               <TableRow>
-                <TableCell sx={{ fontWeight: 700 }}>Name</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Type</TableCell>
+                <SortableTableCell field="name" label="Name" current={sortField} dir={sortDir} onSort={handleSort} />
+                <SortableTableCell field="type" label="Type" current={sortField} dir={sortDir} onSort={handleSort} />
                 <TableCell sx={{ fontWeight: 700 }}>Host / Bucket</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Database / Region</TableCell>
                 <TableCell sx={{ fontWeight: 700 }}>Username</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
+                <SortableTableCell field="status" label="Status" current={sortField} dir={sortDir} onSort={handleSort} />
                 <TableCell align="right" sx={{ fontWeight: 700 }}>Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {connections.map(conn => {
+              {displayed.map(conn => {
                 const tr = testResults[conn.id]
                 return (
                   <TableRow key={conn.id} hover>
@@ -733,7 +772,7 @@ export default function Connections() {
               })}
             </TableBody>
           </Table>
-        </TableContainer>
+        </Box>
       )}
 
       {createOpen && <ConnectionDialog open onClose={() => setCreateOpen(false)} />}
