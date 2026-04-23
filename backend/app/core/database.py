@@ -57,3 +57,15 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_ensure_pipeline_category_column)
+        await conn.run_sync(_ensure_sql_file_display_name_column)
+
+
+def _ensure_sql_file_display_name_column(sync_conn) -> None:
+    inspector = inspect(sync_conn)
+    if "sql_files" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("sql_files")}
+    if "display_name" not in columns:
+        sync_conn.execute(
+            text("ALTER TABLE sql_files ADD COLUMN display_name VARCHAR(200)")
+        )

@@ -578,6 +578,7 @@ async def list_sql_files(
 async def create_sql_file(body: SqlFileCreate, db: AsyncSession = Depends(get_db)):
     sql_file = SqlFile(
         name=body.name,
+        display_name=body.display_name,
         description=body.description,
         file_type=body.file_type,
         content=body.content,

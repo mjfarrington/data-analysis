@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import {
   Box, Typography, Card, CardContent, TextField, Button,
   Alert, CircularProgress, Divider, Tab, Tabs, Chip,
-  ToggleButtonGroup, ToggleButton,
+  ToggleButtonGroup, ToggleButton, FormControlLabel, Switch,
 } from '@mui/material'
 import {
   Save, Brightness4, Brightness7, Water,
@@ -30,7 +30,7 @@ function TabPanel({ children, value, index }: {
 export default function Settings() {
   const qc = useQueryClient()
   const [tab, setTab] = useState(0)
-  const { mode, setMode, density, setDensity } = useThemeStore()
+  const { mode, setMode, density, setDensity, sqlMinimap, setSqlMinimap } = useThemeStore()
 
   const { data: ctx, isLoading } = useQuery({
     queryKey: ['execution-context'],
@@ -268,6 +268,27 @@ export default function Settings() {
             </ToggleButtonGroup>
           </CardContent>
         </Card>
+
+        <Card sx={{ mt: 2 }}>
+          <CardContent>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+              SQL Editor
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+              Show or hide the minimap in the SQL editor.
+            </Typography>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={sqlMinimap}
+                  onChange={(_, checked) => setSqlMinimap(checked)}
+                  size="small"
+                />
+              }
+              label="Enable SQL minimap"
+            />
+          </CardContent>
+        </Card>
       </TabPanel>
 
       {/* ── About ────────────────────────────────────────────────────── */}
@@ -290,6 +311,9 @@ export default function Settings() {
 
               <Typography variant="body2" color="text.secondary">Density</Typography>
               <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{density}</Typography>
+
+              <Typography variant="body2" color="text.secondary">SQL Minimap</Typography>
+              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{sqlMinimap ? 'on' : 'off'}</Typography>
             </Box>
           </CardContent>
         </Card>

@@ -500,6 +500,7 @@ class SqlFileVersionResponse(BaseModel):
 
 class SqlFileCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
+    display_name: Optional[str] = Field(None, max_length=200)
     description: Optional[str] = None
     file_type: str = Field(default="extract")
     content: str = Field(..., min_length=1)
@@ -507,6 +508,7 @@ class SqlFileCreate(BaseModel):
 
 class SqlFileUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
+    display_name: Optional[str] = Field(None, max_length=200)
     description: Optional[str] = None
     file_type: Optional[str] = None
     content: Optional[str] = None
@@ -516,6 +518,7 @@ class SqlFileResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     name: str
+    display_name: Optional[str] = None
     description: Optional[str]
     file_type: str
     content: str

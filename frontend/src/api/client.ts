@@ -228,6 +228,7 @@ export interface ForeachEntryResult {
 export interface SqlFile {
   id: number
   name: string
+  display_name?: string
   description?: string
   file_type: string
   content: string

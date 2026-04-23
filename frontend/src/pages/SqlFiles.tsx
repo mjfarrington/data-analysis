@@ -2,16 +2,18 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Typography, Button, TextField, MenuItem, Chip,
   InputAdornment, IconButton, List, ListItem, ListItemButton,
-  Divider, CircularProgress, Tooltip,
+  Divider, CircularProgress, Tooltip, Dialog, DialogTitle,
+  DialogContent, DialogActions, Menu,
   useTheme, alpha,
 } from '@mui/material'
 import {
   Add, Save, Delete, Search, Code, Description,
-  Folder, ExpandMore, ChevronRight, History, Close,
+  Folder, ExpandMore, ChevronRight, History, Close, Edit,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { sqlFilesApi, SqlFile, SqlFileVersion } from '../api/client'
+import { connectionsApi, Connection, sqlFilesApi, SqlFile, SqlFileVersion } from '../api/client'
 import Editor, { BeforeMount, OnMount } from '@monaco-editor/react'
+import { useThemeStore } from '../store/theme'
 import {
   workspaceSidebarSurfaceSx,
   workspaceSidebarItemButtonSx,
@@ -32,6 +34,7 @@ interface SqlWorkspaceLayout {
 
 interface SqlDraft {
   name: string
+  display_name: string
   file_type: string
   content: string
 }
@@ -40,6 +43,16 @@ interface SqlWorkspaceTabsState {
   openFileIds: number[]
   activeFileId: number | null
 }
+
+type SqlSourceType = 'datawarehouse' | 'jdbc'
+
+interface SqlFileMetadata {
+  source_type?: SqlSourceType
+  source_connection_id?: number
+  notes?: string
+}
+
+const SQL_METADATA_PREFIX = '__sql_meta__:'
 
 const DEFAULT_LAYOUT: SqlWorkspaceLayout = {
   leftSidebarWidth: 320,
@@ -50,6 +63,38 @@ const DEFAULT_LAYOUT: SqlWorkspaceLayout = {
 const DEFAULT_TABS_STATE: SqlWorkspaceTabsState = {
   openFileIds: [],
   activeFileId: null,
+}
+
+function parseSqlFileMetadata(description?: string): SqlFileMetadata {
+  if (!description || !description.startsWith(SQL_METADATA_PREFIX)) return {}
+  const raw = description.slice(SQL_METADATA_PREFIX.length).trim()
+  try {
+    const parsed = JSON.parse(raw) as SqlFileMetadata
+    const out: SqlFileMetadata = {}
+    if (parsed.source_type === 'datawarehouse' || parsed.source_type === 'jdbc') {
+      out.source_type = parsed.source_type
+    }
+    if (Number.isInteger(parsed.source_connection_id) && Number(parsed.source_connection_id) > 0) {
+      out.source_connection_id = Number(parsed.source_connection_id)
+    }
+    if (typeof parsed.notes === 'string') out.notes = parsed.notes
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function buildSqlFileMetadataDescription(meta: SqlFileMetadata): string | undefined {
+  const payload: SqlFileMetadata = {}
+  if (meta.source_type === 'datawarehouse' || meta.source_type === 'jdbc') {
+    payload.source_type = meta.source_type
+  }
+  if (Number.isInteger(meta.source_connection_id) && Number(meta.source_connection_id) > 0) {
+    payload.source_connection_id = Number(meta.source_connection_id)
+  }
+  if (meta.notes?.trim()) payload.notes = meta.notes.trim()
+  if (!payload.source_type && !payload.source_connection_id && !payload.notes) return undefined
+  return `${SQL_METADATA_PREFIX}${JSON.stringify(payload)}`
 }
 
 function loadSqlWorkspaceLayout(): SqlWorkspaceLayout {
@@ -120,7 +165,10 @@ function changedLineCount(current: string, other: string): number {
 
 function isDraftDirty(file: SqlFile | undefined, draft: SqlDraft | undefined): boolean {
   if (!file || !draft) return false
-  return file.name !== draft.name || file.file_type !== draft.file_type || file.content !== draft.content
+  return file.name !== draft.name ||
+    (file.display_name ?? '') !== draft.display_name ||
+    file.file_type !== draft.file_type ||
+    file.content !== draft.content
 }
 
 function buildTree(files: SqlFile[], search: string): FolderNode {
@@ -182,12 +230,14 @@ export default function SqlFiles() {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const theme = useTheme()
   const qc = useQueryClient()
+  const sqlMinimap = useThemeStore(s => s.sqlMinimap)
   const [search, setSearch] = useState('')
   const [openFileIds, setOpenFileIds] = useState<number[]>(initialTabsRef.current.openFileIds)
   const [activeFileId, setActiveFileId] = useState<number | null>(initialTabsRef.current.activeFileId)
   const [drafts, setDrafts] = useState<Record<number, SqlDraft>>({})
   const [cursor, setCursor] = useState({ line: 1, column: 1 })
-  const [creatingInPath, setCreatingInPath] = useState<string | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [createParentPath, setCreateParentPath] = useState('')
   const [newName, setNewName] = useState('new-query')
   const [newType, setNewType] = useState('extract')
   const [versionTag, setVersionTag] = useState('DRAFT')
@@ -198,6 +248,17 @@ export default function SqlFiles() {
   const [leftResizing, setLeftResizing] = useState(false)
   const [leftCollapsed, setLeftCollapsed] = useState(initialLayoutRef.current.leftCollapsed)
   const [rightCollapsed, setRightCollapsed] = useState(initialLayoutRef.current.rightCollapsed)
+  const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number; fileId: number } | null>(null)
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renameFileId, setRenameFileId] = useState<number | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [metadataOpen, setMetadataOpen] = useState(false)
+  const [metadataDisplayName, setMetadataDisplayName] = useState('')
+  const [metadataFilename, setMetadataFilename] = useState('')
+  const [metadataFileType, setMetadataFileType] = useState('extract')
+  const [metadataSourceType, setMetadataSourceType] = useState<SqlSourceType>('datawarehouse')
+  const [metadataConnectionId, setMetadataConnectionId] = useState<number | ''>('')
+  const [metadataNotes, setMetadataNotes] = useState('')
 
   const { data: files = [], isLoading } = useQuery({
     queryKey: ['sql-files'],
@@ -208,6 +269,10 @@ export default function SqlFiles() {
     queryKey: ['sql-version-labels'],
     queryFn: () => sqlFilesApi.getVersionLabels(),
   })
+  const { data: connections = [] } = useQuery({
+    queryKey: ['connections'],
+    queryFn: () => connectionsApi.list(),
+  })
   const versionLabels = labelsResp?.labels?.length
     ? labelsResp.labels
     : ['INITIAL', 'DRAFT', 'FINAL', 'DEPRECATED']
@@ -217,19 +282,26 @@ export default function SqlFiles() {
     onSuccess: (file) => {
       qc.invalidateQueries({ queryKey: ['sql-files'] })
       openFile(file)
-      setCreatingInPath(null)
-      setNewName('')
+      setCreateOpen(false)
+      setCreateParentPath('')
+      setNewName('new-query')
+      setNewType('extract')
     },
   })
 
   const updateMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: Partial<SqlFile> }) =>
       sqlFilesApi.update(id, data),
-    onSuccess: (file) => {
+    onSuccess: (file, vars) => {
       qc.invalidateQueries({ queryKey: ['sql-files'] })
       setDrafts(prev => ({
         ...prev,
-        [file.id]: { name: file.name, file_type: file.file_type, content: file.content },
+        [file.id]: {
+          name: vars.data.name ?? prev[file.id]?.name ?? file.name,
+          display_name: vars.data.display_name ?? prev[file.id]?.display_name ?? (file.display_name ?? ''),
+          file_type: vars.data.file_type ?? prev[file.id]?.file_type ?? file.file_type,
+          content: vars.data.content ?? prev[file.id]?.content ?? file.content,
+        },
       }))
       setSaveMsg('Saved!')
       setTimeout(() => setSaveMsg(''), 2000)
@@ -243,7 +315,7 @@ export default function SqlFiles() {
       qc.invalidateQueries({ queryKey: ['sql-files'] })
       setDrafts(prev => ({
         ...prev,
-        [file.id]: { name: file.name, file_type: file.file_type, content: file.content },
+        [file.id]: { name: file.name, display_name: file.display_name ?? '', file_type: file.file_type, content: file.content },
       }))
       setSaveMsg(`Version ${versionTag} saved`)
       setTimeout(() => setSaveMsg(''), 2000)
@@ -279,7 +351,7 @@ export default function SqlFiles() {
       if (prev[file.id]) return prev
       return {
         ...prev,
-        [file.id]: { name: file.name, file_type: file.file_type, content: file.content },
+        [file.id]: { name: file.name, display_name: file.display_name ?? '', file_type: file.file_type, content: file.content },
       }
     })
     setSelectedVersionId(null)
@@ -289,7 +361,7 @@ export default function SqlFiles() {
     const file = fileById.get(fileId)
     const draft = drafts[fileId]
     if (isDraftDirty(file, draft)) {
-      const label = (draft?.name ?? file?.name ?? `File ${fileId}`).split('/').pop()
+      const label = draft?.display_name?.trim() || file?.display_name?.trim() || (draft?.name ?? file?.name ?? `File ${fileId}`).split('/').pop()
       const confirmed = window.confirm(`You have unsaved changes in "${label}". Close anyway?`)
       if (!confirmed) return
     }
@@ -327,6 +399,15 @@ export default function SqlFiles() {
 
   const activeFile = activeFileId != null ? (fileById.get(activeFileId) ?? null) : null
   const activeDraft = activeFileId != null ? drafts[activeFileId] : undefined
+  const activeMetadata = useMemo(() => parseSqlFileMetadata(activeFile?.description), [activeFile?.description])
+  const sourceConnections = useMemo(
+    () => connections.filter((c: Connection) => c.conn_type === metadataSourceType),
+    [connections, metadataSourceType],
+  )
+  const activeSourceConnection = useMemo(
+    () => connections.find((c: Connection) => c.id === activeMetadata.source_connection_id),
+    [connections, activeMetadata.source_connection_id],
+  )
   const dirtyById = useMemo(() => {
     const map = new Map<number, boolean>()
     for (const id of openFileIds) {
@@ -340,78 +421,71 @@ export default function SqlFiles() {
     if (!activeFile || !activeDraft) return
     updateMut.mutate({
       id: activeFile.id,
-      data: { name: activeDraft.name, file_type: activeDraft.file_type, content: activeDraft.content },
+      data: { name: activeDraft.name, display_name: activeDraft.display_name || undefined, file_type: activeDraft.file_type, content: activeDraft.content },
     })
   }
 
-  function handleCreateInline(parentPath: string) {
+  function openContextMenu(e: React.MouseEvent, file: SqlFile) {
+    e.preventDefault()
+    setContextMenu({ mouseX: e.clientX + 2, mouseY: e.clientY - 6, fileId: file.id })
+  }
+
+  function openRenameDialog(file: SqlFile) {
+    setRenameFileId(file.id)
+    setRenameValue(file.name)
+    setRenameOpen(true)
+  }
+
+  function submitRename() {
+    if (renameFileId == null) return
+    const nextName = renameValue.trim()
+    if (!nextName) return
+    updateMut.mutate({ id: renameFileId, data: { name: nextName } })
+    setRenameOpen(false)
+    setRenameFileId(null)
+  }
+
+  function openMetadataDialog() {
+    if (!activeFile || !activeDraft) return
+    const meta = parseSqlFileMetadata(activeFile.description)
+    setMetadataDisplayName(activeDraft.display_name)
+    setMetadataFilename(activeDraft.name)
+    setMetadataFileType(activeDraft.file_type)
+    setMetadataSourceType(meta.source_type ?? 'datawarehouse')
+    setMetadataConnectionId(meta.source_connection_id ?? '')
+    setMetadataNotes(meta.notes ?? '')
+    setMetadataOpen(true)
+  }
+
+  function submitMetadata() {
+    if (!activeFile) return
+    const description = buildSqlFileMetadataDescription({
+      source_type: metadataSourceType,
+      source_connection_id: metadataConnectionId === '' ? undefined : Number(metadataConnectionId),
+      notes: metadataNotes,
+    })
+    const nextName = metadataFilename.trim() || activeFile.name
+    const nextDisplayName = metadataDisplayName.trim()
+    updateActiveDraft({ file_type: metadataFileType, name: nextName, display_name: nextDisplayName })
+    updateMut.mutate({ id: activeFile.id, data: { name: nextName, display_name: nextDisplayName || undefined, description, file_type: metadataFileType } })
+    setMetadataOpen(false)
+  }
+
+  function openCreateDialog(parentPath: string) {
+    setCreateParentPath(parentPath)
+    setCreateOpen(true)
+    setNewName('new-query')
+    setNewType('extract')
+    setExpandedFolders(prev => new Set(prev).add(''))
+  }
+
+  function submitCreate() {
     const baseName = newName.trim().replace(/\.sql$/i, '')
     if (!baseName) return
     const fileName = `${baseName}.sql`
-    const fullName = parentPath ? `${parentPath}/${fileName}` : fileName
+    const fullName = createParentPath ? `${createParentPath}/${fileName}` : fileName
     createMut.mutate({ name: fullName, file_type: newType, content: `-- ${fullName}\n\nSELECT\n  *\nFROM\n  your_table;\n` })
   }
-
-  const renderCreateComposer = (parentPath: string, leftPadding: string | number = 0): React.ReactNode => (
-    <Box
-      sx={{
-        pl: leftPadding,
-        pr: 1.25,
-        pb: 1,
-      }}
-    >
-      <Box
-        sx={{
-          p: 1,
-          borderRadius: 1.5,
-          border: `1px solid ${alpha(theme.palette.primary.main, 0.22)}`,
-          bgcolor: alpha(theme.palette.primary.main, 0.05),
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 0.8,
-        }}
-      >
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-          <Chip label={parentPath || 'root'} size="small" sx={{ height: 18, fontSize: '0.6rem', textTransform: 'uppercase' }} />
-          <Typography variant="caption" color="text.secondary">Create SQL file</Typography>
-        </Box>
-        <Box sx={{ display: 'flex', gap: 0.75, alignItems: 'center' }}>
-          <TextField
-            size="small"
-            value={newName}
-            onChange={e => setNewName(e.target.value)}
-            placeholder="new-query"
-            autoFocus
-            sx={{ flex: 1 }}
-            slotProps={{
-              input: {
-                endAdornment: <InputAdornment position="end">.sql</InputAdornment>,
-              },
-            }}
-            onKeyDown={e => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                handleCreateInline(parentPath)
-              }
-              if (e.key === 'Escape') {
-                e.preventDefault()
-                setCreatingInPath(null)
-              }
-            }}
-          />
-          <TextField select size="small" value={newType} onChange={e => setNewType(e.target.value)} sx={{ width: 128 }}>
-            {FILE_TYPES.map(t => <MenuItem key={t} value={t}>{t}</MenuItem>)}
-          </TextField>
-        </Box>
-        <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.75 }}>
-          <Button size="small" onClick={() => setCreatingInPath(null)}>Cancel</Button>
-          <Button size="small" variant="contained" onClick={() => handleCreateInline(parentPath)} disabled={createMut.isPending}>
-            Create File
-          </Button>
-        </Box>
-      </Box>
-    </Box>
-  )
 
   const grouped = useMemo(() => buildTypeGroups(files, search), [files, search])
 
@@ -530,7 +604,7 @@ export default function SqlFiles() {
       if (prev[activeFileId]) return prev
       return {
         ...prev,
-        [activeFileId]: { name: activeFile.name, file_type: activeFile.file_type, content: activeFile.content },
+        [activeFileId]: { name: activeFile.name, display_name: activeFile.display_name ?? '', file_type: activeFile.file_type, content: activeFile.content },
       }
     })
   }, [activeFileId, activeFile])
@@ -576,9 +650,7 @@ export default function SqlFiles() {
                   size="small"
                   onClick={(e) => {
                     e.stopPropagation()
-                    setCreatingInPath(folder.path)
-                    setNewName('new-query')
-                    setNewType('extract')
+                    openCreateDialog(folder.path)
                   }}
                 >
                   <Add sx={{ fontSize: 14 }} />
@@ -590,10 +662,6 @@ export default function SqlFiles() {
 
         {expanded && (
           <>
-            {creatingInPath === folder.path && (
-              renderCreateComposer(folder.path, `${(depth + 1) * 14 + 12}px`)
-            )}
-
             {folder.folders.map(child => renderFolder(child, depth + 1))}
             {folder.files.map(file => {
               const selectedFile = activeFileId === file.id
@@ -602,12 +670,13 @@ export default function SqlFiles() {
                   <ListItemButton
                     selected={selectedFile}
                     onClick={() => openFile(file)}
-                      sx={workspaceSidebarItemButtonSx}
+                    onContextMenu={(e) => openContextMenu(e, file)}
+                    sx={workspaceSidebarItemButtonSx}
                   >
                     <Code sx={{ fontSize: 14, mr: 1, color: 'text.secondary' }} />
                     <Box sx={{ minWidth: 0, flex: 1 }}>
                         <Typography variant="body2" noWrap sx={workspaceSidebarItemTextSx}>
-                        {file.name.split('/').pop()}
+                        {file.display_name || file.name.split('/').pop()}
                       </Typography>
                     </Box>
                   </ListItemButton>
@@ -643,12 +712,7 @@ export default function SqlFiles() {
             <Tooltip title="New file at root">
               <IconButton
                 size="small"
-                onClick={() => {
-                  setCreatingInPath('')
-                  setExpandedFolders(prev => new Set(prev).add(''))
-                  setNewName('new-query')
-                  setNewType('extract')
-                }}
+                onClick={() => openCreateDialog('')}
               >
                 <Add sx={{ fontSize: 16 }} />
               </IconButton>
@@ -675,9 +739,6 @@ export default function SqlFiles() {
             <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress size={24} /></Box>
           ) : (
             <List dense disablePadding sx={{ px: 0.5, py: 0.5 }}>
-              {creatingInPath === '' && (
-                renderCreateComposer('', '4px')
-              )}
               {grouped.map(group => (
                 <Box key={group.type} sx={{ mb: 0.5 }}>
                   <Box>
@@ -688,10 +749,15 @@ export default function SqlFiles() {
                   {group.tree.folders.map(folder => renderFolder(folder, 0))}
                   {group.tree.files.map(file => (
                     <ListItem key={file.id} disablePadding>
-                      <ListItemButton selected={activeFileId === file.id} onClick={() => openFile(file)} sx={workspaceSidebarItemButtonSx}>
+                      <ListItemButton
+                        selected={activeFileId === file.id}
+                        onClick={() => openFile(file)}
+                        onContextMenu={(e) => openContextMenu(e, file)}
+                        sx={workspaceSidebarItemButtonSx}
+                      >
                         <Code sx={{ fontSize: 14, mr: 1, color: 'text.secondary' }} />
                         <Box sx={{ minWidth: 0, flex: 1 }}>
-                          <Typography variant="body2" noWrap sx={workspaceSidebarItemTextSx}>{file.name}</Typography>
+                          <Typography variant="body2" noWrap sx={workspaceSidebarItemTextSx}>{file.display_name || file.name}</Typography>
                         </Box>
                       </ListItemButton>
                     </ListItem>
@@ -756,7 +822,7 @@ export default function SqlFiles() {
             {openFileIds.map(id => {
               const file = fileById.get(id)
               const draft = drafts[id]
-              const label = draft?.name ?? file?.name ?? `File ${id}`
+              const label = draft?.display_name?.trim() || file?.display_name?.trim() || (draft?.name ?? file?.name ?? `File ${id}`).split('/').pop()
               const isActive = id === activeFileId
               const isDirty = Boolean(dirtyById.get(id))
               return (
@@ -789,7 +855,7 @@ export default function SqlFiles() {
                         fontWeight: isDirty ? 700 : 400,
                       }}
                     >
-                      {label.split('/').pop()}{isDirty ? ' *' : ''}
+                      {label}{isDirty ? ' *' : ''}
                     </Typography>
                   </Button>
                   <IconButton size="small" onClick={() => closeFile(id)} sx={{ p: 0.2 }}>
@@ -810,23 +876,21 @@ export default function SqlFiles() {
               flexShrink: 0,
             }}
           >
-            <TextField
-              value={activeDraft.name}
-              onChange={e => updateActiveDraft({ name: e.target.value })}
-              size="small"
-              variant="standard"
-              sx={{ '& input': { fontWeight: 600 } }}
-              placeholder="File name"
-            />
-            <TextField
-              select value={activeDraft.file_type}
-              onChange={e => updateActiveDraft({ file_type: e.target.value })}
-              size="small"
-              variant="standard"
-              sx={{ minWidth: 110 }}
-            >
-              {FILE_TYPES.map(t => <MenuItem key={t} value={t}>{t}</MenuItem>)}
-            </TextField>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, fontFamily: 'monospace' }}>
+              {activeDraft.name}
+            </Typography>
+            {activeMetadata.source_type && (
+              <Chip
+                size="small"
+                label={`Source: ${activeMetadata.source_type.toUpperCase()}${activeSourceConnection ? ` (${activeSourceConnection.name})` : ''}`}
+                sx={{ height: 20, fontSize: '0.62rem' }}
+              />
+            )}
+            <Tooltip title="Edit Data Source">
+              <IconButton size="small" onClick={openMetadataDialog}>
+                <Edit sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
             <Box sx={{ flex: 1 }} />
             {saveMsg && <Typography variant="caption" color="success.main">{saveMsg}</Typography>}
             {!saveMsg && activeDirty && (
@@ -905,7 +969,7 @@ export default function SqlFiles() {
                   onMount={onEditorMount}
                   theme={theme.palette.mode === 'dark' ? 'sql-workspace-dark' : 'sql-workspace-light'}
                   options={{
-                    minimap: { enabled: true, scale: 1, maxColumn: 160 },
+                    minimap: { enabled: sqlMinimap, scale: 1, maxColumn: 160 },
                     fontFamily: 'JetBrains Mono, Fira Code, ui-monospace, monospace',
                     fontLigatures: true,
                     fontSize: 13,
@@ -1031,6 +1095,172 @@ export default function SqlFiles() {
         </Box>
       )}
       </Box>
+
+      <Menu
+        open={Boolean(contextMenu)}
+        onClose={() => setContextMenu(null)}
+        anchorReference="anchorPosition"
+        anchorPosition={contextMenu ? { top: contextMenu.mouseY, left: contextMenu.mouseX } : undefined}
+      >
+        <MenuItem
+          onClick={() => {
+            if (!contextMenu) return
+            const file = fileById.get(contextMenu.fileId)
+            if (file) openRenameDialog(file)
+            setContextMenu(null)
+          }}
+        >
+          Edit name
+        </MenuItem>
+      </Menu>
+
+      <Dialog open={renameOpen} onClose={() => setRenameOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit SQL file name</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            margin="dense"
+            label="File name"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            placeholder="folder/my-query.sql"
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRenameOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={submitRename} disabled={updateMut.isPending || !renameValue.trim()}>
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={createOpen} onClose={() => setCreateOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Create SQL file</DialogTitle>
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pt: 2 }}>
+          <TextField
+            label="Folder"
+            value={createParentPath || 'root'}
+            size="small"
+            fullWidth
+            slotProps={{ input: { readOnly: true } }}
+          />
+          <TextField
+            autoFocus
+            label="Filename"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            size="small"
+            fullWidth
+            placeholder="new-query"
+            slotProps={{
+              input: {
+                endAdornment: <InputAdornment position="end">.sql</InputAdornment>,
+              },
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                submitCreate()
+              }
+            }}
+          />
+          <TextField
+            select
+            label="Type"
+            value={newType}
+            onChange={(e) => setNewType(e.target.value)}
+            size="small"
+            fullWidth
+          >
+            {FILE_TYPES.map(t => <MenuItem key={t} value={t}>{t}</MenuItem>)}
+          </TextField>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCreateOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={submitCreate} disabled={createMut.isPending || !newName.trim()}>
+            Create File
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={metadataOpen} onClose={() => setMetadataOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Data Source</DialogTitle>
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pt: 3 }}>
+          <TextField
+            label="Name"
+            value={metadataDisplayName}
+            onChange={(e) => setMetadataDisplayName(e.target.value)}
+            size="small"
+            fullWidth
+            placeholder="Human-readable label shown in sidebar"
+          />
+          <TextField
+            label="Filename"
+            value={metadataFilename}
+            onChange={(e) => setMetadataFilename(e.target.value)}
+            size="small"
+            fullWidth
+            placeholder="e.g. folder/my-query.sql"
+          />
+          <TextField
+            select
+            label="Type"
+            value={metadataFileType}
+            onChange={(e) => setMetadataFileType(e.target.value)}
+            size="small"
+            fullWidth
+          >
+            {FILE_TYPES.map(t => <MenuItem key={t} value={t}>{t}</MenuItem>)}
+          </TextField>
+          <TextField
+            select
+            label="Source type"
+            value={metadataSourceType}
+            onChange={(e) => {
+              const next = e.target.value as SqlSourceType
+              setMetadataSourceType(next)
+              setMetadataConnectionId('')
+            }}
+            size="small"
+            fullWidth
+          >
+            <MenuItem value="datawarehouse">Datawarehouse</MenuItem>
+            <MenuItem value="jdbc">JDBC</MenuItem>
+          </TextField>
+          <TextField
+            select
+            label="Linked connection"
+            value={metadataConnectionId}
+            onChange={(e) => {
+              const v = e.target.value
+              setMetadataConnectionId(v === '' ? '' : Number(v))
+            }}
+            size="small"
+            fullWidth
+          >
+            <MenuItem value="">None</MenuItem>
+            {sourceConnections.map(conn => (
+              <MenuItem key={conn.id} value={conn.id}>{conn.name}</MenuItem>
+            ))}
+          </TextField>
+          <TextField
+            label="Notes"
+            value={metadataNotes}
+            onChange={(e) => setMetadataNotes(e.target.value)}
+            size="small"
+            fullWidth
+            multiline
+            minRows={3}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setMetadataOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={submitMetadata} disabled={updateMut.isPending}>
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }

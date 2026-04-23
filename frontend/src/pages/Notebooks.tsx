@@ -1021,30 +1021,11 @@ export default function Notebooks() {
                     const draft = drafts[nb.id]
                     const dirty = isNotebookDraftDirty(nb, draft)
                     return (
-                      <ListItem
-                        key={nb.id}
-                        disablePadding
-                        secondaryAction={
-                          <Tooltip title="Delete notebook">
-                            <IconButton
-                              size="small"
-                              edge="end"
-                              sx={{ mr: 0.5, opacity: 0.35, '&:hover': { opacity: 1 } }}
-                              onClick={e => {
-                                e.stopPropagation()
-                                if (!window.confirm(`Delete notebook \"${nb.name}\"?`)) return
-                                deleteMut.mutate(nb.id)
-                              }}
-                            >
-                              <DeleteOutlined sx={{ fontSize: 14 }} />
-                            </IconButton>
-                          </Tooltip>
-                        }
-                      >
+                      <ListItem key={nb.id} disablePadding>
                         <ListItemButton
                           selected={activeNotebookId === nb.id}
                           onClick={() => openNotebook(nb)}
-                          sx={{ ...workspaceSidebarItemButtonSx, pr: 4 }}
+                          sx={workspaceSidebarItemButtonSx}
                         >
                           <ListItemText
                             primary={
