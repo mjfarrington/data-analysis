@@ -7,7 +7,7 @@ import {
 } from '@mui/material'
 import {
   Add, Save, Delete, Search, Code, Description,
-  Folder, ExpandMore, ChevronRight, History, CropSquare,
+  Folder, ExpandMore, ChevronRight, History, Close,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { sqlFilesApi, SqlFile, SqlFileVersion } from '../api/client'
@@ -15,6 +15,40 @@ import Editor, { OnMount } from '@monaco-editor/react'
 
 const FILE_TYPES = ['extract', 'transform', 'load', 'utility']
 const ROOT_KEY = '__root__'
+const SQL_WORKSPACE_LAYOUT_KEY = 'sql-workspace-layout'
+
+interface SqlWorkspaceLayout {
+  leftSidebarWidth: number
+  leftCollapsed: boolean
+  rightCollapsed: boolean
+}
+
+interface SqlDraft {
+  name: string
+  file_type: string
+  content: string
+}
+
+const DEFAULT_LAYOUT: SqlWorkspaceLayout = {
+  leftSidebarWidth: 320,
+  leftCollapsed: false,
+  rightCollapsed: false,
+}
+
+function loadSqlWorkspaceLayout(): SqlWorkspaceLayout {
+  try {
+    const raw = localStorage.getItem(SQL_WORKSPACE_LAYOUT_KEY)
+    if (!raw) return DEFAULT_LAYOUT
+    const parsed = JSON.parse(raw) as Partial<SqlWorkspaceLayout>
+    return {
+      leftSidebarWidth: Math.max(240, Math.min(560, Number(parsed.leftSidebarWidth ?? DEFAULT_LAYOUT.leftSidebarWidth))),
+      leftCollapsed: Boolean(parsed.leftCollapsed),
+      rightCollapsed: Boolean(parsed.rightCollapsed),
+    }
+  } catch {
+    return DEFAULT_LAYOUT
+  }
+}
 
 interface FolderNode {
   id: string
@@ -98,15 +132,43 @@ function buildTypeGroups(files: SqlFile[], search: string): TypeGroup[] {
     .filter(group => group.tree.folders.length > 0 || group.tree.files.length > 0)
 }
 
+function PanelSideIcon({ side, active }: { side: 'left' | 'right'; active: boolean }) {
+  return (
+    <Box
+      sx={{
+        width: 14,
+        height: 14,
+        border: '1.5px solid currentColor',
+        borderRadius: '2px',
+        position: 'relative',
+        overflow: 'hidden',
+        opacity: active ? 1 : 0.65,
+      }}
+    >
+      <Box
+        sx={{
+          position: 'absolute',
+          top: 0,
+          bottom: 0,
+          width: '38%',
+          [side]: 0,
+          bgcolor: 'currentColor',
+          opacity: active ? 0.85 : 0.2,
+        }}
+      />
+    </Box>
+  )
+}
+
 export default function SqlFiles() {
+  const initialLayoutRef = useRef<SqlWorkspaceLayout>(loadSqlWorkspaceLayout())
   const rootRef = useRef<HTMLDivElement | null>(null)
   const theme = useTheme()
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
-  const [selected, setSelected] = useState<SqlFile | null>(null)
-  const [editName, setEditName] = useState('')
-  const [editType, setEditType] = useState('')
-  const [editContent, setEditContent] = useState('')
+  const [openFileIds, setOpenFileIds] = useState<number[]>([])
+  const [activeFileId, setActiveFileId] = useState<number | null>(null)
+  const [drafts, setDrafts] = useState<Record<number, SqlDraft>>({})
   const [cursor, setCursor] = useState({ line: 1, column: 1 })
   const [creatingInPath, setCreatingInPath] = useState<string | null>(null)
   const [newName, setNewName] = useState('new-query')
@@ -115,10 +177,10 @@ export default function SqlFiles() {
   const [saveMsg, setSaveMsg] = useState('')
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['']))
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
-  const [leftSidebarWidth, setLeftSidebarWidth] = useState(320)
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(initialLayoutRef.current.leftSidebarWidth)
   const [leftResizing, setLeftResizing] = useState(false)
-  const [leftCollapsed, setLeftCollapsed] = useState(false)
-  const [rightCollapsed, setRightCollapsed] = useState(false)
+  const [leftCollapsed, setLeftCollapsed] = useState(initialLayoutRef.current.leftCollapsed)
+  const [rightCollapsed, setRightCollapsed] = useState(initialLayoutRef.current.rightCollapsed)
 
   const { data: files = [], isLoading } = useQuery({
     queryKey: ['sql-files'],
@@ -148,7 +210,10 @@ export default function SqlFiles() {
       sqlFilesApi.update(id, data),
     onSuccess: (file) => {
       qc.invalidateQueries({ queryKey: ['sql-files'] })
-      setSelected(file)
+      setDrafts(prev => ({
+        ...prev,
+        [file.id]: { name: file.name, file_type: file.file_type, content: file.content },
+      }))
       setSaveMsg('Saved!')
       setTimeout(() => setSaveMsg(''), 2000)
     },
@@ -159,7 +224,10 @@ export default function SqlFiles() {
       sqlFilesApi.createVersion(id, { tag, content }),
     onSuccess: (file) => {
       qc.invalidateQueries({ queryKey: ['sql-files'] })
-      setSelected(file)
+      setDrafts(prev => ({
+        ...prev,
+        [file.id]: { name: file.name, file_type: file.file_type, content: file.content },
+      }))
       setSaveMsg(`Version ${versionTag} saved`)
       setTimeout(() => setSaveMsg(''), 2000)
     },
@@ -167,29 +235,79 @@ export default function SqlFiles() {
 
   const deleteMut = useMutation({
     mutationFn: (id: number) => sqlFilesApi.delete(id),
-    onSuccess: () => {
+    onSuccess: (_, deletedId) => {
       qc.invalidateQueries({ queryKey: ['sql-files'] })
-      setSelected(null)
-      setEditName('')
-      setEditType('')
-      setEditContent('')
+      setOpenFileIds(prev => {
+        const idx = prev.indexOf(deletedId)
+        const next = prev.filter(id => id !== deletedId)
+        if (activeFileId === deletedId) {
+          const fallback = next[idx] ?? next[idx - 1] ?? null
+          setActiveFileId(fallback)
+        }
+        return next
+      })
+      setDrafts(prev => {
+        const next = { ...prev }
+        delete next[deletedId]
+        return next
+      })
       setSelectedVersionId(null)
     },
   })
 
   function openFile(file: SqlFile) {
-    setSelected(file)
-    setEditName(file.name)
-    setEditType(file.file_type)
-    setEditContent(file.content)
+    setOpenFileIds(prev => (prev.includes(file.id) ? prev : [...prev, file.id]))
+    setActiveFileId(file.id)
+    setDrafts(prev => {
+      if (prev[file.id]) return prev
+      return {
+        ...prev,
+        [file.id]: { name: file.name, file_type: file.file_type, content: file.content },
+      }
+    })
     setSelectedVersionId(null)
   }
 
+  function closeFile(fileId: number) {
+    setOpenFileIds(prev => {
+      const idx = prev.indexOf(fileId)
+      const next = prev.filter(id => id !== fileId)
+      if (activeFileId === fileId) {
+        const fallback = next[idx] ?? next[idx - 1] ?? null
+        setActiveFileId(fallback)
+      }
+      return next
+    })
+    setDrafts(prev => {
+      const next = { ...prev }
+      delete next[fileId]
+      return next
+    })
+  }
+
+  function updateActiveDraft(patch: Partial<SqlDraft>) {
+    if (activeFileId == null) return
+    setDrafts(prev => {
+      const existing = prev[activeFileId]
+      if (!existing) return prev
+      return { ...prev, [activeFileId]: { ...existing, ...patch } }
+    })
+  }
+
+  const fileById = useMemo(() => {
+    const map = new Map<number, SqlFile>()
+    files.forEach(f => map.set(f.id, f))
+    return map
+  }, [files])
+
+  const activeFile = activeFileId != null ? (fileById.get(activeFileId) ?? null) : null
+  const activeDraft = activeFileId != null ? drafts[activeFileId] : undefined
+
   function handleSave() {
-    if (!selected) return
+    if (!activeFile || !activeDraft) return
     updateMut.mutate({
-      id: selected.id,
-      data: { name: editName, file_type: editType, content: editContent },
+      id: activeFile.id,
+      data: { name: activeDraft.name, file_type: activeDraft.file_type, content: activeDraft.content },
     })
   }
 
@@ -264,12 +382,13 @@ export default function SqlFiles() {
 
   const grouped = useMemo(() => buildTypeGroups(files, search), [files, search])
 
-  const versions: SqlFileVersion[] = selected?.versions ? [...selected.versions].reverse() : []
+  const versions: SqlFileVersion[] = activeFile?.versions ? [...activeFile.versions].reverse() : []
   const activeVersion = versions.find(v => String(v.id) === selectedVersionId) ?? null
 
-  const lines = lineCount(editContent)
-  const words = editContent.trim() ? editContent.trim().split(/\s+/).length : 0
-  const chars = editContent.length
+  const content = activeDraft?.content ?? ''
+  const lines = lineCount(content)
+  const words = content.trim() ? content.trim().split(/\s+/).length : 0
+  const chars = content.length
 
   const toggleFolder = (path: string) => {
     setExpandedFolders(prev => {
@@ -323,6 +442,24 @@ export default function SqlFiles() {
     }
   }, [versionLabels, versionTag])
 
+  useEffect(() => {
+    localStorage.setItem(
+      SQL_WORKSPACE_LAYOUT_KEY,
+      JSON.stringify({ leftSidebarWidth, leftCollapsed, rightCollapsed }),
+    )
+  }, [leftSidebarWidth, leftCollapsed, rightCollapsed])
+
+  useEffect(() => {
+    if (activeFileId == null || !activeFile) return
+    setDrafts(prev => {
+      if (prev[activeFileId]) return prev
+      return {
+        ...prev,
+        [activeFileId]: { name: activeFile.name, file_type: activeFile.file_type, content: activeFile.content },
+      }
+    })
+  }, [activeFileId, activeFile])
+
   const renderFolder = (folder: FolderNode, depth = 0): React.ReactNode => {
     const expanded = expandedFolders.has(folder.path)
     return (
@@ -360,7 +497,7 @@ export default function SqlFiles() {
 
             {folder.folders.map(child => renderFolder(child, depth + 1))}
             {folder.files.map(file => {
-              const selectedFile = selected?.id === file.id
+              const selectedFile = activeFileId === file.id
               return (
                 <ListItem key={file.id} disablePadding sx={{ pl: `${(depth + 1) * 14}px` }}>
                   <ListItemButton
@@ -373,7 +510,6 @@ export default function SqlFiles() {
                       <Typography variant="body2" noWrap sx={{ fontSize: '0.76rem', fontWeight: 500 }}>
                         {file.name.split('/').pop()}
                       </Typography>
-                      <Typography variant="caption" color="text.secondary" noWrap>{file.file_type}</Typography>
                     </Box>
                   </ListItemButton>
                 </ListItem>
@@ -392,7 +528,7 @@ export default function SqlFiles() {
         sx={{
           display: 'flex',
           alignItems: 'center',
-          gap: 1,
+          gap: 0.5,
           px: 1.25,
           py: 0.5,
           borderBottom: `1px solid ${theme.palette.divider}`,
@@ -400,24 +536,35 @@ export default function SqlFiles() {
           flexShrink: 0,
         }}
       >
-        <Button
-          size="small"
-          variant={leftCollapsed ? 'outlined' : 'text'}
-          startIcon={<CropSquare sx={{ fontSize: 13 }} />}
-          onClick={() => setLeftCollapsed(v => !v)}
-          sx={{ minWidth: 0, px: 1 }}
-        >
-          {leftCollapsed ? 'Show Files' : 'Hide Files'}
-        </Button>
-        <Button
-          size="small"
-          variant={rightCollapsed ? 'outlined' : 'text'}
-          startIcon={<CropSquare sx={{ fontSize: 13 }} />}
-          onClick={() => setRightCollapsed(v => !v)}
-          sx={{ minWidth: 0, px: 1 }}
-        >
-          {rightCollapsed ? 'Show Versions' : 'Hide Versions'}
-        </Button>
+        <Box sx={{ flex: 1 }} />
+        <Tooltip title={leftCollapsed ? 'Show files panel' : 'Hide files panel'}>
+          <IconButton
+            size="small"
+            onClick={() => setLeftCollapsed(v => !v)}
+            sx={{
+              color: leftCollapsed ? 'text.secondary' : 'primary.main',
+              border: '1px solid',
+              borderColor: leftCollapsed ? 'divider' : alpha(theme.palette.primary.main, 0.35),
+              borderRadius: 1,
+            }}
+          >
+            <PanelSideIcon side="left" active={!leftCollapsed} />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title={rightCollapsed ? 'Show versions panel' : 'Hide versions panel'}>
+          <IconButton
+            size="small"
+            onClick={() => setRightCollapsed(v => !v)}
+            sx={{
+              color: rightCollapsed ? 'text.secondary' : 'primary.main',
+              border: '1px solid',
+              borderColor: rightCollapsed ? 'divider' : alpha(theme.palette.primary.main, 0.35),
+              borderRadius: 1,
+            }}
+          >
+            <PanelSideIcon side="right" active={!rightCollapsed} />
+          </IconButton>
+        </Tooltip>
       </Box>
 
       <Box sx={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -490,11 +637,10 @@ export default function SqlFiles() {
                   {group.tree.folders.map(folder => renderFolder(folder, 0))}
                   {group.tree.files.map(file => (
                     <ListItem key={file.id} disablePadding>
-                      <ListItemButton selected={selected?.id === file.id} onClick={() => openFile(file)} sx={{ py: 0.55, px: 1.25, borderRadius: 1 }}>
+                      <ListItemButton selected={activeFileId === file.id} onClick={() => openFile(file)} sx={{ py: 0.55, px: 1.25, borderRadius: 1 }}>
                         <Code sx={{ fontSize: 14, mr: 1, color: 'text.secondary' }} />
                         <Box sx={{ minWidth: 0, flex: 1 }}>
                           <Typography variant="body2" noWrap sx={{ fontSize: '0.76rem', fontWeight: 500 }}>{file.name}</Typography>
-                          <Typography variant="caption" color="text.secondary" noWrap>{file.file_type}</Typography>
                         </Box>
                       </ListItemButton>
                     </ListItem>
@@ -528,8 +674,60 @@ export default function SqlFiles() {
       )}
 
       {/* Right panel: editor + version controller */}
-      {selected ? (
+      {activeFile && activeDraft ? (
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* Open file tabs */}
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.5,
+              px: 1,
+              py: 0.5,
+              borderBottom: `1px solid ${theme.palette.divider}`,
+              bgcolor: alpha(theme.palette.background.paper, 0.65),
+              overflowX: 'auto',
+              flexShrink: 0,
+            }}
+          >
+            {openFileIds.map(id => {
+              const file = fileById.get(id)
+              const draft = drafts[id]
+              const label = draft?.name ?? file?.name ?? `File ${id}`
+              const isActive = id === activeFileId
+              return (
+                <Box
+                  key={id}
+                  sx={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 0.5,
+                    border: '1px solid',
+                    borderColor: isActive ? 'primary.main' : 'divider',
+                    bgcolor: isActive ? alpha(theme.palette.primary.main, 0.1) : 'background.paper',
+                    borderRadius: 1,
+                    px: 0.75,
+                    py: 0.35,
+                    minWidth: 0,
+                  }}
+                >
+                  <Button
+                    size="small"
+                    onClick={() => setActiveFileId(id)}
+                    sx={{ minWidth: 0, px: 0.25, py: 0, textTransform: 'none' }}
+                  >
+                    <Typography variant="caption" noWrap sx={{ maxWidth: 180, color: 'text.primary' }}>
+                      {label.split('/').pop()}
+                    </Typography>
+                  </Button>
+                  <IconButton size="small" onClick={() => closeFile(id)} sx={{ p: 0.2 }}>
+                    <Close sx={{ fontSize: 12 }} />
+                  </IconButton>
+                </Box>
+              )
+            })}
+          </Box>
+
           {/* Toolbar */}
           <Box
             sx={{
@@ -541,16 +739,16 @@ export default function SqlFiles() {
             }}
           >
             <TextField
-              value={editName}
-              onChange={e => setEditName(e.target.value)}
+              value={activeDraft.name}
+              onChange={e => updateActiveDraft({ name: e.target.value })}
               size="small"
               variant="standard"
               sx={{ '& input': { fontWeight: 600 } }}
               placeholder="File name"
             />
             <TextField
-              select value={editType}
-              onChange={e => setEditType(e.target.value)}
+              select value={activeDraft.file_type}
+              onChange={e => updateActiveDraft({ file_type: e.target.value })}
               size="small"
               variant="standard"
               sx={{ minWidth: 110 }}
@@ -574,8 +772,7 @@ export default function SqlFiles() {
               <IconButton
                 size="small"
                 onClick={() => {
-                  if (!selected) return
-                  createVersionMut.mutate({ id: selected.id, tag: versionTag, content: editContent })
+                  createVersionMut.mutate({ id: activeFile.id, tag: versionTag, content: activeDraft.content })
                 }}
                 disabled={createVersionMut.isPending}
               >
@@ -598,9 +795,8 @@ export default function SqlFiles() {
                   color="error"
                   disabled={deleteMut.isPending}
                   onClick={() => {
-                    if (!selected) return
-                    if (!window.confirm(`Delete SQL file "${selected.name}"?`)) return
-                    deleteMut.mutate(selected.id)
+                    if (!window.confirm(`Delete SQL file "${activeFile.name}"?`)) return
+                    deleteMut.mutate(activeFile.id)
                   }}
                 >
                   <Delete sx={{ fontSize: 16 }} />
@@ -614,8 +810,8 @@ export default function SqlFiles() {
               <Editor
                 height="100%"
                 language="sql"
-                value={editContent}
-                onChange={(v) => setEditContent(v ?? '')}
+                value={activeDraft.content}
+                onChange={(v) => updateActiveDraft({ content: v ?? '' })}
                 onMount={onEditorMount}
                 theme={theme.palette.mode === 'dark' ? 'vs-dark' : 'vs'}
                 options={{
@@ -648,7 +844,7 @@ export default function SqlFiles() {
                   bgcolor: 'background.paper',
                 }}
               >
-                <Chip label={editType} size="small" sx={{ height: 18, fontSize: '0.62rem' }} />
+                <Chip label={activeDraft.file_type} size="small" sx={{ height: 18, fontSize: '0.62rem' }} />
                 <Typography variant="caption" color="text.secondary">Rows: {lines}</Typography>
                 <Typography variant="caption" color="text.secondary">Words: {words}</Typography>
                 <Typography variant="caption" color="text.secondary">Chars: {chars}</Typography>
@@ -688,7 +884,7 @@ export default function SqlFiles() {
                                 <Chip label={v.tag} size="small" sx={{ height: 16, fontSize: '0.56rem', textTransform: 'uppercase' }} />
                               </Box>
                               <Typography variant="caption" color="text.secondary" noWrap>
-                                {new Date(v.created_at).toLocaleString()} · Δ {changedLineCount(editContent, v.content)} rows
+                                {new Date(v.created_at).toLocaleString()} · Δ {changedLineCount(activeDraft.content, v.content)} rows
                               </Typography>
                             </Box>
                           </ListItemButton>
@@ -719,7 +915,7 @@ export default function SqlFiles() {
                         <Button
                           size="small"
                           variant="outlined"
-                          onClick={() => setEditContent(activeVersion.content)}
+                          onClick={() => updateActiveDraft({ content: activeVersion.content })}
                         >
                           Restore This Version
                         </Button>
