@@ -11,7 +11,7 @@ import ReactFlow, {
 // @ts-ignore side-effect stylesheet import provided by reactflow at build time
 import 'reactflow/dist/style.css'
 import {
-  Box, Typography, Button, IconButton, Tooltip,
+  Autocomplete, Box, Typography, Button, IconButton, Tooltip,
   TextField, Select, MenuItem, FormControl, InputLabel,
   Divider, Chip, CircularProgress, alpha, useTheme,
   Tab, Tabs, Switch, FormControlLabel,
@@ -39,6 +39,21 @@ import {
   Pipeline, Connection, SqlFile, Dictionary, PreviewResult, ForeachEntryResult, NotebookFile, RunSummary,
 } from '../api/client'
 import StatusChip from '../components/StatusChip'
+
+const DEFAULT_PIPELINE_CATEGORY = 'Unknown'
+
+function normalizePipelineCategory(category?: string): string {
+  const value = (category ?? '').trim()
+  return value || DEFAULT_PIPELINE_CATEGORY
+}
+
+function buildPipelineCategoryOptions(categories: string[]): string[] {
+  return Array.from(new Set(categories.map(normalizePipelineCategory))).sort((a, b) => {
+    if (a === DEFAULT_PIPELINE_CATEGORY) return -1
+    if (b === DEFAULT_PIPELINE_CATEGORY) return 1
+    return a.localeCompare(b)
+  })
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Node catalog
@@ -2322,6 +2337,7 @@ export default function PipelineEditor() {
   const qc = useQueryClient()
 
   const [pipelineName, setPipelineName] = useState('')
+  const [pipelineCategory, setPipelineCategory] = useState(DEFAULT_PIPELINE_CATEGORY)
   const [deletePipelineConfirm, setDeletePipelineConfirm] = useState(false)
   const [nodes, setNodes, onNodesChange] = useNodesState<PipelineNodeData>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
@@ -2362,6 +2378,11 @@ export default function PipelineEditor() {
     enabled: !!id,
   })
 
+  const { data: allPipelines = [] } = useQuery<Pipeline[]>({
+    queryKey: ['pipelines'],
+    queryFn: pipelinesApi.list,
+  })
+
   const { data: connections = [] } = useQuery({
     queryKey: ['connections'],
     queryFn: connectionsApi.list,
@@ -2397,11 +2418,17 @@ export default function PipelineEditor() {
     [pipelineRuns],
   )
 
+  const categoryOptions = useMemo(
+    () => buildPipelineCategoryOptions(allPipelines.map(p => p.category)),
+    [allPipelines],
+  )
+
   // ── Load canvas state when pipeline arrives ──────────────────────────────
 
   useEffect(() => {
     if (!pipeline) return
     setPipelineName(pipeline.name)
+    setPipelineCategory((pipeline.category ?? '').trim() || DEFAULT_PIPELINE_CATEGORY)
 
     const cc = pipeline.canvas_config as { nodes?: unknown[]; edges?: unknown[]; viewport?: Viewport } | undefined
     if (cc?.nodes && cc.nodes.length > 0) {
@@ -2486,6 +2513,7 @@ export default function PipelineEditor() {
 
       return pipelinesApi.update(Number(id), {
         name: pipelineName,
+        category: pipelineCategory.trim() || DEFAULT_PIPELINE_CATEGORY,
         canvas_config: {
           nodes: nodes.map(n => ({
             id: n.id, type: n.type, position: n.position,
@@ -2683,6 +2711,21 @@ export default function PipelineEditor() {
           variant="standard"
           sx={{ '& input': { fontWeight: 600, fontSize: '0.95rem' } }}
           placeholder="Pipeline name…"
+        />
+        <Autocomplete
+          freeSolo
+          options={categoryOptions}
+          value={pipelineCategory}
+          onInputChange={(_, value) => setPipelineCategory(value)}
+          sx={{ minWidth: 180 }}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              size="small"
+              variant="standard"
+              placeholder="Category"
+            />
+          )}
         />
         <Chip
           label={pipeline?.status ?? 'draft'}

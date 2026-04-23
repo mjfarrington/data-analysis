@@ -281,6 +281,7 @@ async def create_pipeline(
 ):
     pipeline = ETLPipeline(
         name=body.name,
+        category=body.category,
         description=body.description,
         extract_config=body.extract_config.model_dump(),
         transform_config=body.transform_config.model_dump(),

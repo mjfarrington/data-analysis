@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Box, Typography, Button, Chip, IconButton, Dialog, DialogTitle, DialogContent,
+  Autocomplete, Box, Typography, Button, Chip, IconButton, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, InputAdornment, CircularProgress, Tooltip, Alert,
   alpha, useTheme, Table, TableHead, TableRow, TableCell, TableBody, LinearProgress,
   ToggleButtonGroup, ToggleButton,
@@ -18,6 +18,23 @@ import { format, parseISO } from 'date-fns'
 import RunLogPanel from '../components/RunLogPanel'
 import StatusChip, { STATUS_COLOR } from '../components/StatusChip'
 import RunGraphView from '../components/RunGraphView'
+
+const DEFAULT_PIPELINE_CATEGORY = 'Unknown'
+const SUGGESTED_PIPELINE_CATEGORIES = ['Unknown', 'Trade', 'Risk', 'Reference Data']
+
+function normalizePipelineCategory(category?: string): string {
+  const value = (category ?? '').trim()
+  return value || DEFAULT_PIPELINE_CATEGORY
+}
+
+function buildPipelineCategoryOptions(categories: string[]): string[] {
+  const merged = [...SUGGESTED_PIPELINE_CATEGORIES, ...categories]
+  return Array.from(new Set(merged.map(normalizePipelineCategory))).sort((a, b) => {
+    if (a === DEFAULT_PIPELINE_CATEGORY) return -1
+    if (b === DEFAULT_PIPELINE_CATEGORY) return 1
+    return a.localeCompare(b)
+  })
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -378,31 +395,75 @@ function InlineRunMonitor({ runId, pipelineId, pipeline: pipelineProp, onClose, 
 
 // ── Quick-create dialog ───────────────────────────────────────────────────────
 
-function QuickCreateDialog({ open, onClose, onCreate }: {
-  open: boolean; onClose: () => void; onCreate: (name: string) => Promise<void>
+function QuickCreateDialog({ open, onClose, onCreate, categories }: {
+  open: boolean; onClose: () => void; onCreate: (name: string, category: string) => Promise<void>; categories: string[]
 }) {
   const [name, setName] = useState('')
+  const [category, setCategory] = useState(DEFAULT_PIPELINE_CATEGORY)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState('')
+  const categoryOptions = useMemo(() => buildPipelineCategoryOptions(categories), [categories])
 
   async function handleCreate() {
     if (!name.trim()) { setErr('Name is required'); return }
     setSaving(true)
-    try { await onCreate(name.trim()); setName(''); setErr(''); onClose() }
+    try {
+      await onCreate(name.trim(), normalizePipelineCategory(category))
+      setName('')
+      setCategory(DEFAULT_PIPELINE_CATEGORY)
+      setErr('')
+      onClose()
+    }
     catch (e: unknown) { setErr(e instanceof Error ? e.message : 'Failed to create'); setSaving(false) }
   }
 
+  function handleClose() {
+    setName('')
+    setCategory(DEFAULT_PIPELINE_CATEGORY)
+    setErr('')
+    setSaving(false)
+    onClose()
+  }
+
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+    <Dialog open={open} onClose={handleClose} maxWidth="xs" fullWidth>
       <DialogTitle>New Pipeline</DialogTitle>
       <DialogContent sx={{ pt: '16px !important' }}>
         {err && <Alert severity="error" sx={{ mb: 1.5 }}>{err}</Alert>}
         <TextField label="Pipeline name" value={name} onChange={e => { setName(e.target.value); setErr('') }}
           fullWidth size="small" autoFocus onKeyDown={e => e.key === 'Enter' && handleCreate()}
           helperText="You'll configure the pipeline in the visual editor" />
+        <Autocomplete
+          freeSolo
+          options={categoryOptions}
+          value={category}
+          onInputChange={(_, value) => setCategory(value)}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label="Category"
+              fullWidth
+              size="small"
+              sx={{ mt: 1.5 }}
+              helperText="Select an existing category or type a new one."
+            />
+          )}
+        />
+        <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mt: 1 }}>
+          {SUGGESTED_PIPELINE_CATEGORIES.map(option => (
+            <Chip
+              key={option}
+              label={option}
+              size="small"
+              variant={normalizePipelineCategory(category) === option ? 'filled' : 'outlined'}
+              color={normalizePipelineCategory(category) === option ? 'primary' : 'default'}
+              onClick={() => setCategory(option)}
+            />
+          ))}
+        </Box>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
+        <Button onClick={handleClose}>Cancel</Button>
         <Button variant="contained" onClick={handleCreate} disabled={saving || !name.trim()}
           startIcon={saving ? <CircularProgress size={14} /> : <OpenInNew sx={{ fontSize: 16 }} />}>
           Create &amp; Open
@@ -446,6 +507,7 @@ export default function Pipelines() {
   const [deleteTarget, setDeleteTarget] = useState<Pipeline | null>(null)
   const [runningMap, setRunningMap] = useState<Record<number, number>>({}) // pipelineId → runId
   const [expandedPipelines, setExpandedPipelines] = useState<Set<number>>(new Set())
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
   const initializedRef = useRef(false)
   const [sortField, setSortField] = useState<SortField>('name')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
@@ -455,6 +517,11 @@ export default function Pipelines() {
     queryFn: pipelinesApi.list,
     refetchInterval: () => Object.keys(runningMap).length > 0 ? 3000 : 30_000,
   })
+
+  const categoryOptions = useMemo(
+    () => buildPipelineCategoryOptions(pipelines.map(p => p.category)),
+    [pipelines],
+  )
 
   // Auto-expand panels for runs that are already in-progress on first load
   useEffect(() => {
@@ -469,7 +536,8 @@ export default function Pipelines() {
   }, [pipelines])
 
   const createMut = useMutation({
-    mutationFn: (name: string) => pipelinesApi.create({ name, status: 'draft', source_type: 'datawarehouse', load_target: 'parquet' }),
+    mutationFn: ({ name, category }: { name: string; category: string }) =>
+      pipelinesApi.create({ name, category: normalizePipelineCategory(category), status: 'draft', source_type: 'datawarehouse', load_target: 'parquet' }),
     onSuccess: (pipeline) => { qc.invalidateQueries({ queryKey: ['pipelines'] }); navigate(`/pipelines/${pipeline.id}/edit`) },
   })
 
@@ -502,6 +570,15 @@ export default function Pipelines() {
     else { setSortField(field); setSortDir('asc') }
   }
 
+  function toggleCategory(category: string) {
+    setCollapsedCategories(current => {
+      const next = new Set(current)
+      if (next.has(category)) next.delete(category)
+      else next.add(category)
+      return next
+    })
+  }
+
   const filtered = pipelines
     .filter(p => {
       const ms = !search || p.name.toLowerCase().includes(search.toLowerCase())
@@ -520,6 +597,19 @@ export default function Pipelines() {
       }
       return sortDir === 'asc' ? cmp : -cmp
     })
+
+  const groupedPipelines = filtered.reduce<Record<string, Pipeline[]>>((acc, pipeline) => {
+    const category = normalizePipelineCategory(pipeline.category)
+    if (!acc[category]) acc[category] = []
+    acc[category].push(pipeline)
+    return acc
+  }, {})
+
+  const groupedCategories = Object.keys(groupedPipelines).sort((a, b) => {
+    if (a === DEFAULT_PIPELINE_CATEGORY) return 1
+    if (b === DEFAULT_PIPELINE_CATEGORY) return -1
+    return a.localeCompare(b)
+  })
 
   return (
     <Box sx={{ p: 3 }}>
@@ -552,22 +642,45 @@ export default function Pipelines() {
 
       {isLoading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', p: 6 }}><CircularProgress /></Box>
-      ) : (
-        <Box sx={{ bgcolor: 'background.paper', borderRadius: 2, border: `1px solid ${theme.palette.divider}`, overflow: 'hidden' }}>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <SortHeader field="name" label="Name" current={sortField} dir={sortDir} onSort={handleSort} />
-                <SortHeader field="status" label="Status" current={sortField} dir={sortDir} onSort={handleSort} />
-                <SortHeader field="nodes" label="Nodes" current={sortField} dir={sortDir} onSort={handleSort} />
-                <SortHeader field="last_run" label="Last Run" current={sortField} dir={sortDir} onSort={handleSort} />
-                <TableCell>Last Status</TableCell>
-                <TableCell>Duration</TableCell>
-                <TableCell align="right">Actions</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {filtered.map(pipeline => {
+      ) : filtered.length > 0 ? (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {groupedCategories.map(category => {
+            const isCollapsed = collapsedCategories.has(category)
+
+            return (
+            <Box key={category} sx={{ bgcolor: 'background.paper', borderRadius: 2, border: `1px solid ${theme.palette.divider}`, overflow: 'hidden' }}>
+              <Box
+                onClick={() => toggleCategory(category)}
+                sx={{
+                  display: 'flex', alignItems: 'center', gap: 1, px: 2, py: 1,
+                  borderBottom: isCollapsed ? 'none' : `1px solid ${theme.palette.divider}`,
+                  bgcolor: alpha(theme.palette.background.default, 0.55),
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                {isCollapsed
+                  ? <ChevronRight sx={{ fontSize: 18, color: 'text.secondary' }} />
+                  : <ExpandMore sx={{ fontSize: 18, color: 'text.secondary' }} />}
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{category}</Typography>
+                <Chip label={`${groupedPipelines[category].length}`} size="small" sx={{ height: 18, fontSize: '0.65rem' }} />
+              </Box>
+              {!isCollapsed && (
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <SortHeader field="name" label="Name" current={sortField} dir={sortDir} onSort={handleSort} />
+                    <TableCell>Category</TableCell>
+                    <SortHeader field="status" label="Status" current={sortField} dir={sortDir} onSort={handleSort} />
+                    <SortHeader field="nodes" label="Nodes" current={sortField} dir={sortDir} onSort={handleSort} />
+                    <SortHeader field="last_run" label="Last Run" current={sortField} dir={sortDir} onSort={handleSort} />
+                    <TableCell>Last Status</TableCell>
+                    <TableCell>Duration</TableCell>
+                    <TableCell align="right">Actions</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {groupedPipelines[category].map(pipeline => {
                 const nodeCount = (pipeline.canvas_config?.nodes as unknown[])?.length ?? 0
                 const sc = STATUS_COLOR[pipeline.status] ?? '#6e7681'
                 const lrStatus = pipeline.last_run?.status
@@ -598,6 +711,9 @@ export default function Pipelines() {
                           </Typography>
                         )}
                       </Box>
+                    </TableCell>
+                    <TableCell>
+                      <Chip label={normalizePipelineCategory(pipeline.category)} size="small" sx={{ height: 18, fontSize: '0.62rem' }} />
                     </TableCell>
                     <TableCell>
                       <StatusChip status={pipeline.status} />
@@ -665,16 +781,18 @@ export default function Pipelines() {
                     </TableCell>
                   </TableRow>
                 )
-              })}
-              {filtered.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={7} align="center" sx={{ py: 6, color: 'text.secondary' }}>
-                    {pipelines.length === 0 ? 'No pipelines yet — create your first one' : 'No pipelines match your filters'}
-                  </TableCell>
-                </TableRow>
+                  })}
+                </TableBody>
+              </Table>
               )}
-            </TableBody>
-          </Table>
+            </Box>
+          )})}
+        </Box>
+      ) : (
+        <Box sx={{ bgcolor: 'background.paper', borderRadius: 2, border: `1px solid ${theme.palette.divider}`, overflow: 'hidden' }}>
+          <Box sx={{ py: 6, color: 'text.secondary', textAlign: 'center' }}>
+            {pipelines.length === 0 ? 'No pipelines yet — create your first one' : 'No pipelines match your filters'}
+          </Box>
         </Box>
       )}
 
@@ -695,8 +813,8 @@ export default function Pipelines() {
         )
       })}
 
-      <QuickCreateDialog open={newOpen} onClose={() => setNewOpen(false)}
-        onCreate={async name => { await createMut.mutateAsync(name) }} />
+      <QuickCreateDialog open={newOpen} onClose={() => setNewOpen(false)} categories={categoryOptions}
+        onCreate={async (name, category) => { await createMut.mutateAsync({ name, category }) }} />
 
       <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)} maxWidth="xs">
         <DialogTitle>Delete Pipeline</DialogTitle>

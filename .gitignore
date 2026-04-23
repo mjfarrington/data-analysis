@@ -51,3 +51,5 @@ dist/
 .DS_Store
 data/spark/events/*
 data/spark/warehouse/*
+
+tools/*

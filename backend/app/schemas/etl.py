@@ -112,6 +112,7 @@ class LoadSparkRequest(BaseModel):
 
 class PipelineBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
+    category: str = Field(default="Unknown", min_length=1, max_length=100)
     description: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     extract_config: ExtractConfig = Field(default_factory=ExtractConfig)
@@ -128,6 +129,7 @@ class PipelineCreate(PipelineBase):
 
 class PipelineUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
+    category: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
     tags: Optional[list[str]] = None
     status: Optional[str] = None

@@ -366,8 +366,6 @@ export default function AppShell() {
           }}
         >
           <Toolbar variant="dense" sx={{ minHeight: 44, gap: 1.5 }}>
-            <Box sx={{ flex: 1 }} />
-
             {/* Business date — click to edit */}
             <Chip
               icon={<CalendarToday sx={{ fontSize: '0.72rem !important' }} />}
@@ -382,13 +380,15 @@ export default function AppShell() {
               }}
             />
 
+            <Box sx={{ flex: 1 }} />
+
             {/* Date edit popover */}
             <Popover
               open={Boolean(dateAnchor)}
               anchorEl={dateAnchor}
               onClose={() => setDateAnchor(null)}
-              anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+              anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'left' }}
               slotProps={{ paper: { sx: { p: 1.5, mt: 0.5, borderRadius: 1.5, minWidth: 220 } } }}
             >
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, display: 'block', mb: 1 }}>

@@ -19,6 +19,7 @@ export interface RunSummary {
 export interface Pipeline {
   id: number
   name: string
+  category: string
   description?: string
   status: 'active' | 'inactive' | 'draft'
   source_type: string
