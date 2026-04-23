@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import {
   Box, Typography, TextField, InputAdornment, IconButton, Chip,
-  Tooltip, alpha, useTheme,
+  Tooltip, alpha, useTheme, MenuItem,
 } from '@mui/material'
 import {
   Search, Close, ArrowDownward, FilterList, ContentCopy, Done,
@@ -161,8 +161,9 @@ export default function RunLogPanel({ logs, live = false, defaultHeight = 220, f
         borderBottom: `1px solid ${borderColor}`,
         flexShrink: 0, flexWrap: 'wrap',
       }}>
-        <Typography variant="caption" fontWeight={700} color="text.secondary"
-          sx={{ textTransform: 'uppercase', letterSpacing: '0.08em', mr: 0.5 }}>
+        <Typography variant="caption" color="text.secondary"
+          sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', mr: 0.5 }}
+        >
           Logs
         </Typography>
         <Typography variant="caption" color="text.disabled" sx={{ mr: 1 }}>
@@ -195,14 +196,13 @@ export default function RunLogPanel({ logs, live = false, defaultHeight = 220, f
         {/* Step filter */}
         {steps.length > 0 && (
           <TextField select size="small" value={stepFilter} onChange={e => setStepFilter(e.target.value)}
-            SelectProps={{ native: true }}
             sx={{
               minWidth: 100, maxWidth: 160,
               '& .MuiInputBase-root': { height: 22, fontSize: '0.72rem' },
               '& .MuiOutlinedInput-notchedOutline': { borderColor },
             }}>
-            <option value="">All steps</option>
-            {steps.map(s => <option key={s} value={s}>{s}</option>)}
+            <MenuItem value="">All steps</MenuItem>
+            {steps.map(s => <MenuItem key={s} value={s}>{s}</MenuItem>)}
           </TextField>
         )}
 
@@ -212,15 +212,17 @@ export default function RunLogPanel({ logs, live = false, defaultHeight = 220, f
           placeholder="Search…"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          InputProps={{
-            startAdornment: <InputAdornment position="start"><Search sx={{ fontSize: 13, color: 'text.disabled' }} /></InputAdornment>,
-            endAdornment: search ? (
-              <InputAdornment position="end">
-                <IconButton size="small" onClick={() => setSearch('')} sx={{ p: 0.2 }}>
-                  <Close sx={{ fontSize: 12 }} />
-                </IconButton>
-              </InputAdornment>
-            ) : null,
+          slotProps={{
+            input: {
+              startAdornment: <InputAdornment position="start"><Search sx={{ fontSize: 13, color: 'text.disabled' }} /></InputAdornment>,
+              endAdornment: search ? (
+                <InputAdornment position="end">
+                  <IconButton size="small" onClick={() => setSearch('')} sx={{ p: 0.2 }}>
+                    <Close sx={{ fontSize: 12 }} />
+                  </IconButton>
+                </InputAdornment>
+              ) : null,
+            },
           }}
           sx={{
             flex: 1, minWidth: 120, maxWidth: 240,

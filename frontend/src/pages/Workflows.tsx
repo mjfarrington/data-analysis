@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import {
-  Box, Typography, Button, Grid, Card, CardContent, CardActions,
+  Box, Typography, Button, Card, CardContent, CardActions,
   Chip, IconButton, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, MenuItem, List, ListItem, ListItemText, ListItemIcon,
   Divider, CircularProgress, Alert, Collapse, alpha, useTheme,
@@ -72,13 +72,13 @@ function WorkflowDialog({ open, onClose, initial, onSave }: WorkflowDialogProps)
         <TextField label="Description" value={description} onChange={e => setDescription(e.target.value)} size="small" fullWidth multiline rows={2} />
         <Divider />
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Typography variant="subtitle2" fontWeight={600}>Steps</Typography>
+          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>Steps</Typography>
           <Button size="small" startIcon={<Add />} onClick={addStep}>Add Step</Button>
         </Box>
         {steps.map((step, i) => (
           <Box key={i} sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
             <Typography variant="body2" sx={{ minWidth: 24, pt: 1.2, color: 'text.secondary' }}>
-              {step.order}
+              {i + 1}
             </Typography>
             <TextField
               select label="Type" value={step.type}
@@ -116,7 +116,7 @@ function WorkflowDialog({ open, onClose, initial, onSave }: WorkflowDialogProps)
           </Box>
         ))}
         {steps.length === 0 && (
-          <Typography variant="body2" color="text.secondary" textAlign="center" py={2}>
+          <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
             No steps yet. Add a step to get started.
           </Typography>
         )}
@@ -178,7 +178,7 @@ export default function Workflows() {
     <Box sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', alignItems: 'flex-start', mb: 3 }}>
         <Box sx={{ flex: 1 }}>
-          <Typography variant="h5" fontWeight={700}>Workflows</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 700 }}>Workflows</Typography>
           <Typography variant="body2" color="text.secondary">Orchestrate pipelines and transforms in sequence</Typography>
         </Box>
         <Button variant="contained" startIcon={<Add />} onClick={() => setNewOpen(true)}>
@@ -192,17 +192,17 @@ export default function Workflows() {
           <Typography>No workflows yet. Create one to get started.</Typography>
         </Box>
       ) : (
-        <Grid container spacing={2}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(2, minmax(0, 1fr))', lg: 'repeat(3, minmax(0, 1fr))' }, gap: 2 }}>
           {chains.map(chain => {
             const expanded = expandedId === chain.id
             const runResult = runResults[chain.id]
             return (
-              <Grid item xs={12} md={6} lg={4} key={chain.id}>
+              <Box key={chain.id}>
                 <Card sx={{ height: '100%' }}>
                   <CardContent>
                     <Box sx={{ display: 'flex', alignItems: 'flex-start', mb: 1 }}>
                       <Box sx={{ flex: 1 }}>
-                        <Typography variant="subtitle1" fontWeight={600}>{chain.name}</Typography>
+                        <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>{chain.name}</Typography>
                         {chain.description && (
                           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                             {chain.description}
@@ -219,16 +219,14 @@ export default function Workflows() {
                     <Collapse in={expanded}>
                       <Divider sx={{ my: 1.5 }} />
                       <List dense disablePadding>
-                        {[...chain.steps].sort((a, b) => a.order - b.order).map(step => (
-                          <ListItem key={step.order} disablePadding sx={{ py: 0.25 }}>
+                        {chain.steps.map((step, index) => (
+                          <ListItem key={`${step.type}-${step.label}-${index}`} disablePadding sx={{ py: 0.25 }}>
                             <ListItemIcon sx={{ minWidth: 28 }}>
                               <StepTypeIcon type={step.type} />
                             </ListItemIcon>
                             <ListItemText
-                              primary={step.label}
-                              secondary={step.type}
-                              primaryTypographyProps={{ variant: 'body2', fontWeight: 500 }}
-                              secondaryTypographyProps={{ variant: 'caption' }}
+                              primary={<Typography variant="body2" sx={{ fontWeight: 500 }}>{step.label}</Typography>}
+                              secondary={<Typography variant="caption">{step.type}</Typography>}
                             />
                             <Chip
                               label={step.type}
@@ -274,10 +272,10 @@ export default function Workflows() {
                     </IconButton>
                   </CardActions>
                 </Card>
-              </Grid>
+              </Box>
             )
           })}
-        </Grid>
+        </Box>
       )}
 
       <WorkflowDialog

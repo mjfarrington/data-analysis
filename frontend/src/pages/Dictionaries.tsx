@@ -110,7 +110,7 @@ export default function Dictionaries() {
         }}
       >
         <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}` }}>
-          <Typography variant="subtitle2" fontWeight={700}>Dictionaries</Typography>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Dictionaries</Typography>
         </Box>
 
         <Box sx={{ flex: 1, overflowY: 'auto' }}>
@@ -126,10 +126,8 @@ export default function Dictionaries() {
                     sx={{ px: 2, py: 1 }}
                   >
                     <ListItemText
-                      primary={dict.name}
-                      secondary={dict.description}
-                      primaryTypographyProps={{ variant: 'body2', fontWeight: 500, noWrap: true }}
-                      secondaryTypographyProps={{ variant: 'caption', noWrap: true }}
+                      primary={<Typography variant="body2" noWrap sx={{ fontWeight: 500 }}>{dict.name}</Typography>}
+                      secondary={dict.description ? <Typography variant="caption" noWrap>{dict.description}</Typography> : null}
                     />
                     <Chip label={dict.entries.length} size="small" sx={{ fontSize: '0.65rem', height: 18 }} />
                   </ListItemButton>
@@ -165,7 +163,7 @@ export default function Dictionaries() {
             }}
           >
             <Box sx={{ flex: 1 }}>
-              <Typography variant="h6" fontWeight={700}>{currentDict.name}</Typography>
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>{currentDict.name}</Typography>
               {currentDict.description && (
                 <Typography variant="body2" color="text.secondary">{currentDict.description}</Typography>
               )}
@@ -175,14 +173,14 @@ export default function Dictionaries() {
                   size="small"
                   value={currentDict.key_label}
                   onChange={e => updateDictMut.mutate({ id: currentDict.id, data: { key_label: e.target.value } })}
-                  inputProps={{ style: { fontSize: '0.72rem', padding: '2px 6px', fontFamily: 'monospace' } }}
+                  slotProps={{ htmlInput: { style: { fontSize: '0.72rem', padding: '2px 6px', fontFamily: 'monospace' } } }}
                   sx={{ width: 110 }}
                 />
                 <TextField
                   size="small"
                   value={currentDict.value_label}
                   onChange={e => updateDictMut.mutate({ id: currentDict.id, data: { value_label: e.target.value } })}
-                  inputProps={{ style: { fontSize: '0.72rem', padding: '2px 6px', fontFamily: 'monospace' } }}
+                  slotProps={{ htmlInput: { style: { fontSize: '0.72rem', padding: '2px 6px', fontFamily: 'monospace' } } }}
                   sx={{ width: 110 }}
                 />
               </Box>
@@ -234,7 +232,7 @@ export default function Dictionaries() {
                             autoFocus
                           />
                         ) : (
-                          <Typography variant="body2" fontFamily="monospace" fontWeight={500}>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontWeight: 500 }}>
                             {entry.key}
                           </Typography>
                         )}

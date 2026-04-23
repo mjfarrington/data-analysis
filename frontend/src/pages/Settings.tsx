@@ -9,7 +9,7 @@ import {
   ViewAgenda, ViewCompact,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { contextApi } from '../api/client'
+import { contextApi, sqlFilesApi } from '../api/client'
 import { useThemeStore, ThemeMode, Density } from '../store/theme'
 
 const APP_VERSION = '0.1.0'
@@ -41,6 +41,7 @@ export default function Settings() {
   const [namespacePrefix, setNamespacePrefix] = useState('')
   const [saveMsg, setSaveMsg] = useState('')
   const [saveErr, setSaveErr] = useState('')
+  const [versionLabelsText, setVersionLabelsText] = useState('')
 
   useEffect(() => {
     if (ctx) {
@@ -61,6 +62,28 @@ export default function Settings() {
     onError: (e: Error) => setSaveErr(e.message),
   })
 
+  const { data: versionLabels } = useQuery({
+    queryKey: ['sql-version-labels'],
+    queryFn: () => sqlFilesApi.getVersionLabels(),
+  })
+
+  useEffect(() => {
+    if (versionLabels?.labels) {
+      setVersionLabelsText(versionLabels.labels.join(', '))
+    }
+  }, [versionLabels])
+
+  const updateVersionLabelsMut = useMutation({
+    mutationFn: (labels: string[]) => sqlFilesApi.updateVersionLabels(labels),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sql-version-labels'] })
+      setSaveMsg('SQL version labels saved.')
+      setSaveErr('')
+      setTimeout(() => setSaveMsg(''), 3000)
+    },
+    onError: (e: Error) => setSaveErr(e.message),
+  })
+
   if (isLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 6 }}>
@@ -71,8 +94,8 @@ export default function Settings() {
 
   return (
     <Box sx={{ p: 3, maxWidth: 740 }}>
-      <Typography variant="h5" fontWeight={700} mb={0.5}>Settings</Typography>
-      <Typography variant="body2" color="text.secondary" mb={2.5}>
+      <Typography variant="h5" sx={{ fontWeight: 700, mb: 0.5 }}>Settings</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
         Configure workspace preferences and execution context.
       </Typography>
 
@@ -96,10 +119,10 @@ export default function Settings() {
 
         <Card>
           <CardContent>
-            <Typography variant="subtitle2" fontWeight={700} mb={0.5}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
               Execution Context
             </Typography>
-            <Typography variant="caption" color="text.secondary" display="block" mb={2.5}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2.5 }}>
               The business date and namespace prefix are used as reference values during
               pipeline runs and SQL variable injection.
             </Typography>
@@ -111,7 +134,7 @@ export default function Settings() {
                 value={businessDate}
                 onChange={e => setBusinessDate(e.target.value)}
                 size="small"
-                InputLabelProps={{ shrink: true }}
+                slotProps={{ inputLabel: { shrink: true } }}
                 helperText="Reference date for pipeline runs and SQL variable injection"
               />
               <TextField
@@ -150,6 +173,40 @@ export default function Settings() {
                 Save Context
               </Button>
             </Box>
+
+            <Divider sx={{ my: 2.5 }} />
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+              SQL Version Labels
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+              Labels available in SQL Files version tagging. Provide a comma-separated list.
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end', maxWidth: 520 }}>
+              <TextField
+                label="Version labels"
+                value={versionLabelsText}
+                onChange={e => setVersionLabelsText(e.target.value)}
+                size="small"
+                fullWidth
+                placeholder="INITIAL, DRAFT, FINAL, DEPRECATED"
+                helperText="Example: INITIAL, DRAFT, FINAL, DEPRECATED"
+              />
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<Save />}
+                disabled={updateVersionLabelsMut.isPending}
+                onClick={() => {
+                  const labels = versionLabelsText
+                    .split(',')
+                    .map(s => s.trim())
+                    .filter(Boolean)
+                  updateVersionLabelsMut.mutate(labels)
+                }}
+              >
+                Save Labels
+              </Button>
+            </Box>
           </CardContent>
         </Card>
       </TabPanel>
@@ -158,10 +215,10 @@ export default function Settings() {
       <TabPanel value={tab} index={1}>
         <Card sx={{ mb: 2 }}>
           <CardContent>
-            <Typography variant="subtitle2" fontWeight={700} mb={0.5}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
               Color Theme
             </Typography>
-            <Typography variant="caption" color="text.secondary" display="block" mb={2}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
               Saved automatically. Also accessible from the account menu in the sidebar.
             </Typography>
             <ToggleButtonGroup
@@ -188,10 +245,10 @@ export default function Settings() {
 
         <Card>
           <CardContent>
-            <Typography variant="subtitle2" fontWeight={700} mb={0.5}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
               Layout Density
             </Typography>
-            <Typography variant="caption" color="text.secondary" display="block" mb={2}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
               Compact mode reduces font sizes and element spacing to show more content at once.
             </Typography>
             <ToggleButtonGroup
@@ -217,7 +274,7 @@ export default function Settings() {
       <TabPanel value={tab} index={2}>
         <Card>
           <CardContent>
-            <Typography variant="subtitle2" fontWeight={700} mb={2}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 2 }}>
               System Information
             </Typography>
             <Divider sx={{ mb: 2 }} />

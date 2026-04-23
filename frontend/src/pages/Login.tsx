@@ -52,10 +52,10 @@ export default function Login() {
         >
           <HubOutlined sx={{ fontSize: 40, color: '#fff' }} />
         </Box>
-        <Typography variant="h3" fontWeight={700} color="#e6edf3">
+        <Typography variant="h3" color="#e6edf3" sx={{ fontWeight: 700 }}>
           Data Studio
         </Typography>
-        <Typography variant="h6" color="#8b949e" textAlign="center" maxWidth={340}>
+        <Typography variant="h6" color="#8b949e" sx={{ textAlign: 'center', maxWidth: 340 }}>
           Data Pipeline Orchestration
         </Typography>
         <Box sx={{ mt: 4, display: 'flex', flexDirection: 'column', gap: 2, width: '100%', maxWidth: 320 }}>
@@ -82,11 +82,11 @@ export default function Login() {
         <Box sx={{ width: '100%', maxWidth: 360 }}>
           <Box sx={{ display: { md: 'none' }, mb: 4, textAlign: 'center' }}>
             <HubOutlined sx={{ fontSize: 48, color: 'primary.main' }} />
-            <Typography variant="h5" fontWeight={700} mt={1}>Data Studio</Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700, mt: 1 }}>Data Studio</Typography>
           </Box>
 
-          <Typography variant="h5" fontWeight={700} mb={0.5}>Sign In</Typography>
-          <Typography variant="body2" color="text.secondary" mb={3}>
+          <Typography variant="h5" sx={{ fontWeight: 700, mb: 0.5 }}>Sign In</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
             Enter your credentials to continue
           </Typography>
 
@@ -110,14 +110,16 @@ export default function Login() {
               autoComplete="current-password"
               fullWidth
               size="small"
-              InputProps={{
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton size="small" onClick={() => setShowPassword(v => !v)} edge="end">
-                      {showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
+              slotProps={{
+                input: {
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton size="small" onClick={() => setShowPassword(v => !v)} edge="end">
+                        {showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                },
               }}
             />
             <Button

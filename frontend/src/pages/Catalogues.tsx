@@ -118,7 +118,7 @@ export default function Catalogues() {
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}>
         <Box sx={{ p: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid', borderColor: 'divider' }}>
-          <Typography variant="subtitle2" fontWeight={700}>Catalogues</Typography>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Catalogues</Typography>
           <Tooltip title="New catalogue">
             <IconButton size="small" onClick={() => setNewCatOpen(true)}><Add fontSize="small" /></IconButton>
           </Tooltip>
@@ -135,7 +135,7 @@ export default function Catalogues() {
                   sx={{ px: 2, py: 1 }}
                 >
                   <ListItemText
-                    primary={<Typography variant="body2" fontWeight={600} noWrap>{cat.name}</Typography>}
+                    primary={<Typography variant="body2" noWrap sx={{ fontWeight: 600 }}>{cat.name}</Typography>}
                     secondary={
                       <Typography variant="caption" color="text.secondary">
                         {cat.columns.length} column{cat.columns.length !== 1 ? 's' : ''}
@@ -189,7 +189,7 @@ export default function Catalogues() {
               ) : (
                 <>
                   <Box sx={{ flex: 1 }}>
-                    <Typography variant="subtitle1" fontWeight={700}>{freshSelected.name}</Typography>
+                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{freshSelected.name}</Typography>
                     {freshSelected.description && (
                       <Typography variant="caption" color="text.secondary">{freshSelected.description}</Typography>
                     )}
@@ -211,8 +211,8 @@ export default function Catalogues() {
             {/* Columns table */}
             <Box sx={{ flex: 1, overflowY: 'auto', p: 2 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
-                <Typography variant="caption" fontWeight={700} color="text.secondary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.65rem' }}>
+                <Typography variant="caption" color="text.secondary"
+                  sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.65rem' }}>
                   Columns ({freshSelected.columns.length})
                 </Typography>
                 <Button size="small" startIcon={<Add />} variant="outlined"
@@ -326,7 +326,7 @@ export default function Catalogues() {
             label="Column Name" size="small" fullWidth
             value={editingCol?.data.name ?? ''}
             onChange={e => setEditingCol(c => c ? { ...c, data: { ...c.data, name: e.target.value } } : c)}
-            inputProps={{ style: { fontFamily: 'monospace' } }}
+            slotProps={{ htmlInput: { style: { fontFamily: 'monospace' } } }}
           />
           <FormControl size="small" fullWidth>
             <InputLabel>Data Type</InputLabel>

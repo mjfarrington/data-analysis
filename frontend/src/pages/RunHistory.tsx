@@ -151,7 +151,7 @@ export default function RunHistory() {
     <Box sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', alignItems: 'flex-start', mb: 3 }}>
         <Box sx={{ flex: 1 }}>
-          <Typography variant="h5" fontWeight={700}>Run History</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 700 }}>Run History</Typography>
           <Typography variant="body2" color="text.secondary">Monitor all pipeline executions</Typography>
         </Box>
         {selectedIds.size > 0 && (
@@ -257,10 +257,10 @@ export default function RunHistory() {
                       </IconButton>
                     </TableCell>
                     <TableCell>
-                      <Typography variant="body2" fontFamily="monospace">#{run.id}</Typography>
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>#{run.id}</Typography>
                     </TableCell>
                     <TableCell>
-                      <Typography variant="body2" fontWeight={500}>
+                      <Typography variant="body2" sx={{ fontWeight: 500 }}>
                         {pipeline?.name ?? `Pipeline ${extended.pipeline_id}`}
                       </Typography>
                     </TableCell>

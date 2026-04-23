@@ -525,7 +525,7 @@ export default function Pipelines() {
     <Box sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', alignItems: 'flex-start', mb: 3, gap: 2 }}>
         <Box sx={{ flex: 1 }}>
-          <Typography variant="h5" fontWeight={700}>Pipelines</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 700 }}>Pipelines</Typography>
           <Typography variant="body2" color="text.secondary">Build and run visual ETL pipelines</Typography>
         </Box>
         <Button variant="contained" startIcon={<Add />} onClick={() => setNewOpen(true)}>New Pipeline</Button>
@@ -534,7 +534,7 @@ export default function Pipelines() {
       <Box sx={{ display: 'flex', gap: 2, mb: 2.5, flexWrap: 'wrap', alignItems: 'center' }}>
         <TextField placeholder="Search pipelines…" value={search} onChange={e => setSearch(e.target.value)}
           size="small" sx={{ width: 240 }}
-          InputProps={{ startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment> }} />
+          slotProps={{ input: { startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment> } }} />
         <Box sx={{ display: 'flex', gap: 1 }}>
           {['all', 'active', 'inactive', 'draft'].map(s => (
             <Chip key={s} label={s.charAt(0).toUpperCase() + s.slice(1)}
@@ -585,9 +585,11 @@ export default function Pipelines() {
                   <TableRow key={pipeline.id} hover sx={{ borderLeft: `3px solid ${sc}` }}>
                     <TableCell>
                       <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-                        <Typography variant="body2" fontWeight={600}
-                          sx={{ cursor: 'pointer', '&:hover': { color: 'primary.main' } }}
-                          onClick={() => navigate(`/pipelines/${pipeline.id}/edit`)}>
+                        <Typography
+                          variant="body2"
+                          sx={{ fontWeight: 600, cursor: 'pointer', '&:hover': { color: 'primary.main' } }}
+                          onClick={() => navigate(`/pipelines/${pipeline.id}/edit`)}
+                        >
                           {pipeline.name}
                         </Typography>
                         {pipeline.description && (

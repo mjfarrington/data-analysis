@@ -53,8 +53,8 @@ export default function Admin() {
 
   return (
     <Box sx={{ p: 3, maxWidth: 720 }}>
-      <Typography variant="h5" fontWeight={700} mb={0.5}>Admin</Typography>
-      <Typography variant="body2" color="text.secondary" mb={3}>
+      <Typography variant="h5" sx={{ fontWeight: 700, mb: 0.5 }}>Admin</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         Configure execution context and application settings
       </Typography>
 
@@ -64,7 +64,7 @@ export default function Admin() {
       {/* Execution Context */}
       <Card sx={{ mb: 2 }}>
         <CardContent>
-          <Typography variant="subtitle1" fontWeight={700} mb={2}>Execution Context</Typography>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 2 }}>Execution Context</Typography>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <TextField
               label="Business Date"
@@ -73,7 +73,7 @@ export default function Admin() {
               onChange={e => setBusinessDate(e.target.value)}
               size="small"
               sx={{ maxWidth: 240 }}
-              InputLabelProps={{ shrink: true }}
+              slotProps={{ inputLabel: { shrink: true } }}
               helperText="Used as the reference date for pipeline runs"
             />
             <TextField
@@ -101,7 +101,7 @@ export default function Admin() {
       {/* About */}
       <Card>
         <CardContent>
-          <Typography variant="subtitle1" fontWeight={700} mb={2}>About</Typography>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 2 }}>About</Typography>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
             {[
               { label: 'Application', value: 'Data Studio' },
@@ -114,7 +114,7 @@ export default function Admin() {
                 <Typography variant="body2" color="text.secondary" sx={{ minWidth: 120 }}>
                   {label}
                 </Typography>
-                <Typography variant="body2" fontFamily={label === 'Backend URL' ? 'monospace' : undefined}>
+                <Typography variant="body2" sx={{ fontFamily: label === 'Backend URL' ? 'monospace' : undefined }}>
                   {value}
                 </Typography>
               </Box>

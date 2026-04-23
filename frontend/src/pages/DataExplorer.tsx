@@ -139,14 +139,16 @@ function RichGrid({
           onChange={e => setRowFilter(e.target.value)}
           size="small"
           sx={{ width: 190 }}
-          InputProps={{
-            startAdornment: (
-              <InputAdornment position="start">
-                <FilterList sx={{ fontSize: 14 }} />
-              </InputAdornment>
-            ),
+          slotProps={{
+            input: {
+              startAdornment: (
+                <InputAdornment position="start">
+                  <FilterList sx={{ fontSize: 14 }} />
+                </InputAdornment>
+              ),
+            },
+            htmlInput: { style: { fontSize: '0.75rem', paddingTop: 3, paddingBottom: 3 } },
           }}
-          inputProps={{ style: { fontSize: '0.75rem', paddingTop: 3, paddingBottom: 3 } }}
         />
         <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
           {rowFilter && filteredRows.length !== rows.length
@@ -574,14 +576,16 @@ export default function DataExplorer() {
             onChange={e => setLeftSearch(e.target.value)}
             size="small"
             fullWidth
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <Search sx={{ fontSize: 16 }} />
-                </InputAdornment>
-              ),
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <Search sx={{ fontSize: 16 }} />
+                  </InputAdornment>
+                ),
+              },
+              htmlInput: { style: { fontSize: '0.78rem', paddingTop: 4, paddingBottom: 4 } },
             }}
-            inputProps={{ style: { fontSize: '0.78rem', paddingTop: 4, paddingBottom: 4 } }}
           />
         </Box>
 
@@ -936,7 +940,7 @@ export default function DataExplorer() {
               {!selectedItem ? (
                 <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 1.5, color: 'text.secondary' }}>
                   <TableChart sx={{ fontSize: 52, opacity: 0.2 }} />
-                  <Typography variant="body1" fontWeight={500}>Select a table or file to preview</Typography>
+                  <Typography variant="body1" sx={{ fontWeight: 500 }}>Select a table or file to preview</Typography>
                   <Typography variant="body2" color="text.disabled">Browse the File Store or Spark Catalog on the left</Typography>
                 </Box>
               ) : previewIsError ? (
@@ -963,7 +967,7 @@ export default function DataExplorer() {
               {!selectedItem?.sqlName ? (
                 <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 1.5, color: 'text.secondary' }}>
                   <Description sx={{ fontSize: 52, opacity: 0.2 }} />
-                  <Typography variant="body1" fontWeight={500}>Select a Spark catalog table to view its schema</Typography>
+                  <Typography variant="body1" sx={{ fontWeight: 500 }}>Select a Spark catalog table to view its schema</Typography>
                 </Box>
               ) : schemaError ? (
                 <Alert severity="error" sx={{ m: 2 }}>{schemaError}</Alert>
@@ -972,7 +976,7 @@ export default function DataExplorer() {
               ) : (
                 <Box>
                   <Box sx={{ px: 2, py: 1, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography variant="subtitle2" fontFamily="monospace">{selectedItem.sqlName}</Typography>
+                    <Typography variant="subtitle2" sx={{ fontFamily: 'monospace' }}>{selectedItem.sqlName}</Typography>
                     <Button
                       size="small"
                       variant="outlined"

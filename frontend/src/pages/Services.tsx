@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import {
-  Box, Typography, Grid, Card, CardContent, CardActions, Button,
+  Box, Typography, Card, CardContent, CardActions, Button,
   CircularProgress, alpha, Tooltip, Collapse, IconButton,
   Divider, Table, TableHead, TableRow, TableCell, TableBody, Alert,
   LinearProgress,
@@ -65,7 +65,7 @@ function SparkMasterDetails({ details }: { details: Record<string, unknown> }) {
   return (
     <Box sx={{ mt: 1.5 }}>
       <Divider sx={{ mb: 1.5 }} />
-      <Typography variant="caption" fontWeight={700} color="text.secondary" textTransform="uppercase" letterSpacing="0.06em">
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
         Cluster Resources
       </Typography>
       <Box sx={{ mt: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1 }}>
@@ -78,7 +78,7 @@ function SparkMasterDetails({ details }: { details: Record<string, unknown> }) {
         ].map(r => (
           <Box key={r.label}>
             <Typography variant="caption" color="text.secondary">{r.label}</Typography>
-            <Typography variant="body2" fontFamily="monospace" fontWeight={600} fontSize="0.8rem">{r.value}</Typography>
+            <Typography variant="body2" sx={{ fontFamily: 'monospace', fontWeight: 600, fontSize: '0.8rem' }}>{r.value}</Typography>
           </Box>
         ))}
       </Box>
@@ -115,7 +115,7 @@ function ServiceCard({ service }: { service: ServiceInfo }) {
         <Box sx={{ display: 'flex', alignItems: 'flex-start', mb: 1 }}>
           {statusIcon(service.status, 22)}
           <Box sx={{ ml: 1.5, flex: 1, minWidth: 0 }}>
-            <Typography variant="subtitle2" fontWeight={700} noWrap>{service.name}</Typography>
+            <Typography variant="subtitle2" noWrap sx={{ fontWeight: 700 }}>{service.name}</Typography>
             {service.url && (
               <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block', fontFamily: 'monospace', fontSize: '0.7rem' }}>
                 {service.url}
@@ -181,7 +181,7 @@ function SparkTestPanel() {
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: open ? 2 : 0 }}>
         <Science sx={{ color: 'primary.main' }} />
         <Box sx={{ flex: 1 }}>
-          <Typography variant="subtitle1" fontWeight={700}>Spark Diagnostic Tests</Typography>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>Spark Diagnostic Tests</Typography>
           <Typography variant="body2" color="text.secondary">Run a connectivity and compute test suite against the Spark cluster</Typography>
         </Box>
         <Button variant="outlined" size="small"
@@ -209,7 +209,7 @@ function SparkTestPanel() {
                 ? <CheckCircle sx={{ color: '#3fb950' }} />
                 : <ErrorIcon sx={{ color: '#f85149' }} />}
               <Box>
-                <Typography variant="subtitle2" fontWeight={700}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
                   {testMut.data.overall === 'passed' ? 'All tests passed' : 'Some tests failed'}
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
@@ -272,7 +272,7 @@ export default function Services() {
     <Box sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', alignItems: 'flex-start', mb: 3 }}>
         <Box sx={{ flex: 1 }}>
-          <Typography variant="h5" fontWeight={700}>Services</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 700 }}>Services</Typography>
           <Typography variant="body2" color="text.secondary">Infrastructure health \u2014 auto-refreshes every 15 seconds</Typography>
         </Box>
         <Button startIcon={<Refresh />} size="small" onClick={() => refetch()} variant="outlined">Refresh</Button>
@@ -281,7 +281,7 @@ export default function Services() {
       <Box sx={{ mb: 3, p: 2, borderRadius: 2, bgcolor: alpha(overallColor, 0.07), border: `1px solid ${alpha(overallColor, 0.3)}`, display: 'flex', alignItems: 'center', gap: 2 }}>
         {statusIcon(overall, 24)}
         <Box sx={{ flex: 1 }}>
-          <Typography variant="subtitle1" fontWeight={700}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
             {overall === 'healthy' ? 'All systems operational' : overall === 'degraded' ? 'Some services degraded' : 'Service disruption detected'}
           </Typography>
           <Typography variant="caption" color="text.secondary">
@@ -300,13 +300,13 @@ export default function Services() {
       {isLoading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', p: 8 }}><CircularProgress /></Box>
       ) : data ? (
-        <Grid container spacing={2}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', md: 'repeat(3, minmax(0, 1fr))' }, gap: 2 }}>
           {data.services.map(service => (
-            <Grid item xs={12} sm={6} md={4} key={service.name}>
+            <Box key={service.name}>
               <ServiceCard service={service} />
-            </Grid>
+            </Box>
           ))}
-        </Grid>
+        </Box>
       ) : (
         <Alert severity="error">Could not connect to the services endpoint. Ensure the backend is running.</Alert>
       )}

@@ -319,7 +319,7 @@ export default function Dashboard() {
           sub={tables.length > 0 ? `${tables.filter(t => (t.row_count ?? 0) > 0).length} with data` : 'no data store'}
           color={theme.palette.info.main}
           icon={<TableChartIcon />}
-          onClick={() => navigate('/data-browser')}
+          onClick={() => navigate('/explorer')}
         />
         <StatCard
           label="Total Rows"
@@ -327,7 +327,7 @@ export default function Dashboard() {
           sub={totalRows > 0 ? 'across all tables' : 'no rows yet'}
           color={theme.palette.secondary.main}
           icon={<DatasetIcon />}
-          onClick={() => navigate('/data-browser')}
+          onClick={() => navigate('/explorer')}
         />
       </Box>
 

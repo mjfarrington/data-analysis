@@ -329,7 +329,7 @@ export default function RunGraphView({
               }}>
                 {selectedNodeInfo.nodeType.replace(/_/g, ' ')}
               </Box>
-              <Typography variant="body2" fontWeight={700} noWrap>{selectedNodeInfo.label}</Typography>
+              <Typography variant="body2" noWrap sx={{ fontWeight: 700 }}>{selectedNodeInfo.label}</Typography>
               {selectedNodeInfo.step && (
                 <Box sx={{
                   width: 8, height: 8, borderRadius: '50%', flexShrink: 0,

@@ -8,7 +8,7 @@ import ReactFlow, {
   Handle, Position, MarkerType, Panel,
   ReactFlowInstance, Viewport, useReactFlow, useStore,
 } from 'reactflow'
-// @ts-expect-error side-effect stylesheet import provided by reactflow at build time
+// @ts-ignore side-effect stylesheet import provided by reactflow at build time
 import 'reactflow/dist/style.css'
 import {
   Box, Typography, Button, IconButton, Tooltip,

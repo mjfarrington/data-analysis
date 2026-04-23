@@ -18,7 +18,6 @@ import Notebooks from './pages/Notebooks'
 import Dictionaries from './pages/Dictionaries'
 import Catalogues from './pages/Catalogues'
 import DataExplorer from './pages/DataExplorer'
-import DataBrowser from './pages/DataBrowser'
 import Connections from './pages/Connections'
 import RunHistory from './pages/RunHistory'
 import Services from './pages/Services'
@@ -67,7 +66,6 @@ function AppRoutes() {
         <Route path="dictionaries" element={<Dictionaries />} />
         <Route path="catalogues" element={<Catalogues />} />
         <Route path="explorer" element={<DataExplorer />} />
-        <Route path="data-browser" element={<DataBrowser />} />
         <Route path="connections" element={<Connections />} />
         <Route path="runs" element={<RunHistory />} />
         <Route path="services" element={<Services />} />

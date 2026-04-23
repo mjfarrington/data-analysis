@@ -4,7 +4,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableRow,
   Chip, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Select, MenuItem, FormControl, InputLabel,
-  CircularProgress, Alert, Divider, Stack, LinearProgress,
+  CircularProgress, Alert, Divider, Stack, LinearProgress, Paper,
 } from '@mui/material'
 import {
   Add, Edit, Delete, PlayArrow as TestIcon,
@@ -27,6 +27,7 @@ const DW_DIALECTS    = ['spark', 'impala']
 const DW_ENVS        = ['PROD', 'UAT']
 const S3_FORMATS     = ['auto', 'parquet', 'csv', 'json', 'orc']
 const S3_WRITE_MODES = ['overwrite', 'append', 'ignore', 'error']
+const API_BASE_URL   = 'http://localhost:8000/api/v1'
 
 function connTypeBadge(t: string) {
   const map: Record<string, 'default' | 'primary' | 'secondary' | 'success' | 'warning' | 'error' | 'info'> = {
@@ -255,12 +256,14 @@ function ConnectionDialog({
             onChange={set('password')}
             size="small"
             type={showPw ? 'text' : 'password'}
-            InputProps={{
-              endAdornment: (
-                <IconButton size="small" onClick={() => setShowPw(v => !v)}>
-                  {showPw ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
-                </IconButton>
-              ),
+            slotProps={{
+              input: {
+                endAdornment: (
+                  <IconButton size="small" onClick={() => setShowPw(v => !v)}>
+                    {showPw ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
+                  </IconButton>
+                ),
+              },
             }}
           />
 
@@ -384,7 +387,7 @@ function S3IngestPanel({ conn, onClose }: { conn: Connection; onClose: () => voi
     abortRef.current = new AbortController()
     try {
       const resp = await fetch(
-        `${import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1'}/connections/${conn.id}/s3-ingest`,
+        `${API_BASE_URL}/connections/${conn.id}/s3-ingest`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -484,7 +487,7 @@ function S3IngestPanel({ conn, onClose }: { conn: Connection; onClose: () => voi
               size="small"
               placeholder="SELECT * FROM {source} WHERE trade_date >= '2026-01-01'"
               helperText="Use {source} to reference the ingested data."
-              inputProps={{ style: { fontFamily: 'monospace', fontSize: '0.8rem' } }}
+              slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.8rem' } } }}
             />
           )}
 
@@ -650,7 +653,7 @@ export default function Connections() {
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
           <StorageIcon color="primary" />
-          <Typography variant="h5" fontWeight={700}>Connections</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 700 }}>Connections</Typography>
           <Chip label={connections.length} size="small" />
         </Box>
         <Button variant="contained" startIcon={<Add />} onClick={() => setCreateOpen(true)}>
@@ -696,7 +699,7 @@ export default function Connections() {
                 return (
                   <TableRow key={conn.id} hover>
                     <TableCell>
-                      <Typography variant="body2" fontWeight={600}>{conn.name}</Typography>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>{conn.name}</Typography>
                       {conn.description && (
                         <Typography variant="caption" color="text.secondary">{conn.description}</Typography>
                       )}
@@ -705,21 +708,21 @@ export default function Connections() {
                       <Chip label={conn.conn_type} size="small" color={connTypeBadge(conn.conn_type)} />
                     </TableCell>
                     <TableCell>
-                      <Typography variant="body2" fontFamily="monospace" fontSize="0.75rem">
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
                         {conn.conn_type === 's3'
                           ? `s3://${(conn.extra?.bucket as string) ?? ''}`
                           : (conn.host ?? '—') + (conn.port ? `:${conn.port}` : '')}
                       </Typography>
                     </TableCell>
                     <TableCell>
-                      <Typography variant="body2" fontFamily="monospace" fontSize="0.75rem">
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
                         {conn.conn_type === 's3'
                           ? ((conn.extra?.region as string) ?? 'us-east-1')
                           : (conn.database ?? '—')}
                       </Typography>
                     </TableCell>
                     <TableCell>
-                      <Typography variant="body2" fontSize="0.8rem">{conn.username ?? '—'}</Typography>
+                      <Typography variant="body2" sx={{ fontSize: '0.8rem' }}>{conn.username ?? '—'}</Typography>
                     </TableCell>
                     <TableCell sx={{ minWidth: 160 }}>
                       {tr ? (

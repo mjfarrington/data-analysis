@@ -26,19 +26,21 @@ export default function TableToolbar({
         onChange={e => onSearchChange(e.target.value)}
         size="small"
         sx={{ width: 240 }}
-        InputProps={{
-          startAdornment: (
-            <InputAdornment position="start">
-              <Search fontSize="small" />
-            </InputAdornment>
-          ),
-          endAdornment: search ? (
-            <InputAdornment position="end">
-              <IconButton size="small" onClick={() => onSearchChange('')} sx={{ p: 0.3 }}>
-                <Close sx={{ fontSize: 14 }} />
-              </IconButton>
-            </InputAdornment>
-          ) : null,
+        slotProps={{
+          input: {
+            startAdornment: (
+              <InputAdornment position="start">
+                <Search fontSize="small" />
+              </InputAdornment>
+            ),
+            endAdornment: search ? (
+              <InputAdornment position="end">
+                <IconButton size="small" onClick={() => onSearchChange('')} sx={{ p: 0.3 }}>
+                  <Close sx={{ fontSize: 14 }} />
+                </IconButton>
+              </InputAdornment>
+            ) : null,
+          },
         }}
       />
       {children}

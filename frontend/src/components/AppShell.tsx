@@ -29,7 +29,6 @@ import {
   Brightness7,
   Water,
   Cable as CableIcon,
-  FolderOpen as FolderOpenIcon,
   TableChart as TableChartIcon,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -79,7 +78,6 @@ const NAV: NavSection[] = [
     section: 'Explore',
     items: [
       { label: 'Data Explorer', path: '/explorer', icon: <StorageIcon fontSize="small" /> },
-      { label: 'Data Browser',  path: '/data-browser', icon: <FolderOpenIcon fontSize="small" /> },
     ],
   },
   {
@@ -213,7 +211,7 @@ export default function AppShell() {
             <HubOutlined sx={{ fontSize: 15, color: '#fff' }} />
           </Box>
           {!collapsed && (
-            <Typography variant="subtitle2" fontWeight={700} noWrap sx={{ letterSpacing: '0.02em', fontSize: '0.82rem' }}>
+            <Typography variant="subtitle2" noWrap sx={{ fontWeight: 700, letterSpacing: '0.02em', fontSize: '0.82rem' }}>
               Data Studio
             </Typography>
           )}
@@ -273,12 +271,7 @@ export default function AppShell() {
                           </ListItemIcon>
                           {!collapsed && (
                             <ListItemText
-                              primary={item.label}
-                              primaryTypographyProps={{
-                                variant: 'body2',
-                                fontWeight: active ? 600 : 400,
-                                fontSize: '0.8rem',
-                              }}
+                              primary={<Typography variant="body2" sx={{ fontWeight: active ? 600 : 400, fontSize: '0.8rem' }}>{item.label}</Typography>}
                             />
                           )}
                         </ListItemButton>
@@ -314,13 +307,7 @@ export default function AppShell() {
                 </ListItemIcon>
                 {!collapsed && (
                   <ListItemText
-                    primary={user?.username}
-                    primaryTypographyProps={{
-                      variant: 'body2',
-                      fontWeight: 500,
-                      fontSize: '0.8rem',
-                      noWrap: true,
-                    }}
+                    primary={<Typography variant="body2" noWrap sx={{ fontWeight: 500, fontSize: '0.8rem' }}>{user?.username}</Typography>}
                   />
                 )}
               </ListItemButton>
@@ -346,12 +333,7 @@ export default function AppShell() {
                 </ListItemIcon>
                 {!collapsed && (
                   <ListItemText
-                    primary="Settings"
-                    primaryTypographyProps={{
-                      variant: 'body2',
-                      fontWeight: location.pathname.startsWith('/settings') ? 600 : 400,
-                      fontSize: '0.8rem',
-                    }}
+                    primary={<Typography variant="body2" sx={{ fontWeight: location.pathname.startsWith('/settings') ? 600 : 400, fontSize: '0.8rem' }}>Settings</Typography>}
                   />
                 )}
               </ListItemButton>
@@ -409,9 +391,9 @@ export default function AppShell() {
               onClose={() => setDateAnchor(null)}
               anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
               transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-              PaperProps={{ sx: { p: 1.5, mt: 0.5, borderRadius: 1.5, minWidth: 220 } }}
+              slotProps={{ paper: { sx: { p: 1.5, mt: 0.5, borderRadius: 1.5, minWidth: 220 } } }}
             >
-              <Typography variant="caption" fontWeight={700} color="text.secondary" display="block" mb={1}>
+              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, display: 'block', mb: 1 }}>
                 Business Date
               </Typography>
               <TextField
@@ -426,7 +408,7 @@ export default function AppShell() {
                 fullWidth
                 autoFocus
                 sx={{ mb: 1 }}
-                inputProps={{ style: { fontSize: '0.82rem' } }}
+                slotProps={{ htmlInput: { style: { fontSize: '0.82rem' } } }}
               />
               <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
                 <Button size="small" onClick={() => setDateAnchor(null)} sx={{ fontSize: '0.72rem' }}>Cancel</Button>
@@ -459,7 +441,7 @@ export default function AppShell() {
         onClose={() => setQuickSettingsOpen(false)}
         maxWidth="xs"
         fullWidth
-        PaperProps={{ elevation: 8, sx: { borderRadius: 2 } }}
+        slotProps={{ paper: { elevation: 8, sx: { borderRadius: 2 } } }}
       >
         <DialogTitle sx={{ pb: 1.5, pt: 2 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
@@ -467,7 +449,7 @@ export default function AppShell() {
               {user?.username?.[0].toUpperCase() ?? '?'}
             </Avatar>
             <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="subtitle2" fontWeight={700} noWrap>{user?.username}</Typography>
+              <Typography variant="subtitle2" noWrap sx={{ fontWeight: 700 }}>{user?.username}</Typography>
               <Typography variant="caption" color="text.secondary">Signed in</Typography>
             </Box>
             <IconButton size="small" onClick={() => setQuickSettingsOpen(false)} sx={{ opacity: 0.6 }}>
@@ -482,12 +464,8 @@ export default function AppShell() {
           {/* Theme */}
           <Typography
             variant="caption"
-            fontWeight={700}
             color="text.secondary"
-            letterSpacing="0.08em"
-            textTransform="uppercase"
-            display="block"
-            mb={1}
+            sx={{ fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', display: 'block', mb: 1 }}
           >
             Theme
           </Typography>
@@ -516,12 +494,8 @@ export default function AppShell() {
           {/* Density */}
           <Typography
             variant="caption"
-            fontWeight={700}
             color="text.secondary"
-            letterSpacing="0.08em"
-            textTransform="uppercase"
-            display="block"
-            mb={1}
+            sx={{ fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', display: 'block', mb: 1 }}
           >
             Layout Density
           </Typography>

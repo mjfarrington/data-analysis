@@ -230,6 +230,20 @@ export interface SqlFile {
   description?: string
   file_type: string
   content: string
+  versions?: SqlFileVersion[]
+}
+
+export interface SqlFileVersion {
+  id: number
+  sql_file_id: number
+  version: string
+  tag: string
+  content: string
+  created_at: string
+}
+
+export interface SqlVersionLabels {
+  labels: string[]
 }
 
 export interface DataTable {
@@ -429,6 +443,14 @@ export const sqlFilesApi = {
     api.post<SqlFile>('/etl/sql-files', data).then(r => r.data),
   update: (id: number, data: Partial<SqlFile>) =>
     api.put<SqlFile>(`/etl/sql-files/${id}`, data).then(r => r.data),
+  delete: (id: number) =>
+    api.delete(`/etl/sql-files/${id}`),
+  createVersion: (id: number, data: { tag: string; content?: string }) =>
+    api.post<SqlFile>(`/etl/sql-files/${id}/versions`, data).then(r => r.data),
+  getVersionLabels: () =>
+    api.get<SqlVersionLabels>('/etl/sql-version-labels').then(r => r.data),
+  updateVersionLabels: (labels: string[]) =>
+    api.put<SqlVersionLabels>('/etl/sql-version-labels', { labels }).then(r => r.data),
 }
 
 // ── Connections API ───────────────────────────────────────────────────────────

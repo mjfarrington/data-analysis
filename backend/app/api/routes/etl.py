@@ -1,9 +1,11 @@
 from __future__ import annotations
 import asyncio
 import logging
+import json
 import re
 from datetime import datetime, timezone
 from typing import Optional
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, desc
@@ -12,11 +14,13 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, PipelineDependency, ExecutionContext
+from app.models.etl import ETLPipeline, ETLRun, RunStatus, PipelineStatus, SqlFile, SqlFileVersion, PipelineDependency, ExecutionContext
 from app.schemas.etl import (
     PipelineCreate, PipelineUpdate, PipelineResponse,
     RunTrigger, RunSummary, RunDetail,
     SqlFileCreate, SqlFileUpdate, SqlFileResponse,
+    SqlFileVersionCreate,
+    SqlVersionLabelsResponse, SqlVersionLabelsUpdate,
     GraphNode, GraphEdge, PipelineGraph,
     ExecutionContextResponse, ExecutionContextUpdate,
 )
@@ -24,6 +28,7 @@ from app.services.etl_engine import execute_pipeline, cancel_run
 
 router = APIRouter(prefix="/etl", tags=["ETL"])
 logger = logging.getLogger(__name__)
+DEFAULT_SQL_VERSION_LABELS = ["INITIAL", "DRAFT", "FINAL", "DEPRECATED"]
 
 
 def _pipeline_to_job_name(name: str) -> str:
@@ -45,7 +50,60 @@ def _sql_dir(file_type: str):
 
 def _sql_path(name: str, file_type: str):
     """Canonical on-disk path for an SQL file."""
-    return _sql_dir(file_type) / f"{name.lower()}.sql"
+    normalized = name.lower().strip()
+    if not normalized.endswith(".sql"):
+        normalized = f"{normalized}.sql"
+    return _sql_dir(file_type) / normalized
+
+
+def _sql_version_labels_path() -> Path:
+    return Path(settings.STATIC_DIR) / "sql" / "version_labels.json"
+
+
+def _read_sql_version_labels() -> list[str]:
+    p = _sql_version_labels_path()
+    if not p.exists():
+        return DEFAULT_SQL_VERSION_LABELS.copy()
+    try:
+        raw = json.loads(p.read_text("utf-8"))
+        labels = raw.get("labels") if isinstance(raw, dict) else None
+        if not isinstance(labels, list):
+            return DEFAULT_SQL_VERSION_LABELS.copy()
+        cleaned = []
+        for item in labels:
+            text = str(item).strip().upper()
+            if text and text not in cleaned:
+                cleaned.append(text)
+        return cleaned or DEFAULT_SQL_VERSION_LABELS.copy()
+    except Exception:
+        return DEFAULT_SQL_VERSION_LABELS.copy()
+
+
+def _write_sql_version_labels(labels: list[str]) -> list[str]:
+    cleaned = []
+    for item in labels:
+        text = str(item).strip().upper()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    cleaned = cleaned or DEFAULT_SQL_VERSION_LABELS.copy()
+    p = _sql_version_labels_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"labels": cleaned}, indent=2), "utf-8")
+    return cleaned
+
+
+def _parse_version_number(version: str) -> int:
+    m = re.search(r"(\d+)$", version or "")
+    return int(m.group(1)) if m else 0
+
+
+def _next_sql_version_number(sql_file: SqlFile) -> int:
+    nums = [_parse_version_number(v.version) for v in (sql_file.versions or [])]
+    return (max(nums) if nums else 0) + 1
+
+
+def _normalise_version_label(label: str) -> str:
+    return (label or "").strip().upper()
 
 
 # Default namespace prefix used when none is configured.
@@ -494,6 +552,15 @@ async def clear_run_history(
 # SQL Files
 # ─────────────────────────────────────────────────────────────────────────────
 
+@router.get("/sql-version-labels", response_model=SqlVersionLabelsResponse)
+async def get_sql_version_labels():
+    return SqlVersionLabelsResponse(labels=_read_sql_version_labels())
+
+
+@router.put("/sql-version-labels", response_model=SqlVersionLabelsResponse)
+async def update_sql_version_labels(body: SqlVersionLabelsUpdate):
+    return SqlVersionLabelsResponse(labels=_write_sql_version_labels(body.labels))
+
 @router.get("/sql-files", response_model=list[SqlFileResponse])
 async def list_sql_files(
     file_type: Optional[str] = Query(None, description="'extract' or 'transform'"),
@@ -515,6 +582,16 @@ async def create_sql_file(body: SqlFileCreate, db: AsyncSession = Depends(get_db
         content=body.content,
     )
     db.add(sql_file)
+    await db.flush()
+
+    initial_tag = _read_sql_version_labels()[0]
+    db.add(SqlFileVersion(
+        sql_file_id=sql_file.id,
+        version="v1",
+        tag=initial_tag,
+        content=sql_file.content,
+    ))
+
     await db.commit()
     await db.refresh(sql_file)
     result2 = await db.execute(
@@ -538,10 +615,21 @@ async def update_sql_file(
     sql_file = result.scalar_one_or_none()
     if not sql_file:
         raise HTTPException(status_code=404, detail="SQL file not found")
+    old_content = sql_file.content
     old_path = _sql_path(sql_file.name, sql_file.file_type)
     update_data = body.model_dump(exclude_none=True)
     for k, v in update_data.items():
         setattr(sql_file, k, v)
+
+    if body.content is not None and body.content != old_content:
+        n = _next_sql_version_number(sql_file)
+        db.add(SqlFileVersion(
+            sql_file_id=fid,
+            version=f"v{n}",
+            tag="DRAFT",
+            content=body.content,
+        ))
+
     sql_file.updated_at = datetime.now(timezone.utc)
     await db.commit()
     result2 = await db.execute(
@@ -554,6 +642,65 @@ async def update_sql_file(
         await asyncio.to_thread(old_path.unlink)
     await asyncio.to_thread(new_path.write_text, sql_file.content, "utf-8")
     return SqlFileResponse.model_validate(sql_file)
+
+
+@router.post("/sql-files/{fid}/versions", response_model=SqlFileResponse)
+async def create_sql_file_version(
+    fid: int,
+    body: SqlFileVersionCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(SqlFile).where(SqlFile.id == fid).options(selectinload(SqlFile.versions))
+    )
+    sql_file = result.scalar_one_or_none()
+    if not sql_file:
+        raise HTTPException(status_code=404, detail="SQL file not found")
+
+    allowed = set(_read_sql_version_labels())
+    tag = _normalise_version_label(body.tag or "DRAFT")
+    if tag not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid version label '{tag}'. Allowed: {sorted(allowed)}")
+
+    content = body.content if body.content is not None else sql_file.content
+    n = _next_sql_version_number(sql_file)
+    db.add(SqlFileVersion(
+        sql_file_id=fid,
+        version=f"v{n}",
+        tag=tag,
+        content=content,
+    ))
+
+    if body.content is not None and body.content != sql_file.content:
+        sql_file.content = body.content
+        sql_file.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    result2 = await db.execute(
+        select(SqlFile).where(SqlFile.id == fid).options(selectinload(SqlFile.versions))
+    )
+    sql_file = result2.scalar_one()
+    await asyncio.to_thread(_sql_path(sql_file.name, sql_file.file_type).write_text, sql_file.content, "utf-8")
+    return SqlFileResponse.model_validate(sql_file)
+
+
+@router.delete("/sql-files/{fid}", status_code=204)
+async def delete_sql_file(fid: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(SqlFile).where(SqlFile.id == fid))
+    sql_file = result.scalar_one_or_none()
+    if not sql_file:
+        raise HTTPException(status_code=404, detail="SQL file not found")
+
+    # Canonical path and legacy path (for old double-extension naming) are both cleaned.
+    canonical_path = _sql_path(sql_file.name, sql_file.file_type)
+    legacy_path = _sql_dir(sql_file.file_type) / f"{sql_file.name.lower()}.sql"
+
+    await db.delete(sql_file)
+    await db.commit()
+
+    for path in {canonical_path, legacy_path}:
+        if path.exists():
+            await asyncio.to_thread(path.unlink)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ import {
   Box, Typography, Button, Card, CardContent, CardActions,
   Chip, IconButton, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, MenuItem, Divider, CircularProgress, Alert, alpha, useTheme,
-  Tooltip, Grid, FormControl, InputLabel, Select, Tabs, Tab,
+  Tooltip, FormControl, InputLabel, Select, Tabs, Tab,
 } from '@mui/material'
 import {
   Add, PlayArrow, Edit, Delete, CheckCircleOutlined, ErrorOutlined,
@@ -55,7 +55,7 @@ function JobDialog({ open, onClose, initial, onSave, onDelete }: JobDialogProps)
   const [deleting, setDeleting] = useState(false)
   const [err, setErr] = useState('')
 
-  const { data: sqlFiles = [] } = useQuery({ queryKey: ['sql-files'], queryFn: sqlFilesApi.list })
+  const { data: sqlFiles = [] } = useQuery({ queryKey: ['sql-files'], queryFn: () => sqlFilesApi.list() })
   const { data: notebooks = [] } = useQuery({ queryKey: ['notebooks'], queryFn: transformApi.listNotebooks })
 
   async function handleSave() {
@@ -168,7 +168,7 @@ function JobDialog({ open, onClose, initial, onSave, onDelete }: JobDialogProps)
 
         {tab === 1 && (
           <>
-            <Typography variant="caption" color="text.secondary" fontWeight={600}>Source</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Source</Typography>
             <Box sx={{ display: 'flex', gap: 1 }}>
               <TextField
                 label="Database" value={sourceDb}
@@ -182,7 +182,7 @@ function JobDialog({ open, onClose, initial, onSave, onDelete }: JobDialogProps)
               />
             </Box>
             <Divider />
-            <Typography variant="caption" color="text.secondary" fontWeight={600}>Target</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Target</Typography>
             <Box sx={{ display: 'flex', gap: 1 }}>
               <TextField
                 label="Database" value={targetDb}
@@ -274,7 +274,7 @@ export default function TransformJobs() {
     <Box sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', alignItems: 'flex-start', mb: 3 }}>
         <Box sx={{ flex: 1 }}>
-          <Typography variant="h5" fontWeight={700}>Transform Jobs</Typography>
+          <Typography variant="h5" sx={{ fontWeight: 700 }}>Transform Jobs</Typography>
           <Typography variant="body2" color="text.secondary">
             Reusable notebook or SQL steps that can be run standalone or as part of a Workflow
           </Typography>
@@ -293,19 +293,19 @@ export default function TransformJobs() {
           </Typography>
         </Box>
       ) : (
-        <Grid container spacing={2}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(2, minmax(0, 1fr))', lg: 'repeat(3, minmax(0, 1fr))' }, gap: 2 }}>
           {jobs.map(job => {
             const rs = runStatus[job.id]
             const isRunning = rs === 'running'
             const isNotebook = job.transform_type === 'notebook'
             return (
-              <Grid item xs={12} md={6} lg={4} key={job.id}>
+              <Box key={job.id}>
                 <Card sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
                   <CardContent sx={{ flex: 1 }}>
                     {/* Header */}
                     <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, mb: 1.5 }}>
                       <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography variant="subtitle1" fontWeight={600} noWrap>{job.name}</Typography>
+                        <Typography variant="subtitle1" noWrap sx={{ fontWeight: 600 }}>{job.name}</Typography>
                         {job.description && (
                           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
                             {job.description}
@@ -407,10 +407,10 @@ export default function TransformJobs() {
                     />
                   </CardActions>
                 </Card>
-              </Grid>
+              </Box>
             )
           })}
-        </Grid>
+        </Box>
       )}
 
       <JobDialog

@@ -465,12 +465,21 @@ class ETLChainResponse(ETLChainBase):
 # SQL File schemas
 # ─────────────────────────────────────────────────────────────────────────────
 SQL_FILE_TYPES = ("extract", "transform")
-SQL_VERSION_TAGS = ("DRAFT", "REVIEW", "FINAL", "DEPRECATED")
+SQL_VERSION_TAGS = ("INITIAL", "DRAFT", "FINAL", "DEPRECATED")
+
+
+class SqlVersionLabelsResponse(BaseModel):
+    labels: list[str] = Field(default_factory=list)
+
+
+class SqlVersionLabelsUpdate(BaseModel):
+    labels: list[str] = Field(default_factory=list)
 
 
 class SqlFileVersionCreate(BaseModel):
     """Snapshot the current content as a new immutable version."""
     tag: str = Field(default="DRAFT", max_length=50)
+    content: Optional[str] = None
 
 
 class SqlFileVersionTagUpdate(BaseModel):
