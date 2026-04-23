@@ -53,3 +53,4 @@ data/spark/events/*
 data/spark/warehouse/*
 
 tools/*
+var/*

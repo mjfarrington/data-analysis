@@ -20,7 +20,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-LOG_DIR="$PROJECT_DIR/logs"
+LOG_DIR="$PROJECT_DIR/var/logs"
 mkdir -p "$LOG_DIR/backend"
 
 # Spark manager delegate
@@ -106,7 +106,7 @@ backend_start() {
     if http_ok "http://localhost:8000/health"; then
         ok "Backend started (PID $pid) — http://localhost:8000"
     else
-        warn "Backend may still be starting — check logs/backend/app.log"
+        warn "Backend may still be starting — check var/logs/backend/app.log"
     fi
 }
 
@@ -281,11 +281,11 @@ do_logs() {
         backend)   tail -n "$lines" -f "$LOG_DIR/backend/app.log" ;;
         frontend)  tail -n "$lines" -f "$LOG_DIR/frontend.log" ;;
         spark:master|master)
-            local f; f=$(ls -t "$PROJECT_DIR/logs/spark/"*Worker* 2>/dev/null | head -1 || true)
-            local f; f=$(ls -t "$PROJECT_DIR/logs/spark/"spark-*-org.apache.spark.deploy.master* 2>/dev/null | head -1 || true)
+            local f; f=$(ls -t "$PROJECT_DIR/var/logs/spark/"*Worker* 2>/dev/null | head -1 || true)
+            local f; f=$(ls -t "$PROJECT_DIR/var/logs/spark/"spark-*-org.apache.spark.deploy.master* 2>/dev/null | head -1 || true)
             [[ -n "$f" ]] && tail -n "$lines" -f "$f" || err "No master log found" ;;
         spark:worker|worker)
-            local f; f=$(ls -t "$PROJECT_DIR/logs/spark/"*worker* 2>/dev/null | head -1 || true)
+            local f; f=$(ls -t "$PROJECT_DIR/var/logs/spark/"*worker* 2>/dev/null | head -1 || true)
             [[ -n "$f" ]] && tail -n "$lines" -f "$f" || err "No worker log found" ;;
         spark:thrift|thrift)
             "$SPARK_MGR" logs thrift "$lines" ;;

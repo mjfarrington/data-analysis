@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     SPARK_MASTER_WEBUI: str = "http://localhost:8080"
     SPARK_WORKER_WEBUI: str = "http://localhost:8081"
     SPARK_HISTORY_WEBUI: str = "http://localhost:18080"
-    SPARK_HOME: str = str(Path(__file__).parents[3] / "spark")
+    SPARK_HOME: str = str(Path(__file__).parents[3] / "tools" / "spark")
 
     # Data storage
     DATA_DIR:           str = str(Path(__file__).parents[3] / "data")

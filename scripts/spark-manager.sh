@@ -7,7 +7,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SPARK_HOME="${SPARK_HOME:-$PROJECT_DIR/spark}"
+SPARK_HOME="${SPARK_HOME:-$PROJECT_DIR/tools/spark}"
+# Prefer Java 21 (required by Derby 10.17 client); fall back to whatever is on PATH
+JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21}"
+export JAVA_HOME
+export PATH="$JAVA_HOME/bin:$PATH"
 SPARK_MASTER_HOST="${SPARK_MASTER_HOST:-localhost}"
 SPARK_MASTER_PORT="${SPARK_MASTER_PORT:-7077}"
 SPARK_MASTER_WEBUI_PORT="${SPARK_MASTER_WEBUI_PORT:-8080}"
@@ -16,9 +20,13 @@ SPARK_THRIFT_PORT="${SPARK_THRIFT_PORT:-10000}"
 SPARK_CONNECT_PORT="${SPARK_CONNECT_PORT:-15002}"
 SPARK_HISTORY_PORT="${SPARK_HISTORY_PORT:-18080}"
 SPARK_MASTER_URL="spark://${SPARK_MASTER_HOST}:${SPARK_MASTER_PORT}"
+DERBY_HOST="${DERBY_HOST:-localhost}"
+DERBY_PORT="${DERBY_PORT:-1527}"
+DERBY_START_SCRIPT="${SCRIPT_DIR}/startNetworkServer"
+DERBY_STOP_SCRIPT="${SCRIPT_DIR}/stopNetworkServer"
 
 DATA_DIR="${PROJECT_DIR}/data"
-LOG_DIR="${PROJECT_DIR}/logs/spark"
+LOG_DIR="${PROJECT_DIR}/var/logs/spark"
 SPARK_EVENTS_DIR="${DATA_DIR}/spark/events"
 SPARK_WAREHOUSE_DIR="${DATA_DIR}/spark/warehouse"
 PIPELINE_DIR="${DATA_DIR}/pipeline"
@@ -48,7 +56,7 @@ log_header()  { echo -e "\n${BOLD}${CYAN}==> $*${NC}"; }
 check_spark_home() {
     if [[ ! -d "$SPARK_HOME" ]]; then
         log_error "SPARK_HOME not found: $SPARK_HOME"
-        log_error "Please set SPARK_HOME or ensure spark/ symlink exists."
+        log_error "Please set SPARK_HOME or ensure tools/spark exists."
         exit 1
     fi
     if [[ ! -x "$SPARK_HOME/sbin/start-master.sh" ]]; then
@@ -119,6 +127,52 @@ wait_for_port() {
     return 0
 }
 
+start_derby() {
+    log_header "Starting Derby Network Server"
+    if check_port "$DERBY_PORT"; then
+        log_warn "Derby Network Server already running on port $DERBY_PORT"
+        return 0
+    fi
+    if [[ ! -x "$DERBY_START_SCRIPT" ]]; then
+        log_error "Derby start script not found/executable: $DERBY_START_SCRIPT"
+        exit 1
+    fi
+
+    local derby_log_dir="${PROJECT_DIR}/var/logs/derby"
+    mkdir -p "$derby_log_dir"
+
+    DERBY_HOME="${DERBY_HOME:-$PROJECT_DIR/tools/derby}" \
+        DERBY_OPTS="-Dderby.stream.error.file=${derby_log_dir}/derby.log -Dderby.system.home=${PROJECT_DIR}/data/spark" \
+        "$DERBY_START_SCRIPT" -h "$DERBY_HOST" -p "$DERBY_PORT" >/dev/null 2>&1 &
+
+    wait_for_port "Derby Network Server" "$DERBY_PORT" 20
+    log_success "Derby listening: ${DERBY_HOST}:${DERBY_PORT}"
+}
+
+stop_derby() {
+    log_header "Stopping Derby Network Server"
+    if ! check_port "$DERBY_PORT"; then
+        log_warn "Derby Network Server not running on port $DERBY_PORT"
+        return 0
+    fi
+    if [[ ! -x "$DERBY_STOP_SCRIPT" ]]; then
+        log_warn "Derby stop script not found/executable: $DERBY_STOP_SCRIPT"
+        kill_by_port "$DERBY_PORT"
+        return 0
+    fi
+
+    DERBY_HOME="${DERBY_HOME:-$PROJECT_DIR/tools/derby}" \
+        "$DERBY_STOP_SCRIPT" -h "$DERBY_HOST" -p "$DERBY_PORT" >/dev/null 2>&1 || true
+    sleep 2
+
+    if check_port "$DERBY_PORT"; then
+        log_warn "Derby still running after shutdown request — killing by port"
+        kill_by_port "$DERBY_PORT"
+    else
+        log_success "Derby Network Server stopped"
+    fi
+}
+
 get_pid_from_port() {
     local port=$1
     lsof -i ":${port}" -sTCP:LISTEN -t 2>/dev/null | head -1 || true
@@ -156,6 +210,7 @@ install_spark_conf() {
     sed \
         -e "s|\${PROJECT_DIR}|${PROJECT_DIR}|g" \
         -e "s|\${SPARK_HOME}|${SPARK_HOME}|g" \
+        -e "s|jdbc:derby://localhost:1527/|jdbc:derby://${DERBY_HOST}:${DERBY_PORT}/|g" \
         -e "s|spark.connect.grpc.binding.port       15002|spark.connect.grpc.binding.port       ${SPARK_CONNECT_PORT}|g" \
         -e "s|spark.master                          spark://localhost:7077|spark.master                          ${SPARK_MASTER_URL}|g" \
         "$src" > "$dst"
@@ -208,10 +263,15 @@ start_thriftserver() {
         log_warn "ThriftServer already running on port $SPARK_THRIFT_PORT"
         return 0
     fi
+    local metastore_url="jdbc:derby://${DERBY_HOST}:${DERBY_PORT}/${PROJECT_DIR}/data/spark/metastore_db;create=true"
     "$SPARK_HOME/sbin/start-thriftserver.sh" \
         --master "$SPARK_MASTER_URL" \
         --hiveconf hive.server2.thrift.port="$SPARK_THRIFT_PORT" \
-        --conf spark.sql.warehouse.dir="${SPARK_WAREHOUSE_DIR}"
+        --conf spark.sql.warehouse.dir="${SPARK_WAREHOUSE_DIR}" \
+        --conf "spark.hadoop.javax.jdo.option.ConnectionURL=${metastore_url}" \
+        --conf spark.hadoop.javax.jdo.option.ConnectionDriverName=org.apache.derby.jdbc.ClientDriver \
+        --conf spark.hadoop.datanucleus.schema.autoCreateAll=true \
+        --driver-class-path "${PROJECT_DIR}/tools/derby/lib/derbyclient.jar"
     wait_for_port "ThriftServer" "$SPARK_THRIFT_PORT" 60
     log_success "ThriftServer JDBC: jdbc:hive2://localhost:${SPARK_THRIFT_PORT}"
 }
@@ -222,9 +282,15 @@ start_connect() {
         log_warn "Connect Server already running on port $SPARK_CONNECT_PORT"
         return 0
     fi
+    local metastore_url="jdbc:derby://${DERBY_HOST}:${DERBY_PORT}/${PROJECT_DIR}/data/spark/metastore_db;create=true"
     "$SPARK_HOME/sbin/start-connect-server.sh" \
         --master "$SPARK_MASTER_URL" \
-        --conf spark.connect.grpc.binding.port="$SPARK_CONNECT_PORT"
+        --conf spark.connect.grpc.binding.port="$SPARK_CONNECT_PORT" \
+        --conf spark.sql.warehouse.dir="${SPARK_WAREHOUSE_DIR}" \
+        --conf "spark.hadoop.javax.jdo.option.ConnectionURL=${metastore_url}" \
+        --conf spark.hadoop.javax.jdo.option.ConnectionDriverName=org.apache.derby.jdbc.ClientDriver \
+        --conf spark.hadoop.datanucleus.schema.autoCreateAll=true \
+        --driver-class-path "${PROJECT_DIR}/tools/derby/lib/derbyclient.jar"
     wait_for_port "Spark Connect" "$SPARK_CONNECT_PORT" 60
     log_success "Connect gRPC: localhost:${SPARK_CONNECT_PORT}"
 }
@@ -314,6 +380,7 @@ print_status() {
     service_status_line "ThriftServer  " "$SPARK_THRIFT_PORT" ""
     service_status_line "Connect Server" "$SPARK_CONNECT_PORT" ""
     service_status_line "History Server" "$SPARK_HISTORY_PORT" "http://localhost:${SPARK_HISTORY_PORT}"
+    service_status_line "Derby Server  " "$DERBY_PORT" ""
     echo ""
     echo -e "${BOLD}Web UIs:${NC}"
     echo -e "  Master   : http://localhost:${SPARK_MASTER_WEBUI_PORT}"
@@ -442,6 +509,8 @@ ${BOLD}Environment:${NC}
   SPARK_MASTER_URL      $SPARK_MASTER_URL
   SPARK_THRIFT_PORT     $SPARK_THRIFT_PORT
   SPARK_CONNECT_PORT    $SPARK_CONNECT_PORT
+    DERBY_HOST            $DERBY_HOST
+    DERBY_PORT            $DERBY_PORT
 
 EOF
 }
@@ -455,6 +524,7 @@ main() {
 
     case "$cmd" in
         start)
+            start_derby
             cleanup_spark_history
             install_spark_conf
             case "$target" in
@@ -471,7 +541,7 @@ main() {
             ;;
         stop)
             case "$target" in
-                all)     stop_thriftserver; stop_connect; stop_history; stop_worker; stop_master ;;
+                all)     stop_thriftserver; stop_connect; stop_history; stop_worker; stop_master; stop_derby ;;
                 master)  stop_master ;;
                 worker)  stop_worker ;;
                 thrift)  stop_thriftserver ;;
