@@ -12,6 +12,12 @@ import {
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { sqlFilesApi, SqlFile, SqlFileVersion } from '../api/client'
 import Editor, { OnMount } from '@monaco-editor/react'
+import {
+  PanelSideIcon,
+  workspaceSidebarItemButtonSx,
+  workspaceSidebarItemTextSx,
+  workspaceSidebarSectionLabelSx,
+} from '../components/workspace/WorkspaceTemplate'
 
 const FILE_TYPES = ['extract', 'transform', 'load', 'utility']
 const ROOT_KEY = '__root__'
@@ -71,10 +77,12 @@ function loadSqlWorkspaceTabsState(): SqlWorkspaceTabsState {
           .map(v => Number(v))
           .filter(v => Number.isInteger(v) && v > 0)
       : []
-    const activeFileId = parsed.activeFileId == null ? null : Number(parsed.activeFileId)
+    const parsedActiveFileId = parsed.activeFileId == null ? null : Number(parsed.activeFileId)
     return {
       openFileIds,
-      activeFileId: Number.isInteger(activeFileId) && activeFileId > 0 ? activeFileId : null,
+      activeFileId: parsedActiveFileId != null && Number.isInteger(parsedActiveFileId) && parsedActiveFileId > 0
+        ? parsedActiveFileId
+        : null,
     }
   } catch {
     return DEFAULT_TABS_STATE
@@ -166,34 +174,6 @@ function buildTypeGroups(files: SqlFile[], search: string): TypeGroup[] {
       tree: buildTree(files.filter(f => f.file_type === type), search),
     }))
     .filter(group => group.tree.folders.length > 0 || group.tree.files.length > 0)
-}
-
-function PanelSideIcon({ side, active }: { side: 'left' | 'right'; active: boolean }) {
-  return (
-    <Box
-      sx={{
-        width: 14,
-        height: 14,
-        border: '1.5px solid currentColor',
-        borderRadius: '2px',
-        position: 'relative',
-        overflow: 'hidden',
-        opacity: active ? 1 : 0.65,
-      }}
-    >
-      <Box
-        sx={{
-          position: 'absolute',
-          top: 0,
-          bottom: 0,
-          width: '38%',
-          [side]: 0,
-          bgcolor: 'currentColor',
-          opacity: active ? 0.85 : 0.2,
-        }}
-      />
-    </Box>
-  )
 }
 
 export default function SqlFiles() {
@@ -550,12 +530,12 @@ export default function SqlFiles() {
       <Box key={folder.id}>
         {folder.path !== '' && (
           <ListItem disablePadding sx={{ pl: `${depth * 14}px` }}>
-            <ListItemButton sx={{ py: 0.5, px: 1 }} onClick={() => toggleFolder(folder.path)}>
+            <ListItemButton sx={workspaceSidebarItemButtonSx} onClick={() => toggleFolder(folder.path)}>
               <Box sx={{ width: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', mr: 0.5 }}>
                 {expanded ? <ExpandMore sx={{ fontSize: 14 }} /> : <ChevronRight sx={{ fontSize: 14 }} />}
               </Box>
               <Folder sx={{ fontSize: 16, mr: 0.75, color: 'warning.main' }} />
-              <Typography variant="body2" noWrap sx={{ flex: 1, fontSize: '0.78rem' }}>{folder.name}</Typography>
+              <Typography variant="body2" noWrap sx={{ ...workspaceSidebarItemTextSx, flex: 1 }}>{folder.name}</Typography>
               <Tooltip title="New file in folder">
                 <IconButton
                   size="small"
@@ -587,11 +567,11 @@ export default function SqlFiles() {
                   <ListItemButton
                     selected={selectedFile}
                     onClick={() => openFile(file)}
-                    sx={{ py: 0.55, px: 1.25, borderRadius: 1 }}
+                      sx={workspaceSidebarItemButtonSx}
                   >
                     <Code sx={{ fontSize: 14, mr: 1, color: 'text.secondary' }} />
                     <Box sx={{ minWidth: 0, flex: 1 }}>
-                      <Typography variant="body2" noWrap sx={{ fontSize: '0.76rem', fontWeight: 500 }}>
+                        <Typography variant="body2" noWrap sx={workspaceSidebarItemTextSx}>
                         {file.name.split('/').pop()}
                       </Typography>
                     </Box>
@@ -706,27 +686,18 @@ export default function SqlFiles() {
               )}
               {grouped.map(group => (
                 <Box key={group.type} sx={{ mb: 0.5 }}>
-                  <Box sx={{ px: 1.25, py: 0.5 }}>
-                    <Typography
-                      variant="caption"
-                      sx={{
-                        fontSize: '0.62rem',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.06em',
-                        color: 'text.secondary',
-                        fontWeight: 700,
-                      }}
-                    >
+                  <Box>
+                    <Typography variant="caption" sx={workspaceSidebarSectionLabelSx}>
                       {group.type}
                     </Typography>
                   </Box>
                   {group.tree.folders.map(folder => renderFolder(folder, 0))}
                   {group.tree.files.map(file => (
                     <ListItem key={file.id} disablePadding>
-                      <ListItemButton selected={activeFileId === file.id} onClick={() => openFile(file)} sx={{ py: 0.55, px: 1.25, borderRadius: 1 }}>
+                      <ListItemButton selected={activeFileId === file.id} onClick={() => openFile(file)} sx={workspaceSidebarItemButtonSx}>
                         <Code sx={{ fontSize: 14, mr: 1, color: 'text.secondary' }} />
                         <Box sx={{ minWidth: 0, flex: 1 }}>
-                          <Typography variant="body2" noWrap sx={{ fontSize: '0.76rem', fontWeight: 500 }}>{file.name}</Typography>
+                          <Typography variant="body2" noWrap sx={workspaceSidebarItemTextSx}>{file.name}</Typography>
                         </Box>
                       </ListItemButton>
                     </ListItem>

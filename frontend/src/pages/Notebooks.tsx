@@ -1,15 +1,15 @@
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   alpha, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, FormControl, IconButton, InputLabel,
-  List, ListItem, ListItemButton, ListItemText, Menu, MenuItem, Paper, Select,
+  InputAdornment, List, ListItem, ListItemButton, ListItemText, Menu, MenuItem, Paper, Select,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   TextField, Tooltip, Typography, useTheme,
 } from '@mui/material'
 import {
-  Add, Article, ArrowDownward, ArrowUpward, CheckCircleOutlined, Code,
-  DataObject, DeleteOutlined, Download, Edit, ErrorOutlined, PlayArrow,
-  PlayCircleOutlined, RestartAlt, Save,
+  Add, Article, ArrowDownward, ArrowUpward, CheckCircleOutlined, Close,
+  Code, DataObject, DeleteOutlined, Download, Edit, ErrorOutlined, History,
+  PlayArrow, PlayCircleOutlined, RestartAlt, Save, Search, VisibilityOff,
 } from '@mui/icons-material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
@@ -17,8 +17,13 @@ import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import {
-  CellOutput, DfPreview, ExportConfig, NotebookCell, NotebookFile, transformApi,
+  CellOutput, DfPreview, ExportConfig, NotebookCell, NotebookFile, sqlFilesApi,
+  transformApi,
 } from '../api/client'
+import WorkspaceTemplate, {
+  workspaceSidebarItemButtonSx,
+  workspaceSidebarItemTextSx,
+} from '../components/workspace/WorkspaceTemplate'
 
 // ─────────────────────────────────────────────────────────────────────────────
 let _cellCounter = 1000
@@ -33,6 +38,143 @@ const DEFAULT_CODE_PREAMBLE = `# Available helpers (auto-injected into every ses
 #
 # Assign result_df to enable the Export button.
 `
+
+const NOTEBOOK_WORKSPACE_TABS_KEY = 'notebook-workspace-open-tabs'
+const NOTEBOOK_WORKSPACE_VERSIONS_KEY = 'notebook-workspace-versions'
+
+interface NotebookDraft {
+  name: string
+  description?: string
+  cells: NotebookCell[]
+}
+
+interface NotebookWorkspaceTabsState {
+  openNotebookIds: number[]
+  activeNotebookId: number | null
+}
+
+interface NotebookVersionSnapshot {
+  id: string
+  notebookId: number
+  version: string
+  tag: string
+  name: string
+  cells: NotebookCell[]
+  createdAt: string
+}
+
+function normalizeNotebookCells(cells: any[] | undefined): NotebookCell[] {
+  const normalized = (cells ?? []).map((c: any) => ({
+    id: c.id ?? genId(),
+    type: (c.type ?? 'code') as 'code' | 'markdown',
+    content: c.content ?? c.source ?? '',
+    language: c.language,
+  }))
+  return normalized.length > 0 ? normalized : [{ id: genId(), type: 'code', content: DEFAULT_CODE_PREAMBLE }]
+}
+
+function cloneCells(cells: NotebookCell[]): NotebookCell[] {
+  return cells.map(c => ({ ...c }))
+}
+
+function notebookDraftFromFile(nb: NotebookFile): NotebookDraft {
+  return {
+    name: nb.name,
+    description: nb.description,
+    cells: normalizeNotebookCells(nb.cells),
+  }
+}
+
+function notebookCellsEqual(a: NotebookCell[], b: NotebookCell[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i].id !== b[i].id ||
+      a[i].type !== b[i].type ||
+      a[i].content !== b[i].content ||
+      (a[i].language ?? '') !== (b[i].language ?? '')
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function isNotebookDraftDirty(nb: NotebookFile | undefined, draft: NotebookDraft | undefined): boolean {
+  if (!nb || !draft) return false
+  if (nb.name !== draft.name) return true
+  if ((nb.description ?? '') !== (draft.description ?? '')) return true
+  return !notebookCellsEqual(normalizeNotebookCells(nb.cells), draft.cells)
+}
+
+function changedCellCount(current: NotebookCell[], other: NotebookCell[]): number {
+  const max = Math.max(current.length, other.length)
+  let changed = 0
+  for (let i = 0; i < max; i++) {
+    const c = current[i]
+    const o = other[i]
+    if (!c || !o) {
+      changed++
+      continue
+    }
+    if (
+      c.type !== o.type ||
+      c.content !== o.content ||
+      (c.language ?? '') !== (o.language ?? '')
+    ) changed++
+  }
+  return changed
+}
+
+function notebookPreview(cells: NotebookCell[]): string {
+  const joined = cells
+    .map(c => c.content.trim())
+    .filter(Boolean)
+    .join('\n\n')
+  if (!joined) return 'No content'
+  return joined.slice(0, 1500)
+}
+
+function loadNotebookTabsState(): NotebookWorkspaceTabsState {
+  try {
+    const raw = localStorage.getItem(NOTEBOOK_WORKSPACE_TABS_KEY)
+    if (!raw) return { openNotebookIds: [], activeNotebookId: null }
+    const parsed = JSON.parse(raw) as Partial<NotebookWorkspaceTabsState>
+    const openNotebookIds = Array.isArray(parsed.openNotebookIds)
+      ? parsed.openNotebookIds.map(v => Number(v)).filter(v => Number.isInteger(v) && v > 0)
+      : []
+    const parsedActiveNotebookId = parsed.activeNotebookId == null ? null : Number(parsed.activeNotebookId)
+    return {
+      openNotebookIds,
+      activeNotebookId: parsedActiveNotebookId != null && Number.isInteger(parsedActiveNotebookId) && parsedActiveNotebookId > 0
+        ? parsedActiveNotebookId
+        : null,
+    }
+  } catch {
+    return { openNotebookIds: [], activeNotebookId: null }
+  }
+}
+
+function loadNotebookVersions(): Record<number, NotebookVersionSnapshot[]> {
+  try {
+    const raw = localStorage.getItem(NOTEBOOK_WORKSPACE_VERSIONS_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as Record<string, NotebookVersionSnapshot[]>
+    const next: Record<number, NotebookVersionSnapshot[]> = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      const id = Number(key)
+      if (!Number.isInteger(id) || id <= 0 || !Array.isArray(value)) continue
+      next[id] = value.map(v => ({
+        ...v,
+        notebookId: id,
+        cells: cloneCells(v.cells ?? []),
+      }))
+    }
+    return next
+  } catch {
+    return {}
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DfTable — renders a DataFrame preview as a table
@@ -230,11 +372,12 @@ interface CellViewProps {
   onMoveUp: () => void
   onMoveDown: () => void
   onRun: () => void
+  onClearOutput: () => void
   canMoveUp: boolean
   canMoveDown: boolean
 }
 
-function CellView({ cell, output, running, onUpdate, onDelete, onMoveUp, onMoveDown, onRun, canMoveUp, canMoveDown }: CellViewProps) {
+function CellView({ cell, output, running, onUpdate, onDelete, onMoveUp, onMoveDown, onRun, onClearOutput, canMoveUp, canMoveDown }: CellViewProps) {
   const theme = useTheme()
   const textRef = useRef<HTMLTextAreaElement>(null)
   const [mdEditing, setMdEditing] = useState(false)
@@ -327,6 +470,13 @@ function CellView({ cell, output, running, onUpdate, onDelete, onMoveUp, onMoveD
           <Tooltip title="Run cell (⌘Enter)">
             <IconButton size="small" color="primary" onClick={onRun} disabled={running} sx={{ p: 0.3 }}>
               {running ? <CircularProgress size={12} /> : <PlayArrow sx={{ fontSize: 15 }} />}
+            </IconButton>
+          </Tooltip>
+        )}
+        {output && (
+          <Tooltip title="Clear cell output">
+            <IconButton size="small" onClick={onClearOutput} sx={{ p: 0.3 }}>
+              <VisibilityOff sx={{ fontSize: 14 }} />
             </IconButton>
           </Tooltip>
         )}
@@ -453,225 +603,773 @@ function ExportDialog({ open, onClose, onExport }: { open: boolean; onClose: () 
 export default function Notebooks() {
   const theme = useTheme()
   const qc = useQueryClient()
-  const [selected, setSelected] = useState<NotebookFile | null>(null)
-  const [cells, setCells] = useState<NotebookCell[]>([])
-  const [title, setTitle] = useState('')
+  const initialTabsRef = useRef<NotebookWorkspaceTabsState>(loadNotebookTabsState())
+  const [search, setSearch] = useState('')
+  const [openNotebookIds, setOpenNotebookIds] = useState<number[]>(initialTabsRef.current.openNotebookIds)
+  const [activeNotebookId, setActiveNotebookId] = useState<number | null>(initialTabsRef.current.activeNotebookId)
+  const [drafts, setDrafts] = useState<Record<number, NotebookDraft>>({})
+  const [outputsByNotebook, setOutputsByNotebook] = useState<Record<number, Record<string, CellOutput>>>({})
+  const [sessionDirtyByNotebook, setSessionDirtyByNotebook] = useState<Record<number, boolean>>({})
+  const [exportStatusByNotebook, setExportStatusByNotebook] = useState<Record<number, string | null>>({})
+  const [versionsByNotebook, setVersionsByNotebook] = useState<Record<number, NotebookVersionSnapshot[]>>(loadNotebookVersions)
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
+  const [versionTag, setVersionTag] = useState('DRAFT')
   const [saving, setSaving] = useState(false)
   const [runningAll, setRunningAll] = useState(false)
   const [runningCell, setRunningCell] = useState<string | null>(null)
-  const [outputs, setOutputs] = useState<Record<string, CellOutput>>({})
   const [exportOpen, setExportOpen] = useState(false)
-  const [exportStatus, setExportStatus] = useState<string | null>(null)
-  const [sessionDirty, setSessionDirty] = useState(false)
+  const [searchPendingVersionFocus, setSearchPendingVersionFocus] = useState(false)
 
   const { data: notebooks = [], isLoading } = useQuery({ queryKey: ['notebooks'], queryFn: transformApi.listNotebooks })
+  const { data: labelsResp } = useQuery({
+    queryKey: ['sql-version-labels'],
+    queryFn: () => sqlFilesApi.getVersionLabels(),
+  })
+  const versionLabels = labelsResp?.labels?.length
+    ? labelsResp.labels
+    : ['INITIAL', 'DRAFT', 'FINAL', 'DEPRECATED']
+
+  const notebookById = useMemo(() => {
+    const map = new Map<number, NotebookFile>()
+    notebooks.forEach(nb => map.set(nb.id, nb))
+    return map
+  }, [notebooks])
+
+  const activeNotebook = activeNotebookId != null ? (notebookById.get(activeNotebookId) ?? null) : null
+  const activeDraft = activeNotebookId != null ? drafts[activeNotebookId] : undefined
+  const activeOutputs = activeNotebookId != null ? (outputsByNotebook[activeNotebookId] ?? {}) : {}
+  const activeExportStatus = activeNotebookId != null ? (exportStatusByNotebook[activeNotebookId] ?? null) : null
+  const activeSessionDirty = activeNotebookId != null ? Boolean(sessionDirtyByNotebook[activeNotebookId]) : false
+  const activeVersions = activeNotebookId != null ? (versionsByNotebook[activeNotebookId] ?? []) : []
+  const activeVersion = activeVersions.find(v => v.id === selectedVersionId) ?? null
+
+  const dirtyById = useMemo(() => {
+    const map = new Map<number, boolean>()
+    for (const id of openNotebookIds) {
+      map.set(id, isNotebookDraftDirty(notebookById.get(id), drafts[id]))
+    }
+    return map
+  }, [openNotebookIds, notebookById, drafts])
+  const activeDirty = activeNotebookId != null ? Boolean(dirtyById.get(activeNotebookId)) : false
+  const filteredNotebooks = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return notebooks
+    return notebooks.filter(nb => {
+      const name = nb.name.toLowerCase()
+      const desc = (nb.description ?? '').toLowerCase()
+      return name.includes(q) || desc.includes(q)
+    })
+  }, [notebooks, search])
 
   const createMut = useMutation({
     mutationFn: (data: Partial<NotebookFile>) => transformApi.createNotebook(data),
-    onSuccess: (nb) => { qc.invalidateQueries({ queryKey: ['notebooks'] }); openNotebook(nb) },
+    onSuccess: (nb) => {
+      qc.invalidateQueries({ queryKey: ['notebooks'] })
+      openNotebook(nb)
+    },
   })
   const updateMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: Partial<NotebookFile> }) => transformApi.updateNotebook(id, data),
-    onSuccess: (nb) => { qc.invalidateQueries({ queryKey: ['notebooks'] }); setSelected(nb) },
+    onSuccess: (nb) => {
+      qc.invalidateQueries({ queryKey: ['notebooks'] })
+      setDrafts(prev => ({ ...prev, [nb.id]: notebookDraftFromFile(nb) }))
+      setSessionDirtyByNotebook(prev => ({ ...prev, [nb.id]: false }))
+    },
   })
   const deleteMut = useMutation({
     mutationFn: (id: number) => transformApi.deleteNotebook(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['notebooks'] }); setSelected(null); setCells([]); setOutputs({}) },
+    onSuccess: (_, deletedId) => {
+      qc.invalidateQueries({ queryKey: ['notebooks'] })
+      setOpenNotebookIds(prev => {
+        const idx = prev.indexOf(deletedId)
+        const next = prev.filter(id => id !== deletedId)
+        if (activeNotebookId === deletedId) {
+          const fallback = next[idx] ?? next[idx - 1] ?? null
+          setActiveNotebookId(fallback)
+        }
+        return next
+      })
+      setDrafts(prev => {
+        const next = { ...prev }
+        delete next[deletedId]
+        return next
+      })
+      setOutputsByNotebook(prev => {
+        const next = { ...prev }
+        delete next[deletedId]
+        return next
+      })
+      setSessionDirtyByNotebook(prev => {
+        const next = { ...prev }
+        delete next[deletedId]
+        return next
+      })
+      setExportStatusByNotebook(prev => {
+        const next = { ...prev }
+        delete next[deletedId]
+        return next
+      })
+      setVersionsByNotebook(prev => {
+        const next = { ...prev }
+        delete next[deletedId]
+        return next
+      })
+      setSelectedVersionId(null)
+    },
   })
 
   function openNotebook(nb: NotebookFile) {
-    setSelected(nb); setTitle(nb.name)
-    // Normalise cells from API: backend may return {source, type} without id
-    const normalized = nb.cells.map((c: any) => ({
-      id: c.id ?? genId(),
-      type: (c.type ?? 'code') as 'code' | 'markdown',
-      content: c.content ?? c.source ?? '',
-    }))
-    setCells(normalized.length > 0 ? normalized : [{ id: genId(), type: 'code', content: DEFAULT_CODE_PREAMBLE }])
-    setOutputs({}); setSessionDirty(false); setExportStatus(null)
+    setOpenNotebookIds(prev => (prev.includes(nb.id) ? prev : [...prev, nb.id]))
+    setActiveNotebookId(nb.id)
+    setDrafts(prev => {
+      if (prev[nb.id]) return prev
+      return { ...prev, [nb.id]: notebookDraftFromFile(nb) }
+    })
+    setSelectedVersionId(null)
+  }
+
+  function closeNotebook(notebookId: number) {
+    const file = notebookById.get(notebookId)
+    const draft = drafts[notebookId]
+    if (isNotebookDraftDirty(file, draft)) {
+      const label = draft?.name ?? file?.name ?? `Notebook ${notebookId}`
+      const confirmed = window.confirm(`You have unsaved changes in "${label}". Close anyway?`)
+      if (!confirmed) return
+    }
+    setOpenNotebookIds(prev => {
+      const idx = prev.indexOf(notebookId)
+      const next = prev.filter(id => id !== notebookId)
+      if (activeNotebookId === notebookId) {
+        const fallback = next[idx] ?? next[idx - 1] ?? null
+        setActiveNotebookId(fallback)
+      }
+      return next
+    })
+  }
+
+  function updateActiveDraft(patch: Partial<NotebookDraft>) {
+    if (activeNotebookId == null) return
+    setDrafts(prev => {
+      const existing = prev[activeNotebookId]
+      if (!existing) return prev
+      return { ...prev, [activeNotebookId]: { ...existing, ...patch } }
+    })
   }
 
   function addCell(type: 'code' | 'markdown' = 'code') {
-    setCells(c => [...c, { id: genId(), type, content: type === 'code' ? '' : '## Notes\n' }])
+    if (!activeDraft) return
+    updateActiveDraft({
+      cells: [...activeDraft.cells, { id: genId(), type, content: type === 'code' ? '' : '## Notes\n' }],
+    })
+    if (activeNotebookId != null) {
+      setSessionDirtyByNotebook(prev => ({ ...prev, [activeNotebookId]: true }))
+    }
   }
+
   function updateCell(id: string, patch: Partial<NotebookCell>) {
-    setCells(c => c.map(cell => cell.id === id ? { ...cell, ...patch } : cell)); setSessionDirty(true)
+    if (!activeDraft || activeNotebookId == null) return
+    updateActiveDraft({ cells: activeDraft.cells.map(cell => (cell.id === id ? { ...cell, ...patch } : cell)) })
+    setSessionDirtyByNotebook(prev => ({ ...prev, [activeNotebookId]: true }))
   }
+
   function deleteCell(id: string) {
-    if (cells.length <= 1) return
-    setCells(c => c.filter(cell => cell.id !== id))
-    setOutputs(o => { const n = { ...o }; delete n[id]; return n })
+    if (!activeDraft || activeNotebookId == null) return
+    if (activeDraft.cells.length <= 1) return
+    updateActiveDraft({ cells: activeDraft.cells.filter(cell => cell.id !== id) })
+    setOutputsByNotebook(prev => {
+      const notebookOutputs = { ...(prev[activeNotebookId] ?? {}) }
+      delete notebookOutputs[id]
+      return { ...prev, [activeNotebookId]: notebookOutputs }
+    })
+    setSessionDirtyByNotebook(prev => ({ ...prev, [activeNotebookId]: true }))
   }
+
   function moveCell(id: string, dir: -1 | 1) {
-    setCells(c => {
-      const idx = c.findIndex(cell => cell.id === id); if (idx < 0) return c
-      const ni = idx + dir; if (ni < 0 || ni >= c.length) return c
-      const arr = [...c]; [arr[idx], arr[ni]] = [arr[ni], arr[idx]]; return arr
+    if (!activeDraft || activeNotebookId == null) return
+    const cells = activeDraft.cells
+    const idx = cells.findIndex(cell => cell.id === id)
+    if (idx < 0) return
+    const ni = idx + dir
+    if (ni < 0 || ni >= cells.length) return
+    const arr = [...cells]
+    ;[arr[idx], arr[ni]] = [arr[ni], arr[idx]]
+    updateActiveDraft({ cells: arr })
+    setSessionDirtyByNotebook(prev => ({ ...prev, [activeNotebookId]: true }))
+  }
+
+  function createSnapshot() {
+    if (!activeDraft || activeNotebookId == null) return
+    setVersionsByNotebook(prev => {
+      const existing = prev[activeNotebookId] ?? []
+      const version = `v${String(existing.length + 1).padStart(3, '0')}`
+      const nextVersion: NotebookVersionSnapshot = {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        notebookId: activeNotebookId,
+        version,
+        tag: versionTag,
+        name: activeDraft.name,
+        cells: cloneCells(activeDraft.cells),
+        createdAt: new Date().toISOString(),
+      }
+      const next = {
+        ...prev,
+        [activeNotebookId]: [nextVersion, ...existing].slice(0, 50),
+      }
+      setSelectedVersionId(nextVersion.id)
+      return next
+    })
+  }
+
+  function clearActiveOutputs() {
+    if (activeNotebookId == null) return
+    setOutputsByNotebook(prev => ({ ...prev, [activeNotebookId]: {} }))
+  }
+
+  function clearCellOutput(cellId: string) {
+    if (activeNotebookId == null) return
+    setOutputsByNotebook(prev => {
+      const nextOutputs = { ...(prev[activeNotebookId] ?? {}) }
+      delete nextOutputs[cellId]
+      return { ...prev, [activeNotebookId]: nextOutputs }
     })
   }
 
   async function handleSave() {
-    if (!selected) return; setSaving(true)
-    try { await updateMut.mutateAsync({ id: selected.id, data: { name: title, cells } }) } finally { setSaving(false) }
+    if (!activeNotebook || !activeDraft) return
+    setSaving(true)
+    try {
+      await updateMut.mutateAsync({
+        id: activeNotebook.id,
+        data: {
+          name: activeDraft.name,
+          description: activeDraft.description,
+          cells: activeDraft.cells,
+        },
+      })
+    } finally {
+      setSaving(false)
+    }
   }
 
-  async function runCells(targetCells: NotebookCell[], reset = false) {
-    if (!selected) return
+  async function runCells(notebookId: number, targetCells: NotebookCell[], reset = false) {
     try {
-      const result = await transformApi.executeNotebook(selected.id, targetCells, reset)
-      setOutputs(o => {
-        const next = { ...o }
-        for (const out of result.outputs) next[out.cell_id] = out
-        return next
+      const result = await transformApi.executeNotebook(notebookId, targetCells, reset)
+      setOutputsByNotebook(prev => {
+        const nextOutputs = { ...(prev[notebookId] ?? {}) }
+        for (const out of result.outputs) nextOutputs[out.cell_id] = out
+        return { ...prev, [notebookId]: nextOutputs }
       })
-      setSessionDirty(false)
+      setSessionDirtyByNotebook(prev => ({ ...prev, [notebookId]: false }))
     } catch (err) { console.error('Notebook execution error', err) }
   }
 
   async function handleRunAll(reset = false) {
-    setRunningAll(true); setOutputs({})
-    try { await runCells(cells, reset) } finally { setRunningAll(false) }
+    if (!activeNotebookId || !activeDraft) return
+    setRunningAll(true)
+    setOutputsByNotebook(prev => ({ ...prev, [activeNotebookId]: {} }))
+    try {
+      await runCells(activeNotebookId, activeDraft.cells, reset)
+    } finally {
+      setRunningAll(false)
+    }
   }
 
   async function handleRunCell(cellId: string) {
+    if (!activeNotebookId || !activeDraft) return
     setRunningCell(cellId)
     try {
-      const idx = cells.findIndex(c => c.id === cellId)
-      await runCells(idx >= 0 ? cells.slice(0, idx + 1) : cells, false)
+      const idx = activeDraft.cells.findIndex(c => c.id === cellId)
+      await runCells(activeNotebookId, idx >= 0 ? activeDraft.cells.slice(0, idx + 1) : activeDraft.cells, false)
     } finally { setRunningCell(null) }
   }
 
   async function handleExport(cfg: ExportConfig) {
-    if (!selected) return
-    setExportOpen(false); setExportStatus('Exporting…')
+    if (!activeNotebookId) return
+    setExportOpen(false)
+    setExportStatusByNotebook(prev => ({ ...prev, [activeNotebookId]: 'Exporting...' }))
     try {
-      const res = await transformApi.exportNotebook(selected.id, cfg)
-      setExportStatus(`✓ Exported ${res.row_count.toLocaleString()} rows → ${res.table} (${res.duration_s}s)`)
+      const res = await transformApi.exportNotebook(activeNotebookId, cfg)
+      setExportStatusByNotebook(prev => ({
+        ...prev,
+        [activeNotebookId]: `Saved ${res.row_count.toLocaleString()} rows to ${res.table} (${res.duration_s}s)`,
+      }))
       qc.invalidateQueries({ queryKey: ['catalog-tables'] })
     } catch (err: unknown) {
-      setExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`)
+      setExportStatusByNotebook(prev => ({
+        ...prev,
+        [activeNotebookId]: `Export failed: ${err instanceof Error ? err.message : String(err)}`,
+      }))
     }
   }
 
   const anyRunning = runningAll || !!runningCell
-  const codeCellCount = cells.filter(c => c.type === 'code').length
+  const codeCellCount = activeDraft?.cells.filter(c => c.type === 'code').length ?? 0
+
+  useEffect(() => {
+    if (!versionLabels.includes(versionTag)) {
+      setVersionTag(versionLabels[0] ?? 'DRAFT')
+    }
+  }, [versionLabels, versionTag])
+
+  useEffect(() => {
+    localStorage.setItem(
+      NOTEBOOK_WORKSPACE_TABS_KEY,
+      JSON.stringify({ openNotebookIds, activeNotebookId }),
+    )
+  }, [openNotebookIds, activeNotebookId])
+
+  useEffect(() => {
+    localStorage.setItem(
+      NOTEBOOK_WORKSPACE_VERSIONS_KEY,
+      JSON.stringify(versionsByNotebook),
+    )
+  }, [versionsByNotebook])
+
+  useEffect(() => {
+    if (activeNotebookId == null || !activeNotebook) return
+    setDrafts(prev => {
+      if (prev[activeNotebookId]) return prev
+      return { ...prev, [activeNotebookId]: notebookDraftFromFile(activeNotebook) }
+    })
+  }, [activeNotebookId, activeNotebook])
+
+  useEffect(() => {
+    if (notebooks.length === 0) return
+    const validIds = new Set(notebooks.map(n => n.id))
+    setOpenNotebookIds(prev => {
+      const next = prev.filter(id => validIds.has(id))
+      const unchanged = next.length === prev.length && next.every((id, idx) => id === prev[idx])
+      if (!unchanged) {
+        setDrafts(dPrev => {
+          const dNext = { ...dPrev }
+          prev.filter(id => !validIds.has(id)).forEach(id => { delete dNext[id] })
+          return dNext
+        })
+      }
+      return unchanged ? prev : next
+    })
+    setActiveNotebookId(prev => {
+      if (prev != null && validIds.has(prev)) return prev
+      const nextOpen = openNotebookIds.filter(id => validIds.has(id))
+      const nextActive = nextOpen[0] ?? null
+      return prev === nextActive ? prev : nextActive
+    })
+  }, [notebooks, openNotebookIds])
+
+  useEffect(() => {
+    setSelectedVersionId(null)
+  }, [activeNotebookId])
+
+  useEffect(() => {
+    if (!searchPendingVersionFocus) return
+    if (activeVersions.length > 0) {
+      setSelectedVersionId(activeVersions[0].id)
+    }
+    setSearchPendingVersionFocus(false)
+  }, [searchPendingVersionFocus, activeVersions])
 
   return (
-    <Box sx={{ display: 'flex', height: '100%' }}>
-      {/* ── Sidebar ── */}
-      <Box sx={{ width: 220, flexShrink: 0, bgcolor: 'background.paper', borderRight: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column' }}>
-        <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}` }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Notebooks</Typography>
-        </Box>
-        <Box sx={{ flex: 1, overflowY: 'auto' }}>
-          {isLoading
-            ? <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress size={22} /></Box>
-            : (
-              <List dense disablePadding>
-                {notebooks.map(nb => (
-                  <ListItem key={nb.id} disablePadding
-                    secondaryAction={
-                      <Tooltip title="Delete">
-                        <IconButton size="small" edge="end" sx={{ mr: 0.5, opacity: 0.35, '&:hover': { opacity: 1 } }} onClick={e => { e.stopPropagation(); deleteMut.mutate(nb.id) }}>
-                          <DeleteOutlined sx={{ fontSize: 14 }} />
-                        </IconButton>
-                      </Tooltip>
-                    }
-                  >
-                    <ListItemButton selected={selected?.id === nb.id} onClick={() => openNotebook(nb)} sx={{ px: 2, py: 0.75, pr: 4 }}>
-                      <ListItemText
-                        primary={<Typography variant="body2" noWrap sx={{ fontWeight: 500 }}>{nb.name}</Typography>}
-                        secondary={<Typography variant="caption">{`${nb.cells.length} cells`}</Typography>}
-                      />
-                    </ListItemButton>
-                  </ListItem>
-                ))}
-                {notebooks.length === 0 && (
-                  <Box sx={{ p: 3, textAlign: 'center', color: 'text.secondary' }}>
-                    <Typography variant="body2">No notebooks yet</Typography>
-                  </Box>
-                )}
-              </List>
-            )}
-        </Box>
-        <Box sx={{ p: 1.5, borderTop: `1px solid ${theme.palette.divider}` }}>
-          <Button startIcon={<Add />} fullWidth size="small" onClick={() => createMut.mutate({ name: `Notebook ${notebooks.length + 1}`, cells: [{ id: genId(), type: 'code', content: DEFAULT_CODE_PREAMBLE }] })} disabled={createMut.isPending}>
-            New Notebook
-          </Button>
-        </Box>
-      </Box>
-
-      {/* ── Editor ── */}
-      {selected ? (
-        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {/* Toolbar */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, px: 2, py: 0.75, bgcolor: 'background.paper', borderBottom: `1px solid ${theme.palette.divider}`, flexShrink: 0, flexWrap: 'wrap' }}>
-            <TextField value={title} onChange={e => setTitle(e.target.value)} size="small" variant="standard" sx={{ '& input': { fontWeight: 700, fontSize: '1rem' }, minWidth: 160 }} placeholder="Notebook title" />
-            <Box sx={{ flex: 1 }} />
-            <Button size="small" onClick={() => addCell('code')} startIcon={<Code sx={{ fontSize: 13 }} />} variant="outlined" sx={{ fontSize: '0.73rem', py: 0.3 }}>Code</Button>
-            <Button size="small" onClick={() => addCell('markdown')} startIcon={<Article sx={{ fontSize: 13 }} />} variant="outlined" sx={{ fontSize: '0.73rem', py: 0.3 }}>Markdown</Button>
-            <Divider orientation="vertical" flexItem sx={{ mx: 0.25 }} />
-            <Tooltip title="Run all cells">
-              <span>
-                <Button size="small" color="primary" variant="contained"
-                  startIcon={runningAll ? <CircularProgress size={12} color="inherit" /> : <PlayCircleOutlined sx={{ fontSize: 15 }} />}
-                  onClick={() => handleRunAll(false)} disabled={anyRunning || codeCellCount === 0} sx={{ fontSize: '0.73rem', py: 0.3 }}>
-                  Run All
-                </Button>
-              </span>
-            </Tooltip>
-            <Tooltip title="Reset session and run all">
-              <span>
-                <IconButton size="small" onClick={() => handleRunAll(true)} disabled={anyRunning} sx={{ p: 0.4 }}>
-                  <RestartAlt sx={{ fontSize: 17 }} />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Divider orientation="vertical" flexItem sx={{ mx: 0.25 }} />
-            <Tooltip title="Export result_df to a Spark table">
-              <span>
-                <Button size="small" variant="outlined" color="secondary" startIcon={<Download sx={{ fontSize: 13 }} />} onClick={() => setExportOpen(true)} disabled={anyRunning} sx={{ fontSize: '0.73rem', py: 0.3 }}>Export</Button>
-              </span>
-            </Tooltip>
-            <Button size="small" variant="text" startIcon={saving ? <CircularProgress size={12} /> : <Save sx={{ fontSize: 13 }} />} onClick={handleSave} disabled={saving || updateMut.isPending} sx={{ fontSize: '0.73rem', py: 0.3 }}>Save</Button>
-          </Box>
-
-          {/* Status bar */}
-          {(exportStatus || sessionDirty) && (
-            <Box sx={{ px: 2, py: 0.4, display: 'flex', alignItems: 'center', gap: 1, bgcolor: exportStatus?.startsWith('✓') ? alpha(theme.palette.success.main, 0.08) : exportStatus?.startsWith('Export failed') ? alpha(theme.palette.error.main, 0.08) : alpha(theme.palette.warning.main, 0.07), borderBottom: `1px solid ${theme.palette.divider}` }}>
-              {exportStatus
-                ? <>
-                    {exportStatus.startsWith('✓') && <CheckCircleOutlined sx={{ fontSize: 13, color: 'success.main' }} />}
-                    {exportStatus.startsWith('Export failed') && <ErrorOutlined sx={{ fontSize: 13, color: 'error.main' }} />}
-                    <Typography sx={{ fontSize: '0.73rem', color: exportStatus.startsWith('✓') ? 'success.dark' : 'error.dark', flex: 1 }}>{exportStatus}</Typography>
-                    <IconButton size="small" sx={{ p: 0.3 }} onClick={() => setExportStatus(null)}><DeleteOutlined sx={{ fontSize: 12 }} /></IconButton>
-                  </>
-                : <Typography sx={{ fontSize: '0.72rem', color: 'warning.dark' }}>Session may be out of date — re-run to refresh</Typography>
-              }
+    <>
+      <WorkspaceTemplate
+        storageKey="notebook-workspace-layout"
+        defaultLayout={{ leftSidebarWidth: 290, leftCollapsed: false, rightCollapsed: false }}
+        leftPanelLabel="notebooks panel"
+        rightPanelLabel="versions panel"
+        rightPanelWidth={320}
+        renderLeftPanel={() => (
+          <>
+            <Box sx={{ p: 1.5, borderBottom: `1px solid ${theme.palette.divider}`, display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Notebook Workspace</Typography>
+              </Box>
+              <TextField
+                placeholder="Search notebooks..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                size="small"
+                fullWidth
+                slotProps={{
+                  input: {
+                    startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment>,
+                  },
+                }}
+              />
             </Box>
-          )}
+            <Box sx={{ flex: 1, overflowY: 'auto' }}>
+              {isLoading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress size={22} /></Box>
+              ) : (
+                <List dense disablePadding sx={{ px: 0.5, py: 0.5 }}>
+                  {filteredNotebooks.map(nb => {
+                    const draft = drafts[nb.id]
+                    const dirty = isNotebookDraftDirty(nb, draft)
+                    return (
+                      <ListItem
+                        key={nb.id}
+                        disablePadding
+                        secondaryAction={
+                          <Tooltip title="Delete notebook">
+                            <IconButton
+                              size="small"
+                              edge="end"
+                              sx={{ mr: 0.5, opacity: 0.35, '&:hover': { opacity: 1 } }}
+                              onClick={e => {
+                                e.stopPropagation()
+                                if (!window.confirm(`Delete notebook \"${nb.name}\"?`)) return
+                                deleteMut.mutate(nb.id)
+                              }}
+                            >
+                              <DeleteOutlined sx={{ fontSize: 14 }} />
+                            </IconButton>
+                          </Tooltip>
+                        }
+                      >
+                        <ListItemButton
+                          selected={activeNotebookId === nb.id}
+                          onClick={() => openNotebook(nb)}
+                          sx={{ ...workspaceSidebarItemButtonSx, pr: 4 }}
+                        >
+                          <ListItemText
+                            primary={
+                              <Typography variant="body2" noWrap sx={{ ...workspaceSidebarItemTextSx, fontWeight: dirty ? 700 : 500, color: dirty ? 'warning.main' : 'text.primary' }}>
+                                {nb.name}{dirty ? ' *' : ''}
+                              </Typography>
+                            }
+                          />
+                        </ListItemButton>
+                      </ListItem>
+                    )
+                  })}
+                  {filteredNotebooks.length === 0 && (
+                    <Box sx={{ p: 3, textAlign: 'center', color: 'text.secondary' }}>
+                      <Typography variant="body2">No notebooks found</Typography>
+                    </Box>
+                  )}
+                </List>
+              )}
+            </Box>
+            <Box sx={{ p: 1.5, borderTop: `1px solid ${theme.palette.divider}` }}>
+              <Button
+                startIcon={<Add />}
+                fullWidth
+                size="small"
+                onClick={() => {
+                  createMut.mutate({
+                    name: `Notebook ${notebooks.length + 1}`,
+                    cells: [{ id: genId(), type: 'code', content: DEFAULT_CODE_PREAMBLE }],
+                  })
+                }}
+                disabled={createMut.isPending}
+              >
+                New Notebook
+              </Button>
+            </Box>
+          </>
+        )}
+        renderMainPanel={() => (
+          activeNotebook && activeDraft ? (
+            <>
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.5,
+                  px: 1,
+                  py: 0.5,
+                  borderBottom: `1px solid ${theme.palette.divider}`,
+                  bgcolor: alpha(theme.palette.background.paper, 0.65),
+                  overflowX: 'auto',
+                  flexShrink: 0,
+                }}
+              >
+                {openNotebookIds.map(id => {
+                  const notebook = notebookById.get(id)
+                  const draft = drafts[id]
+                  const label = draft?.name ?? notebook?.name ?? `Notebook ${id}`
+                  const isActive = id === activeNotebookId
+                  const isDirty = Boolean(dirtyById.get(id))
+                  return (
+                    <Box
+                      key={id}
+                      sx={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 0.5,
+                        border: '1px solid',
+                        borderColor: isActive ? 'primary.main' : 'divider',
+                        bgcolor: isActive ? alpha(theme.palette.primary.main, 0.1) : 'background.paper',
+                        borderRadius: 1,
+                        px: 0.75,
+                        py: 0.35,
+                        minWidth: 0,
+                      }}
+                    >
+                      <Button size="small" onClick={() => setActiveNotebookId(id)} sx={{ minWidth: 0, px: 0.25, py: 0, textTransform: 'none' }}>
+                        <Typography
+                          variant="caption"
+                          noWrap
+                          sx={{ maxWidth: 200, color: isDirty ? 'warning.main' : 'text.primary', fontWeight: isDirty ? 700 : 400 }}
+                        >
+                          {label}{isDirty ? ' *' : ''}
+                        </Typography>
+                      </Button>
+                      <IconButton size="small" onClick={() => closeNotebook(id)} sx={{ p: 0.2 }}>
+                        <Close sx={{ fontSize: 12 }} />
+                      </IconButton>
+                    </Box>
+                  )
+                })}
+              </Box>
 
-          {/* Cells */}
-          <Box sx={{ flex: 1, overflowY: 'auto', p: 2 }}>
-            {cells.map((cell, idx) => (
-              <CellView key={cell.id} cell={cell} output={outputs[cell.id] ?? null} running={runningAll || runningCell === cell.id}
-                onUpdate={patch => updateCell(cell.id, patch)} onDelete={() => deleteCell(cell.id)}
-                onMoveUp={() => moveCell(cell.id, -1)} onMoveDown={() => moveCell(cell.id, 1)} onRun={() => handleRunCell(cell.id)}
-                canMoveUp={idx > 0} canMoveDown={idx < cells.length - 1} />
-            ))}
-            <Button startIcon={<Add />} onClick={() => addCell('code')} sx={{ mt: 0.5 }} variant="outlined" size="small">Add Cell</Button>
-          </Box>
-        </Box>
-      ) : (
-        <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'text.secondary' }}>
-          <Box sx={{ textAlign: 'center' }}>
-            <Article sx={{ fontSize: 48, opacity: 0.25, mb: 2 }} />
-            <Typography variant="body2">Select a notebook or create a new one</Typography>
-          </Box>
-        </Box>
-      )}
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, px: 2, py: 0.75, bgcolor: 'background.paper', borderBottom: `1px solid ${theme.palette.divider}`, flexShrink: 0, flexWrap: 'wrap' }}>
+                <TextField
+                  value={activeDraft.name}
+                  onChange={e => updateActiveDraft({ name: e.target.value })}
+                  size="small"
+                  variant="standard"
+                  sx={{ '& input': { fontWeight: 700, fontSize: '1rem' }, minWidth: 160 }}
+                  placeholder="Notebook title"
+                />
+                <Box sx={{ flex: 1 }} />
+                {!saving && activeDirty && (
+                  <Chip
+                    label="unsaved"
+                    size="small"
+                    sx={{
+                      height: 20,
+                      fontSize: '0.68rem',
+                      fontWeight: 700,
+                      textTransform: 'lowercase',
+                      bgcolor: alpha('#f59e0b', 0.18),
+                      color: '#d97706',
+                      border: `1px solid ${alpha('#f59e0b', 0.45)}`,
+                      '& .MuiChip-label': { px: 1 },
+                    }}
+                  />
+                )}
+                <Button size="small" onClick={() => addCell('code')} startIcon={<Code sx={{ fontSize: 13 }} />} variant="outlined" sx={{ fontSize: '0.73rem', py: 0.3 }}>Code</Button>
+                <Button size="small" onClick={() => addCell('markdown')} startIcon={<Article sx={{ fontSize: 13 }} />} variant="outlined" sx={{ fontSize: '0.73rem', py: 0.3 }}>Markdown</Button>
+                <Divider orientation="vertical" flexItem sx={{ mx: 0.25 }} />
+                <Tooltip title="Run all cells">
+                  <span>
+                    <Button size="small" color="primary" variant="contained"
+                      startIcon={runningAll ? <CircularProgress size={12} color="inherit" /> : <PlayCircleOutlined sx={{ fontSize: 15 }} />}
+                      onClick={() => handleRunAll(false)} disabled={anyRunning || codeCellCount === 0} sx={{ fontSize: '0.73rem', py: 0.3 }}>
+                      Run All
+                    </Button>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Reset session and run all">
+                  <span>
+                    <IconButton size="small" onClick={() => handleRunAll(true)} disabled={anyRunning} sx={{ p: 0.4 }}>
+                      <RestartAlt sx={{ fontSize: 17 }} />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Divider orientation="vertical" flexItem sx={{ mx: 0.25 }} />
+                <TextField
+                  select
+                  size="small"
+                  variant="standard"
+                  value={versionTag}
+                  onChange={e => setVersionTag(e.target.value)}
+                  sx={{ minWidth: 128 }}
+                >
+                  {versionLabels.map(label => <MenuItem key={label} value={label}>{label}</MenuItem>)}
+                </TextField>
+                <Tooltip title="Create notebook snapshot">
+                  <IconButton size="small" onClick={() => { createSnapshot(); setSearchPendingVersionFocus(true) }}>
+                    <History sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Export result_df to a Spark table">
+                  <span>
+                    <Button size="small" variant="outlined" color="secondary" startIcon={<Download sx={{ fontSize: 13 }} />} onClick={() => setExportOpen(true)} disabled={anyRunning} sx={{ fontSize: '0.73rem', py: 0.3 }}>Export</Button>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Clear all outputs">
+                  <span>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="inherit"
+                      startIcon={<VisibilityOff sx={{ fontSize: 13 }} />}
+                      onClick={clearActiveOutputs}
+                      disabled={Object.keys(activeOutputs).length === 0}
+                      sx={{ fontSize: '0.73rem', py: 0.3 }}
+                    >
+                      Clear Outputs
+                    </Button>
+                  </span>
+                </Tooltip>
+                <Button size="small" variant="text" startIcon={saving ? <CircularProgress size={12} /> : <Save sx={{ fontSize: 13 }} />} onClick={handleSave} disabled={saving || updateMut.isPending || !activeDirty} sx={{ fontSize: '0.73rem', py: 0.3 }}>Save</Button>
+                <Tooltip title="Delete notebook">
+                  <span>
+                    <IconButton
+                      size="small"
+                      color="error"
+                      disabled={deleteMut.isPending}
+                      onClick={() => {
+                        if (!window.confirm(`Delete notebook \"${activeNotebook.name}\"?`)) return
+                        deleteMut.mutate(activeNotebook.id)
+                      }}
+                    >
+                      <DeleteOutlined sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              </Box>
+
+              {(activeExportStatus || activeSessionDirty) && (
+                <Box
+                  sx={{
+                    px: 2,
+                    py: 0.4,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 1,
+                    bgcolor: activeExportStatus?.startsWith('Saved')
+                      ? alpha(theme.palette.success.main, 0.08)
+                      : activeExportStatus?.startsWith('Export failed')
+                        ? alpha(theme.palette.error.main, 0.08)
+                        : alpha(theme.palette.warning.main, 0.07),
+                    borderBottom: `1px solid ${theme.palette.divider}`,
+                  }}
+                >
+                  {activeExportStatus ? (
+                    <>
+                      {activeExportStatus.startsWith('Saved') && <CheckCircleOutlined sx={{ fontSize: 13, color: 'success.main' }} />}
+                      {activeExportStatus.startsWith('Export failed') && <ErrorOutlined sx={{ fontSize: 13, color: 'error.main' }} />}
+                      <Typography sx={{ fontSize: '0.73rem', color: activeExportStatus.startsWith('Saved') ? 'success.dark' : 'error.dark', flex: 1 }}>{activeExportStatus}</Typography>
+                      <IconButton
+                        size="small"
+                        sx={{ p: 0.3 }}
+                        onClick={() => {
+                          if (activeNotebookId == null) return
+                          setExportStatusByNotebook(prev => ({ ...prev, [activeNotebookId]: null }))
+                        }}
+                      >
+                        <DeleteOutlined sx={{ fontSize: 12 }} />
+                      </IconButton>
+                    </>
+                  ) : (
+                    <Typography sx={{ fontSize: '0.72rem', color: 'warning.dark' }}>Session may be out of date - re-run to refresh</Typography>
+                  )}
+                </Box>
+              )}
+
+              <Box sx={{ flex: 1, overflowY: 'auto', p: 2 }}>
+                {activeDraft.cells.map((cell, idx) => (
+                  <CellView
+                    key={cell.id}
+                    cell={cell}
+                    output={activeOutputs[cell.id] ?? null}
+                    running={runningAll || runningCell === cell.id}
+                    onUpdate={patch => updateCell(cell.id, patch)}
+                    onDelete={() => deleteCell(cell.id)}
+                    onMoveUp={() => moveCell(cell.id, -1)}
+                    onMoveDown={() => moveCell(cell.id, 1)}
+                    onRun={() => handleRunCell(cell.id)}
+                    onClearOutput={() => clearCellOutput(cell.id)}
+                    canMoveUp={idx > 0}
+                    canMoveDown={idx < activeDraft.cells.length - 1}
+                  />
+                ))}
+                <Button startIcon={<Add />} onClick={() => addCell('code')} sx={{ mt: 0.5 }} variant="outlined" size="small">Add Cell</Button>
+              </Box>
+            </>
+          ) : (
+            <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'text.secondary' }}>
+              <Box sx={{ textAlign: 'center' }}>
+                <Article sx={{ fontSize: 48, opacity: 0.25, mb: 2 }} />
+                <Typography variant="body2">Select a notebook to start editing</Typography>
+              </Box>
+            </Box>
+          )
+        )}
+        renderRightPanel={() => (
+          activeNotebookId == null || !activeDraft ? (
+            <Box sx={{ p: 2, color: 'text.secondary' }}>
+              <Typography variant="body2">No notebook selected</Typography>
+            </Box>
+          ) : (
+            <>
+              <Box sx={{ px: 1.5, py: 1, borderBottom: `1px solid ${theme.palette.divider}` }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Version Timeline</Typography>
+                <Typography variant="caption" color="text.secondary">Local snapshots and saved revisions</Typography>
+              </Box>
+              <Box sx={{ flex: 1, overflowY: 'auto' }}>
+                <List dense disablePadding>
+                  {activeVersions.map(v => (
+                    <ListItem key={v.id} disablePadding>
+                      <ListItemButton
+                        selected={selectedVersionId === v.id}
+                        onClick={() => setSelectedVersionId(v.id)}
+                        sx={{ py: 0.75, px: 1.25 }}
+                      >
+                        <Box sx={{ minWidth: 0, flex: 1 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+                            <Typography variant="body2" noWrap sx={{ fontSize: '0.75rem', fontWeight: 600 }}>{v.version}</Typography>
+                            <Chip label={v.tag} size="small" sx={{ height: 16, fontSize: '0.56rem', textTransform: 'uppercase' }} />
+                          </Box>
+                          <Typography variant="caption" color="text.secondary" noWrap>
+                            {new Date(v.createdAt).toLocaleString()} - {changedCellCount(activeDraft.cells, v.cells)} changed cells
+                          </Typography>
+                        </Box>
+                      </ListItemButton>
+                    </ListItem>
+                  ))}
+                  {activeVersions.length === 0 && (
+                    <Box sx={{ p: 2, textAlign: 'center', color: 'text.secondary' }}>
+                      <Typography variant="caption">No snapshots yet</Typography>
+                    </Box>
+                  )}
+                </List>
+              </Box>
+              {activeVersion && (
+                <>
+                  <Divider />
+                  <Box sx={{ p: 1.25, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                    <Typography variant="caption" color="text.secondary">Preview</Typography>
+                    <Box
+                      sx={{
+                        border: `1px solid ${theme.palette.divider}`,
+                        borderRadius: 1,
+                        bgcolor: alpha(theme.palette.background.default, 0.6),
+                        p: 1,
+                        maxHeight: 140,
+                        overflow: 'auto',
+                        fontFamily: 'JetBrains Mono, monospace',
+                        fontSize: '0.68rem',
+                        whiteSpace: 'pre-wrap',
+                      }}
+                    >
+                      {notebookPreview(activeVersion.cells)}
+                    </Box>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => {
+                        updateActiveDraft({
+                          name: activeVersion.name,
+                          cells: cloneCells(activeVersion.cells),
+                        })
+                        if (activeNotebookId != null) {
+                          setSessionDirtyByNotebook(prev => ({ ...prev, [activeNotebookId]: true }))
+                        }
+                      }}
+                    >
+                      Restore This Version
+                    </Button>
+                  </Box>
+                </>
+              )}
+            </>
+          )
+        )}
+      />
 
       <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} onExport={handleExport} />
-    </Box>
+    </>
   )
 }
