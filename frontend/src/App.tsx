@@ -16,7 +16,6 @@ import TransformJobs from './pages/TransformJobs'
 import SqlFiles from './pages/SqlFiles'
 import Notebooks from './pages/Notebooks'
 import Dictionaries from './pages/Dictionaries'
-import Catalogues from './pages/Catalogues'
 import DataExplorer from './pages/DataExplorer'
 import Connections from './pages/Connections'
 import RunHistory from './pages/RunHistory'
@@ -64,7 +63,6 @@ function AppRoutes() {
         <Route path="sql-files" element={<SqlFiles />} />
         <Route path="notebooks" element={<Notebooks />} />
         <Route path="dictionaries" element={<Dictionaries />} />
-        <Route path="catalogues" element={<Catalogues />} />
         <Route path="explorer" element={<DataExplorer />} />
         <Route path="connections" element={<Connections />} />
         <Route path="runs" element={<RunHistory />} />

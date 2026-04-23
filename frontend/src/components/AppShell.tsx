@@ -29,7 +29,6 @@ import {
   Brightness7,
   Water,
   Cable as CableIcon,
-  TableChart as TableChartIcon,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { servicesApi, contextApi } from '../api/client'
@@ -71,7 +70,6 @@ const NAV: NavSection[] = [
       { label: 'SQL Files', path: '/sql-files', icon: <CodeIcon fontSize="small" /> },
       { label: 'Notebooks', path: '/notebooks', icon: <LibraryBooksIcon fontSize="small" /> },
       { label: 'Dictionaries', path: '/dictionaries', icon: <BookIcon fontSize="small" /> },
-      { label: 'Catalogues', path: '/catalogues', icon: <TableChartIcon fontSize="small" /> },
     ],
   },
   {

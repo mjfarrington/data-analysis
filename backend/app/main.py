@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.database import init_db
-from app.api.routes import etl, services, data, transform, dictionaries, connections, catalogues
+from app.api.routes import etl, services, data, transform, dictionaries, connections
 from app.services.etl_engine import get_broadcast_queue
 from app.services.spark_service import spark_service
 
@@ -103,7 +103,6 @@ app.include_router(data.router, prefix=settings.API_PREFIX)
 app.include_router(transform.router, prefix=settings.API_PREFIX)
 app.include_router(dictionaries.router, prefix=settings.API_PREFIX)
 app.include_router(connections.router, prefix=settings.API_PREFIX)
-app.include_router(catalogues.router, prefix=settings.API_PREFIX)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
