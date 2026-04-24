@@ -656,6 +656,7 @@ export default function DataExplorer() {
   const [cellMenuAnchor, setCellMenuAnchor] = useState<null | HTMLElement>(null)
   const [cellMenuTarget, setCellMenuTarget] = useState<{ consoleId: string; cellId: string } | null>(null)
   const sqlWorkspaceRef = useRef<HTMLDivElement | null>(null)
+  const sqlCellRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const completionDisposableRef = useRef<any>(null)
   const schemaCacheRef = useRef<Record<string, DatabaseSchemaCacheEntry>>(_viewState.schemaCache)
   const activeCellRef = useRef<SqlConsoleCell | null>(null)
@@ -744,6 +745,38 @@ export default function DataExplorer() {
       setActiveCellId(activeConsole.cells[0].id)
     }
   }, [activeConsole, activeCell])
+
+  useEffect(() => {
+    if (!activeCellId) return
+    const target = sqlCellRefs.current[activeCellId]
+    target?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [activeCellId])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (activeTab !== 'query') return
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+      const target = event.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName.toLowerCase()
+        if (target.closest('.monaco-editor') || tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable) {
+          return
+        }
+      }
+      if (!activeConsole || activeConsole.cells.length === 0) return
+      event.preventDefault()
+      const currentIdx = activeConsole.cells.findIndex(cell => cell.id === activeCellId)
+      const baseIdx = currentIdx >= 0 ? currentIdx : 0
+      const delta = event.key === 'ArrowDown' ? 1 : -1
+      const nextIdx = Math.max(0, Math.min(activeConsole.cells.length - 1, baseIdx + delta))
+      const nextCellId = activeConsole.cells[nextIdx]?.id
+      if (nextCellId && nextCellId !== activeCellId) {
+        setActiveCellId(nextCellId)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [activeTab, activeConsole, activeCellId])
 
   // Schema state
   const [schemaResult, setSchemaResult] = useState<QueryResult | null>(() => _viewState.schemaResult)
@@ -2389,7 +2422,7 @@ export default function DataExplorer() {
 
               {/* Cells + results */}
               <Box ref={sqlWorkspaceRef} sx={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: `minmax(180px, ${100 - sqlResultsHeightPct}%) 6px minmax(160px, ${sqlResultsHeightPct}%)`, overflow: 'hidden' }}>
-                <Box sx={{ overflow: 'auto', p: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                <Box sx={{ overflow: 'auto', minHeight: 0, p: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
                     <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>
                       Console Cells
@@ -2410,6 +2443,9 @@ export default function DataExplorer() {
                     const isDropTarget = dropTargetCellId === cell.id && draggedCellId && draggedCellId !== cell.id
                     return (
                       <Box
+                        ref={node => {
+                          sqlCellRefs.current[cell.id] = node as HTMLDivElement | null
+                        }}
                         key={cell.id}
                         onContextMenu={(event: React.MouseEvent<HTMLElement>) => openCellContextMenu(event, activeConsole!.id, cell.id)}
                         onDragOver={(event: React.DragEvent<HTMLElement>) => {
@@ -2424,6 +2460,7 @@ export default function DataExplorer() {
                         sx={{
                           border: `1px solid ${isActiveCell ? theme.palette.primary.main : theme.palette.divider}`,
                           borderRadius: 1,
+                          flexShrink: 0,
                           overflow: 'hidden',
                           bgcolor: isActiveCell ? alpha(theme.palette.primary.main, 0.04) : 'background.paper',
                           boxShadow: isDropTarget ? `0 0 0 2px ${alpha(theme.palette.primary.main, 0.35)}` : 'none',
