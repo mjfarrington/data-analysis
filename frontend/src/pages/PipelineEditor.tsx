@@ -35,8 +35,8 @@ import {
 import { Checkbox, ListItemIcon } from '@mui/material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  pipelinesApi, connectionsApi, sqlFilesApi, dictionariesApi, transformApi,
-  Pipeline, Connection, SqlFile, Dictionary, PreviewResult, ForeachEntryResult, NotebookFile, RunSummary,
+  pipelinesApi, connectionsApi, sqlFilesApi, dictionariesApi, transformApi, contextApi,
+  Pipeline, Connection, SqlFile, Dictionary, PreviewResult, NotebookFile, RunSummary,
 } from '../api/client'
 import StatusChip from '../components/StatusChip'
 
@@ -63,6 +63,7 @@ function buildPipelineCategoryOptions(categories: string[]): string[] {
 const EXTRACT_COLOR = '#58a6ff'
 const TRANSFORM_COLOR = '#e3b341'
 const LOAD_COLOR = '#3fb950'
+const ORCHESTRATION_COLOR = '#8b5cf6'
 
 interface CatalogItem {
   type: string
@@ -74,19 +75,20 @@ interface CatalogItem {
 }
 
 const CATALOG: CatalogItem[] = [
-  { type: 'iterator',         label: 'Iterator',           color: EXTRACT_COLOR,    category: 'source',    icon: <LoopIcon fontSize="inherit" /> },
-  { type: 'dw_extract',       label: 'Datawarehouse',     color: EXTRACT_COLOR,    category: 'source',    icon: <StorageIcon fontSize="inherit" /> },
+  { type: 'iterator',         label: 'Iterator',           color: ORCHESTRATION_COLOR,    category: 'source',    icon: <LoopIcon fontSize="inherit" /> },
+  { type: 'dw_extract',       label: 'Datawarehouse',     color: EXTRACT_COLOR,    category: 'source',    icon: <StorageIcon fontSize="inherit" /> , dualHandle: true },
   { type: 'jdbc_extract',     label: 'JDBC Extract',       color: EXTRACT_COLOR,    category: 'source',    icon: <DatasetIcon fontSize="inherit" />, dualHandle: true },
-  { type: 's3_extract',       label: 'S3 Extract',         color: '#3fb950',        category: 'source',    icon: <S3Icon fontSize="inherit" /> },
+  { type: 's3_extract',       label: 'S3 Extract',         color: EXTRACT_COLOR,    category: 'source',    icon: <S3Icon fontSize="inherit" /> , dualHandle: true },
   { type: 'filter',        label: 'Filter Rows',        color: TRANSFORM_COLOR,  category: 'transform', icon: <FilterList fontSize="inherit" /> },
   { type: 'join',          label: 'Join',               color: TRANSFORM_COLOR,  category: 'transform', icon: <JoinFull fontSize="inherit" /> },
   { type: 'sort',          label: 'Sort',               color: TRANSFORM_COLOR,  category: 'transform', icon: <Sort fontSize="inherit" /> },
   { type: 'lookup',        label: 'Dict Lookup',        color: TRANSFORM_COLOR,  category: 'transform', icon: <Search fontSize="inherit" /> },
   { type: 'sql_transform', label: 'SQL Transform',      color: TRANSFORM_COLOR,  category: 'transform', icon: <Code fontSize="inherit" /> },
-  { type: 'notebook_transform', label: 'Notebook',      color: '#8b5cf6',        category: 'transform', icon: <LibraryBooks fontSize="inherit" /> },
+  { type: 'notebook_transform', label: 'Notebook',      color: TRANSFORM_COLOR,  category: 'transform', icon: <LibraryBooks fontSize="inherit" /> },
   { type: 'aggregate',     label: 'Aggregate',          color: TRANSFORM_COLOR,  category: 'transform', icon: <Functions fontSize="inherit" /> },
   { type: 'load_parquet',  label: 'Parquet File',       color: LOAD_COLOR,       category: 'load',      icon: <FolderOpen fontSize="inherit" /> },
   { type: 'load_sql',      label: 'SQL/Spark Table',    color: LOAD_COLOR,       category: 'load',      icon: <TableChart fontSize="inherit" /> },
+  { type: 'load_s3',      label: 'S3 Bucket',    color: LOAD_COLOR,       category: 'load',      icon: <TableChart fontSize="inherit" /> },
 ]
 
 const CATALOG_MAP: Record<string, CatalogItem> = Object.fromEntries(CATALOG.map(c => [c.type, c]))
@@ -578,9 +580,6 @@ function SqlBottomPanel({
   onHeightChange: (h: number) => void
 }) {
   const theme = useTheme()
-  const [previewing, setPreviewing] = useState(false)
-  const [previewResult, setPreviewResult] = useState<PreviewResult | null>(null)
-  const [previewError, setPreviewError] = useState<string | null>(null)
   const dragging = useRef(false)
 
   const globalParams = getGlobalParams()
@@ -590,12 +589,6 @@ function SqlBottomPanel({
   // Only flag params as unresolved if they are NOT iterator-supplied (those are real values now)
   const unresolvedParams = findUnresolvedParams(resolved)
   const hasUnresolved = unresolvedParams.length > 0
-
-  // reset preview when SQL/params change
-  useEffect(() => {
-    setPreviewResult(null)
-    setPreviewError(null)
-  }, [panel.sql, panel.params])
 
   const handleDragMouseDown = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -613,23 +606,6 @@ function SqlBottomPanel({
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }
-
-  const handlePreview = async () => {
-    if (!panel.connectionId || !panel.sql.trim()) return
-    // Send the already-resolved SQL so the DB never sees raw $placeholders
-    if (hasUnresolved) {
-      setPreviewError(`SQL has unresolved parameters: ${unresolvedParams.join(', ')} — add values in the Parameters table on the right`)
-      return
-    }
-    setPreviewing(true); setPreviewError(null); setPreviewResult(null)
-    try {
-      // Use resolved SQL directly — params already substituted client-side
-      const r = await connectionsApi.previewSql(panel.connectionId, resolved, {}, 100)
-      setPreviewResult(r)
-    } catch (e) {
-      setPreviewError(String(e))
-    } finally { setPreviewing(false) }
   }
 
   if (!panel.open) return null
@@ -660,16 +636,6 @@ function SqlBottomPanel({
       <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, pb: 0.5, flexShrink: 0, gap: 1 }}>
         <Code sx={{ fontSize: 15, color: 'primary.main' }} />
         <Typography variant="caption" sx={{ flex: 1, fontSize: '0.75rem', fontWeight: 700 }}>SQL Editor</Typography>
-        <Button
-          size="small"
-          variant="contained"
-          startIcon={previewing ? <CircularProgress size={11} /> : <Visibility sx={{ fontSize: 13 }} />}
-          onClick={handlePreview}
-          disabled={!panel.connectionId || !panel.sql.trim() || previewing}
-          sx={{ fontSize: '0.7rem', py: 0.25, px: 1 }}
-        >
-          Preview
-        </Button>
         <IconButton size="small" onClick={onClose}><Close sx={{ fontSize: 15 }} /></IconButton>
       </Box>
 
@@ -695,7 +661,7 @@ function SqlBottomPanel({
           />
         </Box>
 
-        {/* Right: resolved SQL + preview results */}
+        {/* Right: resolved SQL */}
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           <Typography variant="caption" color="text.secondary" sx={{ mb: 0.25, fontSize: '0.65rem' }}>
             {(() => {
@@ -717,52 +683,17 @@ function SqlBottomPanel({
               Unresolved: {unresolvedParams.join(', ')} — add values in the <strong>Parameters</strong> table on the right
             </Alert>
           )}
-          {!previewResult && !previewError && (
-            <Box
-              sx={{
-                flex: 1, overflow: 'auto', fontFamily: 'monospace', fontSize: '0.73rem',
-                padding: '6px 8px', borderRadius: 1, lineHeight: 1.5,
-                border: `1px solid ${theme.palette.divider}`,
-                background: theme.palette.mode === 'dark' ? '#1e1e2e' : '#f6f8fa',
-                color: theme.palette.text.secondary, whiteSpace: 'pre-wrap',
-              }}
-            >
-              {resolved || <span style={{ opacity: 0.4 }}>Write SQL on the left…</span>}
-            </Box>
-          )}
-          {previewing && <LinearProgress sx={{ mt: 1 }} />}
-          {previewError && <Alert severity="error" sx={{ mt: 0.5, fontSize: '0.7rem', py: 0.25 }}>{previewError}</Alert>}
-          {previewResult && (
-            <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', gap: 0.5 }}>
-              <Alert severity="success" sx={{ py: 0.25, fontSize: '0.7rem' }}>
-                {previewResult.row_count} rows returned
-              </Alert>
-              <TableContainer sx={{ flex: 1, overflow: 'auto', border: `1px solid ${theme.palette.divider}`, borderRadius: 1 }}>
-                <Table size="small" stickyHeader>
-                  <TableHead>
-                    <TableRow>
-                      {previewResult.columns.map(c => (
-                        <TableCell key={c} sx={{ fontWeight: 700, fontSize: '0.68rem', whiteSpace: 'nowrap', py: 0.5 }}>{c}</TableCell>
-                      ))}
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {previewResult.rows.map((row, ri) => (
-                      <TableRow key={ri} hover>
-                        {(row as unknown[]).map((cell, ci) => (
-                          <TableCell key={ci} sx={{ fontSize: '0.68rem', fontFamily: 'monospace', whiteSpace: 'nowrap', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', py: 0.25 }}>
-                            {cell === null || cell === undefined
-                              ? <span style={{ opacity: 0.4 }}>null</span>
-                              : String(cell)}
-                          </TableCell>
-                        ))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-            </Box>
-          )}
+          <Box
+            sx={{
+              flex: 1, overflow: 'auto', fontFamily: 'monospace', fontSize: '0.73rem',
+              padding: '6px 8px', borderRadius: 1, lineHeight: 1.5,
+              border: `1px solid ${theme.palette.divider}`,
+              background: theme.palette.mode === 'dark' ? '#1e1e2e' : '#f6f8fa',
+              color: theme.palette.text.secondary, whiteSpace: 'pre-wrap',
+            }}
+          >
+            {resolved || <span style={{ opacity: 0.4 }}>Write SQL on the left…</span>}
+          </Box>
         </Box>
       </Box>
     </Box>
@@ -786,11 +717,7 @@ function JdbcExtractForm({
   dictionaries: Dictionary[]
   onOpenSqlEditor: () => void
 }) {
-  const [showPreview, setShowPreview] = useState(false)
-  const [previewing, setPreviewing] = useState(false)
   const [extracting, setExtracting] = useState(false)
-  const [previewResult, setPreviewResult] = useState<PreviewResult | null>(null)
-  const [previewError, setPreviewError] = useState<string | null>(null)
   const [extractResult, setExtractResult] = useState<{ total_rows: number; file_count: number; output_dir: string } | null>(null)
   const [extractError, setExtractError] = useState<string | null>(null)
   const [sqlMode, setSqlMode] = useState<'inline' | 'file'>(config.sql_file_id ? 'file' : 'inline')
@@ -823,18 +750,6 @@ function JdbcExtractForm({
       setTestResult(r)
     } catch (e) { setTestResult({ ok: false, latency_ms: 0, message: String(e) }) }
     finally { setTesting(false) }
-  }
-
-  const handlePreview = async () => {
-    if (!config.connection_id) return
-    const sql = getSql()
-    if (!sql.trim()) { setPreviewError('No SQL to execute'); return }
-    setPreviewing(true); setPreviewError(null); setPreviewResult(null); setShowPreview(true)
-    try {
-      const r = await connectionsApi.previewSql(config.connection_id, sql, buildParamsDict(), 100)
-      setPreviewResult(r)
-    } catch (e) { setPreviewError(String(e)) }
-    finally { setPreviewing(false) }
   }
 
   const handleExtract = async () => {
@@ -944,7 +859,6 @@ function JdbcExtractForm({
               Click to open SQL editor…
             </Typography>
           )}
-          <Typography sx={{ fontSize: '0.62rem', color: 'primary.main' }}>Open in bottom panel ↓</Typography>
         </Box>
       ) : (
         <>
@@ -976,9 +890,6 @@ function JdbcExtractForm({
             >
               {selectedSql.content.slice(0, 200)}{selectedSql.content.length > 200 ? '…' : ''}
             </Box>
-          )}
-          {selectedSql && (
-            <Typography sx={{ fontSize: '0.62rem', color: 'primary.main', cursor: 'pointer' }} onClick={onOpenSqlEditor}>Open in bottom panel ↓</Typography>
           )}
         </>
       )}
@@ -1092,13 +1003,13 @@ function JdbcExtractForm({
       <Button
         variant="outlined"
         size="small"
-        startIcon={previewing ? <CircularProgress size={12} /> : <Visibility sx={{ fontSize: 14 }} />}
-        onClick={handlePreview}
-        disabled={!config.connection_id || previewing}
+        startIcon={<Visibility sx={{ fontSize: 14 }} />}
+        onClick={onOpenSqlEditor}
+        disabled={!config.connection_id}
         sx={{ fontSize: '0.72rem' }}
         fullWidth
       >
-        Preview 100 rows
+        Preview SQL
       </Button>
 
     </Box>
@@ -1720,15 +1631,242 @@ function LoadSQLForm({ config, onChange }: {
 // Iterator node form — pick dictionary, select entries, map params
 // ─────────────────────────────────────────────────────────────────────────────
 
-function IteratorForm({ config, onChange, dictionaries, onRun }: {
+interface IteratorPreviewStep {
+  id: string
+  label: string
+  type: string
+  color: string
+}
+
+interface IteratorPreviewBranch {
+  key: string
+  value: string
+  params: { key: string; value: string }[]
+  output?: string
+}
+
+interface IteratorPreviewModel {
+  iteratorLabel: string
+  dictName?: string
+  keyParam: string
+  valueParam: string
+  totalBranches: number
+  steps: IteratorPreviewStep[]
+  branches: IteratorPreviewBranch[]
+  warnings: string[]
+}
+
+function IteratorPreviewDialog({
+  open,
+  onClose,
+  preview,
+}: {
+  open: boolean
+  onClose: () => void
+  preview: IteratorPreviewModel | null
+}) {
+  const theme = useTheme()
+
+  if (!preview) return null
+
+  const visibleBranches = preview.branches.slice(0, 12)
+  const hiddenCount = Math.max(0, preview.totalBranches - visibleBranches.length)
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
+      <DialogTitle>Iterator Preview</DialogTitle>
+      <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+        <Alert severity="info" sx={{ py: 0.5 }}>
+          Preview only. No pipeline run will be started.
+        </Alert>
+
+        {preview.warnings.map((warning, i) => (
+          <Alert key={i} severity="warning" sx={{ py: 0.5 }}>
+            {warning}
+          </Alert>
+        ))}
+
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+          <Chip label={`Dictionary: ${preview.dictName ?? '—'}`} size="small" />
+          <Chip
+            label={`${preview.totalBranches} fork${preview.totalBranches !== 1 ? 's' : ''}`}
+            size="small"
+            color="secondary"
+          />
+          <Chip
+            label={`$${preview.keyParam} / $${preview.valueParam}`}
+            size="small"
+            sx={{ fontFamily: 'monospace' }}
+          />
+        </Box>
+
+        <Paper
+          variant="outlined"
+          sx={{
+            p: 1.25,
+            borderColor: alpha(ORCHESTRATION_COLOR, 0.3),
+            bgcolor: alpha(ORCHESTRATION_COLOR, 0.04),
+          }}
+        >
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Flow
+          </Typography>
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mt: 1 }}>
+            <Box
+              sx={{
+                px: 1,
+                py: 0.75,
+                borderRadius: 1,
+                border: `1px solid ${alpha(ORCHESTRATION_COLOR, 0.35)}`,
+                bgcolor: alpha(ORCHESTRATION_COLOR, 0.12),
+                minWidth: 100,
+              }}
+            >
+              <Typography sx={{ fontSize: '0.62rem', color: ORCHESTRATION_COLOR, fontWeight: 700, textTransform: 'uppercase' }}>
+                Iterator
+              </Typography>
+              <Typography sx={{ fontSize: '0.74rem', fontWeight: 600 }} noWrap>
+                {preview.iteratorLabel}
+              </Typography>
+            </Box>
+
+            {preview.steps.length === 0 ? (
+              <Typography variant="caption" color="text.secondary">
+                No downstream nodes connected
+              </Typography>
+            ) : (
+              preview.steps.map(step => (
+                <Box key={step.id} sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                  <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>
+                  <Box
+                    sx={{
+                      px: 1,
+                      py: 0.75,
+                      borderRadius: 1,
+                      border: `1px solid ${alpha(step.color, 0.35)}`,
+                      bgcolor: alpha(step.color, 0.1),
+                      minWidth: 108,
+                    }}
+                  >
+                    <Typography sx={{ fontSize: '0.62rem', color: step.color, fontWeight: 700, textTransform: 'uppercase' }}>
+                      {CATALOG_MAP[step.type]?.label ?? step.type}
+                    </Typography>
+                    <Typography sx={{ fontSize: '0.74rem', fontWeight: 600 }} noWrap>
+                      {step.label}
+                    </Typography>
+                  </Box>
+                </Box>
+              ))
+            )}
+          </Box>
+        </Paper>
+
+        <Box>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Fork Preview
+          </Typography>
+
+          <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+            {visibleBranches.map((branch, index) => (
+              <Box
+                key={`${branch.key}-${index}`}
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: '24px 1fr',
+                  gap: 1,
+                  alignItems: 'stretch',
+                }}
+              >
+                <Box sx={{ position: 'relative', display: 'flex', justifyContent: 'center' }}>
+                  <Box
+                    sx={{
+                      position: 'absolute',
+                      top: 0,
+                      bottom: index === visibleBranches.length - 1 && hiddenCount === 0 ? '50%' : 0,
+                      width: 2,
+                      bgcolor: theme.palette.divider,
+                    }}
+                  />
+                  <Box
+                    sx={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: '50%',
+                      bgcolor: ORCHESTRATION_COLOR,
+                      mt: 2,
+                      zIndex: 1,
+                    }}
+                  />
+                </Box>
+
+                <Paper variant="outlined" sx={{ p: 1.25 }}>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 0.75 }}>
+                    {branch.params.map(param => (
+                      <Chip
+                        key={param.key}
+                        label={`$${param.key} = ${param.value}`}
+                        size="small"
+                        sx={{ fontFamily: 'monospace', fontSize: '0.64rem' }}
+                      />
+                    ))}
+                  </Box>
+
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
+                    {preview.steps.length === 0 ? (
+                      <Typography variant="caption" color="text.secondary">
+                        No downstream flow connected
+                      </Typography>
+                    ) : (
+                      preview.steps.map(step => (
+                        <Box key={`${branch.key}-${step.id}`} sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                          <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>
+                          <Box
+                            sx={{
+                              px: 0.9,
+                              py: 0.6,
+                              borderRadius: 1,
+                              border: `1px solid ${alpha(step.color, 0.35)}`,
+                              bgcolor: alpha(step.color, 0.08),
+                            }}
+                          >
+                            <Typography sx={{ fontSize: '0.68rem', fontWeight: 600 }} noWrap>
+                              {step.label}
+                            </Typography>
+                          </Box>
+                        </Box>
+                      ))
+                    )}
+                  </Box>
+
+                </Paper>
+              </Box>
+            ))}
+          </Box>
+
+          {hiddenCount > 0 && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              +{hiddenCount} more fork{hiddenCount !== 1 ? 's' : ''}
+            </Typography>
+          )}
+        </Box>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} autoFocus>Close</Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+function IteratorForm({ config, onChange, dictionaries, onPreview }: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   config: Record<string, any>; onChange: (p: Record<string, any>) => void
   dictionaries: Dictionary[]
-  onRun: () => Promise<ForeachEntryResult[]>
+  onPreview: () => IteratorPreviewModel
 }) {
-  const [running, setRunning] = useState(false)
-  const [results, setResults] = useState<ForeachEntryResult[] | null>(null)
-  const [runError, setRunError] = useState<string | null>(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [previewModel, setPreviewModel] = useState<IteratorPreviewModel | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
 
   const selectedDict = dictionaries.find(d => d.id === Number(config.dictionary_id))
   const selectedKeys: string[] = config.selected_keys ?? []
@@ -1754,15 +1892,13 @@ function IteratorForm({ config, onChange, dictionaries, onRun }: {
   }
 
   const selectAll = () => onChange({ selected_keys: [] })
-  const selectNone = () => onChange({ selected_keys: [] })  // will show 0 selected
 
-  const handleRun = async () => {
-    setRunning(true); setRunError(null); setResults(null)
+  const handlePreview = () => {
     try {
-      const r = await onRun()
-      setResults(r)
-    } catch (e) { setRunError(String(e)) }
-    finally { setRunning(false) }
+      setPreviewError(null)
+      setPreviewModel(onPreview())
+      setPreviewOpen(true)
+    } catch (e) { setPreviewError(String(e)) }
   }
 
   return (
@@ -1871,52 +2007,30 @@ function IteratorForm({ config, onChange, dictionaries, onRun }: {
 
       <Divider />
 
-      {/* Run button */}
+      {/* Preview button */}
       <Button
-        variant="contained" size="small" color="success" fullWidth
-        startIcon={running ? <CircularProgress size={12} /> : <PlayArrow sx={{ fontSize: 14 }} />}
-        onClick={handleRun}
-        disabled={running || !selectedDict || activeKeys.length === 0}
+        variant="outlined" size="small" fullWidth
+        startIcon={<Visibility sx={{ fontSize: 14 }} />}
+        onClick={handlePreview}
+        disabled={!selectedDict || activeKeys.length === 0}
         sx={{ fontSize: '0.72rem' }}
       >
-        {running ? 'Running…' : `Run Iterator (${activeKeys.length} entries)`}
+        Preview Iterator
       </Button>
 
-      {runError && <Alert severity="error" sx={{ fontSize: '0.72rem', py: 0.25, wordBreak: 'break-word' }}>{runError}</Alert>}
+      <Typography variant="caption" color="text.secondary">
+        Shows the iterator fan-out and downstream path for each selected entry.
+      </Typography>
 
-      {results && (
-        <Box>
-          {results.map((r, i) => (
-            <Box key={i} sx={{
-              display: 'flex', alignItems: 'center', gap: 1, py: 0.5,
-              borderBottom: '1px solid', borderColor: 'divider',
-            }}>
-              <Box sx={{
-                width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                bgcolor: r.error ? 'error.main' : 'success.main',
-              }} />
-              <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography sx={{ fontFamily: 'monospace', fontSize: '0.7rem', fontWeight: 600 }}>{r.key}</Typography>
-                {r.error
-                  ? <Typography sx={{ fontSize: '0.62rem', color: 'error.main' }}>{r.error}</Typography>
-                  : <Typography sx={{ fontSize: '0.62rem', color: 'text.secondary' }}>
-                      {r.total_rows.toLocaleString()} rows · {r.file_count} file(s) → {r.output_dir}
-                    </Typography>
-                }
-              </Box>
-            </Box>
-          ))}
-          <Typography sx={{ fontSize: '0.62rem', color: 'text.secondary', mt: 0.5 }}>
-            {results.filter(r => !r.error).length}/{results.length} succeeded
-          </Typography>
-        </Box>
-      )}
+      {previewError && <Alert severity="error" sx={{ fontSize: '0.72rem', py: 0.25, wordBreak: 'break-word' }}>{previewError}</Alert>}
+
+      <IteratorPreviewDialog open={previewOpen} onClose={() => setPreviewOpen(false)} preview={previewModel} />
     </Box>
   )
 }
 
 function PropertiesPanel({
-  node, onUpdateConfig, connections, sqlFiles, dictionaries, notebooks, onOpenSqlEditor, onRunIterator,
+  node, onUpdateConfig, connections, sqlFiles, dictionaries, notebooks, onOpenSqlEditor, onPreviewIterator,
 }: {
   node: Node<PipelineNodeData>
   onUpdateConfig: (nodeId: string, patch: Record<string, unknown>) => void
@@ -1924,7 +2038,7 @@ function PropertiesPanel({
   sqlFiles: SqlFile[]
   notebooks: NotebookFile[]
   onOpenSqlEditor: () => void
-  onRunIterator: (nodeId: string) => Promise<ForeachEntryResult[]>
+  onPreviewIterator: (nodeId: string) => IteratorPreviewModel
   dictionaries: Dictionary[]
 }) {
   const cat = CATALOG_MAP[node.data.nodeType]
@@ -1957,7 +2071,7 @@ function PropertiesPanel({
       {/* Type-specific config */}
       {node.data.nodeType === 'iterator' && (
         <IteratorForm config={node.data.config} onChange={onChange} dictionaries={dictionaries}
-          onRun={() => onRunIterator(node.id)} />
+          onPreview={() => onPreviewIterator(node.id)} />
       )}
       {node.data.nodeType === 'dw_extract' && (
         <DWExtractForm config={node.data.config} onChange={onChange} connections={connections} sqlFiles={sqlFiles} />
@@ -2379,6 +2493,12 @@ export default function PipelineEditor() {
 
   // ── Queries ──────────────────────────────────────────────────────────────
 
+  const { data: execContext } = useQuery({
+    queryKey: ['execution-context'],
+    queryFn: contextApi.get,
+    staleTime: 30_000,
+  })
+
   const { data: pipeline, isLoading: pipelineLoading } = useQuery<Pipeline>({
     queryKey: ['pipeline', id],
     queryFn: () => pipelinesApi.list().then(list => list.find(p => p.id === Number(id))!),
@@ -2461,6 +2581,7 @@ export default function PipelineEditor() {
   })
 
   const [activeRunId, setActiveRunId] = useState<number | null>(null)
+  const [warnNoBizDate, setWarnNoBizDate] = useState(false)
 
   const runMut = useMutation({
     mutationFn: () => pipelinesApi.run(Number(id)),
@@ -2471,6 +2592,14 @@ export default function PipelineEditor() {
       qc.invalidateQueries({ queryKey: ['pipeline-runs', id] })
     },
   })
+
+  function handleRunPipeline() {
+    if (!execContext?.business_date) {
+      setWarnNoBizDate(true)
+      return
+    }
+    runMut.mutate()
+  }
 
   const saveMut = useMutation({
     mutationFn: () => {
@@ -2634,58 +2763,111 @@ export default function PipelineEditor() {
     }))
   }
 
-  async function runIteratorChain(iteratorNodeId: string): Promise<ForeachEntryResult[]> {
+  function buildIteratorPreview(iteratorNodeId: string): IteratorPreviewModel {
     const iterNode = nodes.find(n => n.id === iteratorNodeId)
     if (!iterNode) throw new Error('Iterator node not found')
     const iterCfg = iterNode.data.config ?? {}
 
-    if (!iterCfg.dictionary_id) throw new Error('No dictionary selected on Iterator node')
+    const dict = dictionaries.find(d => d.id === Number(iterCfg.dictionary_id))
+    if (!dict) throw new Error('Select a dictionary before previewing')
 
-    // Find connected JDBC Extract
-    const jdbcEdge = edges.find(e => e.source === iteratorNodeId)
-    const jdbcNode = jdbcEdge ? nodes.find(n => n.id === jdbcEdge.target && n.data.nodeType === 'jdbc_extract') : null
-    if (!jdbcNode) throw new Error('No JDBC Extract node connected — draw an edge from Iterator to a JDBC Extract node')
-    const jdbcCfg = jdbcNode.data.config ?? {}
-    if (!jdbcCfg.connection_id) throw new Error('No JDBC connection selected on JDBC Extract node')
-
-    // Find connected Parquet Output
-    const parquetEdge = edges.find(e => e.source === jdbcNode.id)
-    const parquetNode = parquetEdge ? nodes.find(n => n.id === parquetEdge.target && n.data.nodeType === 'load_parquet') : null
-    const parquetCfg = parquetNode?.data.config ?? {}
-
-    // SQL
-    const sqlFiles_: SqlFile[] = sqlFiles ?? []
-    const sql = jdbcCfg.sql_file_id
-      ? (sqlFiles_.find((f: SqlFile) => f.id === jdbcCfg.sql_file_id)?.content ?? '')
-      : (jdbcCfg.sql ?? '')
-    if (!sql.trim()) throw new Error('No SQL configured on JDBC Extract node')
-
-    // Static params: globals first (lowest precedence), then node-level params
-    const staticParamsDict: Record<string, string> = {}
-    for (const p of getGlobalParams()) {
-      staticParamsDict[p.key] = p.value
-    }
-    for (const p of (jdbcCfg.params ?? [])) {
-      if (p.key && p.value) staticParamsDict[p.key] = p.value
-    }
-
-    // Output path template: prefer parquet node's template, else fallback
-    const outputPathTemplate = parquetCfg.path_template?.trim()
-      || `{${iterCfg.key_param ?? 'app_id'}}`
-
-    // Selected keys filter
     const selectedKeys: string[] = iterCfg.selected_keys ?? []
+    const activeEntries = dict.entries.filter(
+      e => selectedKeys.length === 0 || selectedKeys.includes(e.key)
+    )
+    if (activeEntries.length === 0) throw new Error('No iterator entries selected')
 
-    return connectionsApi.foreachExtract(Number(jdbcCfg.connection_id), {
-      sql,
-      dictionary_id: Number(iterCfg.dictionary_id),
-      key_param: iterCfg.key_param ?? 'app_id',
-      value_param: iterCfg.value_param ?? 'app_name',
-      static_params: staticParamsDict,
-      output_path_template: outputPathTemplate,
-      chunk_size: jdbcCfg.chunk_size ?? 50000,
-      selected_keys: selectedKeys.length > 0 ? selectedKeys : undefined,
+    const keyParam = iterCfg.key_param ?? 'app_id'
+    const valueParam = iterCfg.value_param ?? 'app_name'
+    const warnings: string[] = []
+    const steps: IteratorPreviewStep[] = []
+    const visited = new Set<string>([iteratorNodeId])
+    let currentId = iteratorNodeId
+
+    while (true) {
+      const outgoing = edges.filter(e => e.source === currentId)
+      if (outgoing.length === 0) break
+
+      if (outgoing.length > 1) {
+        const currentNode = nodes.find(n => n.id === currentId)
+        warnings.push(
+          `Node "${currentNode?.data.label ?? currentId}" has ${outgoing.length} outgoing paths. Preview shows the first path only.`
+        )
+      }
+
+      const nextEdge = outgoing[0]
+      const nextNode = nodes.find(n => n.id === nextEdge.target)
+      if (!nextNode || visited.has(nextNode.id)) break
+
+      const cat = CATALOG_MAP[nextNode.data.nodeType]
+      steps.push({
+        id: nextNode.id,
+        label: nextNode.data.label || cat?.label || nextNode.data.nodeType,
+        type: nextNode.data.nodeType,
+        color: cat?.color ?? '#666',
+      })
+
+      visited.add(nextNode.id)
+      currentId = nextNode.id
+    }
+
+    const terminalStep = steps[steps.length - 1]
+    const terminalNode = terminalStep ? nodes.find(n => n.id === terminalStep.id) : null
+    const businessDate = execContext?.business_date ?? '{business_date}'
+    const pipelineLabel = pipelineName || 'pipeline'
+
+    const replaceToken = (value: string, token: string, nextValue: string) => value.split(token).join(nextValue)
+    const resolveTemplate = (template: string, entry: { key: string; value: string }) => {
+      let output = template
+      output = replaceToken(output, `{${keyParam}}`, entry.key)
+      output = replaceToken(output, `{${valueParam}}`, entry.value)
+      output = replaceToken(output, '{business_date}', businessDate)
+      output = replaceToken(output, '{pipeline_name}', pipelineLabel)
+      output = replaceToken(output, '{app_id}', keyParam === 'app_id' ? entry.key : '{app_id}')
+      output = replaceToken(output, '{app_name}', valueParam === 'app_name' ? entry.value : '{app_name}')
+      return output
+    }
+
+    const branches: IteratorPreviewBranch[] = activeEntries.map(entry => {
+      let output: string | undefined
+
+      if (terminalNode?.data.nodeType === 'load_parquet') {
+        const cfg = terminalNode.data.config ?? {}
+        output = cfg.output_dir?.trim()
+          ? cfg.output_dir.trim()
+          : resolveTemplate(
+              cfg.path_template?.trim() || '{business_date}/{pipeline_name}/{app_id}',
+              entry,
+            )
+      } else if (terminalNode?.data.nodeType === 'load_sql') {
+        const cfg = terminalNode.data.config ?? {}
+        output = `${cfg.database || 'default'}.${cfg.table_name || '(table)'}`
+      } else if (terminalNode?.data.nodeType === 'load_s3') {
+        const cfg = terminalNode.data.config ?? {}
+        output = `${cfg.target_db || 'default'}.${cfg.target_table || '?'}`
+      }
+
+      return {
+        key: entry.key,
+        value: entry.value,
+        params: [
+          { key: keyParam, value: entry.key },
+          { key: valueParam, value: entry.value },
+        ],
+        ...(output ? { output } : {}),
+      }
     })
+
+    return {
+      iteratorLabel: iterNode.data.label,
+      dictName: dict.name,
+      keyParam,
+      valueParam,
+      totalBranches: branches.length,
+      steps,
+      branches,
+      warnings,
+    }
   }
 
   function handleSchemaApply(newNodes: Node<PipelineNodeData>[], newEdges: Edge[]) {
@@ -2773,7 +2955,7 @@ export default function PipelineEditor() {
           variant="outlined"
           color="success"
           startIcon={<PlayArrow sx={{ fontSize: 15 }} />}
-          onClick={() => runMut.mutate()}
+          onClick={handleRunPipeline}
           disabled={runMut.isPending}
         >
           Run
@@ -2827,7 +3009,8 @@ export default function PipelineEditor() {
           }}
         >
           {[
-            { label: 'Sources',    items: CATALOG.filter(c => c.category === 'source') },
+            { label: 'Orchestration', items: CATALOG.filter(c => c.type === 'iterator') },
+            { label: 'Sources',    items: CATALOG.filter(c => c.category === 'source' && c.type !== 'iterator') },
             { label: 'Transforms', items: CATALOG.filter(c => c.category === 'transform') },
             { label: 'Outputs',    items: CATALOG.filter(c => c.category === 'load') },
           ].map(group => (
@@ -2966,7 +3149,7 @@ export default function PipelineEditor() {
                     dictionaries={dictionaries}
                     notebooks={notebooks}
                     onOpenSqlEditor={() => selectedNode && openSqlEditorForNode(selectedNode)}
-                    onRunIterator={runIteratorChain}
+                    onPreviewIterator={buildIteratorPreview}
                   />
                 )
                 : (
@@ -3204,6 +3387,18 @@ export default function PipelineEditor() {
             onClick={() => deletePipelineMut.mutate()}>
             {deletePipelineMut.isPending ? <CircularProgress size={16} /> : 'Delete'}
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={warnNoBizDate} onClose={() => setWarnNoBizDate(false)} maxWidth="xs">
+        <DialogTitle>Business Date Not Set</DialogTitle>
+        <DialogContent>
+          <Typography>
+            No <strong>business date</strong> is set in the execution context. Set one in the context bar or <strong>Settings</strong> before running a pipeline.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setWarnNoBizDate(false)} autoFocus>OK</Button>
         </DialogActions>
       </Dialog>
     </Box>

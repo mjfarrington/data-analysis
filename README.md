@@ -187,3 +187,10 @@ The dummy service simulates extracting data from a bespoke API:
 - **~10,000 records per segment** (configurable)
 
 Replace `grpc/server.py` with your real gRPC service when ready. The proto contract is defined in `grpc/proto/data_extract.proto`.
+
+
+Notes
+
+Run in terminal:
+If you still get the error, try installing JPype1 from a pre-built wheel:
+Run in terminal: pip install --only-binary :all: JPype1
