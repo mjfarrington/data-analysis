@@ -3,16 +3,17 @@ import {
   Box, Typography, TextField, Button, CircularProgress, Chip,
   InputAdornment, Alert, Tooltip, IconButton, Select, MenuItem,
   Collapse, Divider, FormControl, useTheme, alpha, LinearProgress,
-  Table, TableHead, TableRow, TableCell, TableBody,
+  Table, TableHead, TableRow, TableCell, TableBody, Menu,
 } from '@mui/material'
 import {
   Search, PlayArrow, TableChart, FolderOpen, ExpandMore, ChevronRight,
   Storage, FilterList, ArrowUpward, ArrowDownward, UnfoldMore,
   KeyboardArrowLeft, KeyboardArrowRight, Description, Visibility,
-  Refresh, LinkOff, Link as LinkIcon, DeleteOutlined,
+  Refresh, LinkOff, Link as LinkIcon, DeleteOutlined, Add, Save, Close, FileDownload,
 } from '@mui/icons-material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { dataApi, DataTable, QueryResult, CatalogTable } from '../api/client'
+import * as XLSX from 'xlsx'
 
 // ── Module-level tree state — survives React Router navigations ───────────────
 const _treeState = {
@@ -20,25 +21,6 @@ const _treeState = {
   filesOpen: false,
   expandedDbs: new Set<string>(),
   expandedDates: new Set<string>(),
-}
-
-const _viewState = {
-  leftSearch: '',
-  leftCollapsed: false,
-  rightCollapsed: false,
-  selectedItem: null as SelectedItem | null,
-  activeTab: 'preview' as ActiveTab,
-  previewPage: 0,
-  previewPageSize: 100,
-  sql: '',
-  queryDb: '',
-  queryPage: 0,
-  queryPageSize: 100,
-  queryResult: null as QueryResult | null,
-  queryError: null as QueryErrorInfo | null,
-  queryDuration: null as number | null,
-  schemaResult: null as QueryResult | null,
-  schemaError: '',
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -62,6 +44,64 @@ interface QueryErrorInfo {
   sql?: string
   database?: string
   traceback?: string
+}
+
+interface SqlConsoleCell {
+  id: string
+  sql: string
+  queryDb: string
+  page: number
+  pageSize: number
+  result: QueryResult | null
+  error: QueryErrorInfo | null
+  duration: number | null
+  running: boolean
+}
+
+interface SqlConsole {
+  id: string
+  name: string
+  cells: SqlConsoleCell[]
+}
+
+const DEFAULT_PAGE_SIZE = 100
+
+function createSqlCell(seedSql = ''): SqlConsoleCell {
+  return {
+    id: `cell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    sql: seedSql,
+    queryDb: '',
+    page: 0,
+    pageSize: DEFAULT_PAGE_SIZE,
+    result: null,
+    error: null,
+    duration: null,
+    running: false,
+  }
+}
+
+function createSqlConsole(index: number): SqlConsole {
+  return {
+    id: `console_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: `Console ${index}`,
+    cells: [createSqlCell('SELECT * FROM ...')],
+  }
+}
+
+const _viewState = {
+  leftSearch: '',
+  leftCollapsed: false,
+  rightCollapsed: false,
+  selectedItem: null as SelectedItem | null,
+  activeTab: 'query' as ActiveTab,
+  previewPage: 0,
+  previewPageSize: DEFAULT_PAGE_SIZE,
+  consoles: [createSqlConsole(1)] as SqlConsole[],
+  activeConsoleId: '' as string,
+  activeCellId: '' as string,
+  sqlResultsHeightPct: 46,
+  schemaResult: null as QueryResult | null,
+  schemaError: '',
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -108,6 +148,25 @@ function parseQueryError(err: unknown): QueryErrorInfo {
   }
 
   return { message: fallbackMessage, statusCode }
+}
+
+function sanitizeJvmNoise(text?: string): string | undefined {
+  if (!text) return text
+  const cleaned = text
+    .split('\n')
+    .filter(line => {
+      const s = line.trim()
+      return !(
+        s.startsWith('at org.')
+        || s.startsWith('at java.')
+        || s.startsWith('at scala.')
+        || s.startsWith('at sun.')
+        || (s.startsWith('...') && s.endsWith('more'))
+      )
+    })
+    .join('\n')
+    .trim()
+  return cleaned || text
 }
 
 const PAGE_SIZES = [50, 100, 200, 500]
@@ -313,6 +372,9 @@ function RichGrid({
 export default function DataExplorer() {
   const theme = useTheme()
   const queryClient = useQueryClient()
+  const [cellMenuAnchor, setCellMenuAnchor] = useState<null | HTMLElement>(null)
+  const [cellMenuTarget, setCellMenuTarget] = useState<{ consoleId: string; cellId: string } | null>(null)
+  const sqlWorkspaceRef = useRef<HTMLDivElement | null>(null)
 
   // Left panel state — initialised from module-level store so it survives navigation
   const [leftSearch, setLeftSearch] = useState(() => _viewState.leftSearch)
@@ -335,15 +397,39 @@ export default function DataExplorer() {
   const [previewPage, setPreviewPage] = useState(() => _viewState.previewPage)
   const [previewPageSize, setPreviewPageSize] = useState(() => _viewState.previewPageSize)
 
-  // Query tab state
-  const [sql, setSql] = useState(() => _viewState.sql)
-  const [queryDb, setQueryDb] = useState(() => _viewState.queryDb)
-  const [queryPage, setQueryPage] = useState(() => _viewState.queryPage)
-  const [queryPageSize, setQueryPageSize] = useState(() => _viewState.queryPageSize)
-  const [queryResult, setQueryResult] = useState<QueryResult | null>(() => _viewState.queryResult)
-  const [queryError, setQueryError] = useState<QueryErrorInfo | null>(() => _viewState.queryError)
-  const [queryDuration, setQueryDuration] = useState<number | null>(() => _viewState.queryDuration)
-  const [queryRunning, setQueryRunning] = useState(false)
+  // Query console state
+  const [consoles, setConsoles] = useState<SqlConsole[]>(() => _viewState.consoles)
+  const [activeConsoleId, setActiveConsoleId] = useState<string>(() => {
+    if (_viewState.activeConsoleId) return _viewState.activeConsoleId
+    return _viewState.consoles[0]?.id ?? ''
+  })
+  const [activeCellId, setActiveCellId] = useState<string>(() => {
+    if (_viewState.activeCellId) return _viewState.activeCellId
+    return _viewState.consoles[0]?.cells[0]?.id ?? ''
+  })
+  const [sqlResultsHeightPct, setSqlResultsHeightPct] = useState(() => _viewState.sqlResultsHeightPct)
+
+  const activeConsole = useMemo(
+    () => consoles.find(c => c.id === activeConsoleId) ?? consoles[0] ?? null,
+    [consoles, activeConsoleId],
+  )
+
+  const activeCell = useMemo(
+    () => activeConsole?.cells.find(c => c.id === activeCellId) ?? activeConsole?.cells[0] ?? null,
+    [activeConsole, activeCellId],
+  )
+
+  useEffect(() => {
+    if (!activeConsole && consoles[0]) {
+      setActiveConsoleId(consoles[0].id)
+    }
+  }, [activeConsole, consoles])
+
+  useEffect(() => {
+    if (activeConsole && !activeCell && activeConsole.cells[0]) {
+      setActiveCellId(activeConsole.cells[0].id)
+    }
+  }, [activeConsole, activeCell])
 
   // Schema state
   const [schemaResult, setSchemaResult] = useState<QueryResult | null>(() => _viewState.schemaResult)
@@ -455,7 +541,7 @@ export default function DataExplorer() {
   function selectFileItem(table: DataTable) {
     setSelectedItem({ type: 'file', label: table.name, path: table.name })
     setPreviewPage(0)
-    setActiveTab('preview')
+    setActiveTab('query')
   }
 
   function selectCatalogItem(ct: CatalogTable) {
@@ -464,8 +550,26 @@ export default function DataExplorer() {
     setPreviewPage(0)
     setSchemaResult(null)
     setSchemaError('')
-    setActiveTab('preview')
+    setActiveTab('query')
     fetchSchema(sqlName, ct.database)
+  }
+
+  function handleSqlSplitMouseDown(event: React.MouseEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const onMove = (moveEvent: MouseEvent) => {
+      const container = sqlWorkspaceRef.current
+      if (!container) return
+      const rect = container.getBoundingClientRect()
+      const relativeY = moveEvent.clientY - rect.top
+      const nextTopPct = Math.max(25, Math.min(75, (relativeY / rect.height) * 100))
+      setSqlResultsHeightPct(100 - nextTopPct)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
   }
 
   // ── Schema fetch ─────────────────────────────────────────────────────────────
@@ -486,58 +590,177 @@ export default function DataExplorer() {
 
   // ── Run SQL query ────────────────────────────────────────────────────────────
 
+  function updateConsoleCell(consoleId: string, cellId: string, patch: Partial<SqlConsoleCell>) {
+    setConsoles(prev => prev.map(c => c.id !== consoleId ? c : {
+      ...c,
+      cells: c.cells.map(cell => cell.id === cellId ? { ...cell, ...patch } : cell),
+    }))
+  }
+
+  function addConsole() {
+    setConsoles(prev => {
+      const next = [...prev, createSqlConsole(prev.length + 1)]
+      const created = next[next.length - 1]
+      setActiveConsoleId(created.id)
+      setActiveCellId(created.cells[0].id)
+      setActiveTab('query')
+      return next
+    })
+  }
+
+  function closeConsole(consoleId: string) {
+    setConsoles(prev => {
+      if (prev.length <= 1) return prev
+      const filtered = prev.filter(c => c.id !== consoleId)
+      const nextActive = filtered[0]
+      if (activeConsoleId === consoleId && nextActive) {
+        setActiveConsoleId(nextActive.id)
+        setActiveCellId(nextActive.cells[0]?.id ?? '')
+      }
+      return filtered
+    })
+  }
+
+  function addCellToActiveConsole() {
+    if (!activeConsole) return
+    const newCell = createSqlCell('SELECT * FROM ...')
+    setConsoles(prev => prev.map(c => c.id !== activeConsole.id ? c : { ...c, cells: [...c.cells, newCell] }))
+    setActiveCellId(newCell.id)
+  }
+
+  function removeCell(consoleId: string, cellId: string) {
+    setConsoles(prev => prev.map(c => {
+      if (c.id !== consoleId) return c
+      if (c.cells.length <= 1) return c
+      const nextCells = c.cells.filter(cell => cell.id !== cellId)
+      if (activeCellId === cellId) setActiveCellId(nextCells[0]?.id ?? '')
+      return { ...c, cells: nextCells }
+    }))
+  }
+
+  function openCellContextMenu(event: React.MouseEvent<HTMLElement>, consoleId: string, cellId: string) {
+    event.preventDefault()
+    setActiveConsoleId(consoleId)
+    setActiveCellId(cellId)
+    setCellMenuAnchor(event.currentTarget)
+    setCellMenuTarget({ consoleId, cellId })
+  }
+
+  function closeCellContextMenu() {
+    setCellMenuAnchor(null)
+    setCellMenuTarget(null)
+  }
+
+  async function runCell(consoleId: string, cellId: string) {
+    const console = consoles.find(c => c.id === consoleId)
+    const cell = console?.cells.find(c => c.id === cellId)
+    if (!cell || !cell.sql.trim()) return
+
+    updateConsoleCell(consoleId, cellId, {
+      running: true,
+      error: null,
+      result: null,
+      page: 0,
+      duration: null,
+    })
+    try {
+      const result = await dataApi.query(cell.sql, cell.pageSize, 0, cell.queryDb || undefined)
+      updateConsoleCell(consoleId, cellId, {
+        result,
+        duration: result.duration_ms ?? null,
+        running: false,
+      })
+    } catch (err) {
+      const parsed = parseQueryError(err)
+      updateConsoleCell(consoleId, cellId, {
+        error: {
+          ...parsed,
+          sparkMessage: sanitizeJvmNoise(parsed.sparkMessage),
+          traceback: sanitizeJvmNoise(parsed.traceback),
+        },
+        running: false,
+      })
+    }
+  }
+
+  async function changeCellPage(consoleId: string, cellId: string, newPage: number) {
+    const console = consoles.find(c => c.id === consoleId)
+    const cell = console?.cells.find(c => c.id === cellId)
+    if (!cell || !cell.sql.trim()) return
+    updateConsoleCell(consoleId, cellId, { running: true, page: newPage })
+    try {
+      const result = await dataApi.query(cell.sql, cell.pageSize, newPage * cell.pageSize, cell.queryDb || undefined)
+      updateConsoleCell(consoleId, cellId, {
+        result,
+        duration: result.duration_ms ?? null,
+        running: false,
+      })
+    } catch (err) {
+      const parsed = parseQueryError(err)
+      updateConsoleCell(consoleId, cellId, {
+        error: {
+          ...parsed,
+          sparkMessage: sanitizeJvmNoise(parsed.sparkMessage),
+          traceback: sanitizeJvmNoise(parsed.traceback),
+        },
+        running: false,
+      })
+    }
+  }
+
+  function saveActiveConsole() {
+    if (!activeConsole) return
+    const joined = activeConsole.cells.map((c, i) => `-- Cell ${i + 1}\n${c.sql.trim() || ''}`).join('\n\n')
+    const blob = new Blob([joined], { type: 'text/sql;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `${activeConsole.name.replace(/\s+/g, '_').toLowerCase() || 'console'}.sql`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(a.href)
+  }
+
+  function exportCellCsv(cell: SqlConsoleCell, delimiter: ',' | '\t') {
+    if (!cell.result) return
+    const esc = (v: unknown) => {
+      const s = String(v ?? '')
+      const needsQuote = s.includes('"') || s.includes('\n') || s.includes('\r') || s.includes(delimiter)
+      const norm = s.replace(/"/g, '""')
+      return needsQuote ? `"${norm}"` : norm
+    }
+    const header = cell.result.columns.map(esc).join(delimiter)
+    const rows = (cell.result.rows ?? []).map(r => (r as unknown[]).map(esc).join(delimiter))
+    const content = [header, ...rows].join('\n')
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `query_result.${delimiter === '\t' ? 'tsv' : 'csv'}`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(a.href)
+  }
+
+  function exportCellXlsx(cell: SqlConsoleCell) {
+    if (!cell.result) return
+    const rows = (cell.result.rows ?? []).map(r => {
+      const obj: Record<string, unknown> = {}
+      cell.result!.columns.forEach((c, idx) => { obj[c] = (r as unknown[])[idx] })
+      return obj
+    })
+    const ws = XLSX.utils.json_to_sheet(rows)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'QueryResult')
+    XLSX.writeFile(wb, 'query_result.xlsx')
+  }
+
   async function runQuery(sqlStr: string, db?: string, switchTab = true) {
     if (!sqlStr.trim()) return
-    setSql(sqlStr)
-    if (db !== undefined) setQueryDb(db)
+    if (!activeConsole || !activeCell) return
+    updateConsoleCell(activeConsole.id, activeCell.id, { sql: sqlStr, queryDb: db ?? activeCell.queryDb })
     if (switchTab) setActiveTab('query')
-    setQueryRunning(true)
-    setQueryError(null)
-    setQueryResult(null)
-    setQueryPage(0)
-    setQueryDuration(null)
-    try {
-      const result = await dataApi.query(sqlStr, queryPageSize, 0, (db ?? queryDb) || undefined)
-      setQueryResult(result)
-      setQueryDuration(result.duration_ms ?? null)
-    } catch (err) {
-      setQueryError(parseQueryError(err))
-    } finally {
-      setQueryRunning(false)
-    }
-  }
-
-  async function runCurrentQuery() {
-    if (!sql.trim()) return
-    setQueryRunning(true)
-    setQueryError(null)
-    setQueryResult(null)
-    setQueryPage(0)
-    setQueryDuration(null)
-    try {
-      const result = await dataApi.query(sql, queryPageSize, 0, queryDb || undefined)
-      setQueryResult(result)
-      setQueryDuration(result.duration_ms ?? null)
-    } catch (err) {
-      setQueryError(parseQueryError(err))
-    } finally {
-      setQueryRunning(false)
-    }
-  }
-
-  async function changeQueryPage(newPage: number) {
-    if (!sql.trim()) return
-    setQueryPage(newPage)
-    setQueryRunning(true)
-    try {
-      const result = await dataApi.query(sql, queryPageSize, newPage * queryPageSize, queryDb || undefined)
-      setQueryResult(result)
-      setQueryDuration(result.duration_ms ?? null)
-    } catch (err) {
-      setQueryError(parseQueryError(err))
-    } finally {
-      setQueryRunning(false)
-    }
+    await runCell(activeConsole.id, activeCell.id)
   }
 
   // ── Persist tree state to module-level store on every change ─────────────────
@@ -559,15 +782,23 @@ export default function DataExplorer() {
     _viewState.activeTab = activeTab
     _viewState.previewPage = previewPage
     _viewState.previewPageSize = previewPageSize
-    _viewState.sql = sql
-    _viewState.queryDb = queryDb
-    _viewState.queryPage = queryPage
-    _viewState.queryPageSize = queryPageSize
-    _viewState.queryResult = queryResult
-    _viewState.queryError = queryError
-    _viewState.queryDuration = queryDuration
+    _viewState.consoles = consoles
+    _viewState.activeConsoleId = activeConsoleId
+    _viewState.activeCellId = activeCellId
+    _viewState.sqlResultsHeightPct = sqlResultsHeightPct
     _viewState.schemaResult = schemaResult
     _viewState.schemaError = schemaError
+
+    try {
+      localStorage.setItem('dataExplorer.sqlConsoles', JSON.stringify({
+        consoles,
+        activeConsoleId,
+        activeCellId,
+        sqlResultsHeightPct,
+      }))
+    } catch {
+      // ignore localStorage failures
+    }
   }, [
     leftSearch,
     leftCollapsed,
@@ -576,16 +807,31 @@ export default function DataExplorer() {
     activeTab,
     previewPage,
     previewPageSize,
-    sql,
-    queryDb,
-    queryPage,
-    queryPageSize,
-    queryResult,
-    queryError,
-    queryDuration,
+    consoles,
+    activeConsoleId,
+    activeCellId,
+    sqlResultsHeightPct,
     schemaResult,
     schemaError,
   ])
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('dataExplorer.sqlConsoles')
+      if (!raw) return
+      const parsed = JSON.parse(raw) as { consoles?: SqlConsole[]; activeConsoleId?: string; activeCellId?: string }
+      if (parsed.consoles && parsed.consoles.length > 0) {
+        setConsoles(parsed.consoles)
+        setActiveConsoleId(parsed.activeConsoleId || parsed.consoles[0].id)
+        setActiveCellId(parsed.activeCellId || parsed.consoles[0].cells[0]?.id || '')
+      }
+      if (typeof (parsed as { sqlResultsHeightPct?: number }).sqlResultsHeightPct === 'number') {
+        setSqlResultsHeightPct((parsed as { sqlResultsHeightPct?: number }).sqlResultsHeightPct || 46)
+      }
+    } catch {
+      // ignore malformed local storage
+    }
+  }, [])
 
   useEffect(() => {
     const onToggleLeft = () => setLeftCollapsed(v => !v)
@@ -986,7 +1232,7 @@ export default function DataExplorer() {
             size="small"
             clickable
             onClick={() => {
-              const dbPart = selectedItem?.database ?? queryDb
+              const dbPart = selectedItem?.database ?? activeCell?.queryDb
               runQuery(dbPart ? `SHOW TABLES IN ${dbPart}` : 'SHOW TABLES')
             }}
             sx={{ fontFamily: 'monospace', fontSize: '0.67rem', height: 22 }}
@@ -1137,145 +1383,232 @@ export default function DataExplorer() {
           {/* SQL QUERY TAB */}
           {activeTab === 'query' && (
             <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-              {/* Editor panel */}
-              <Box sx={{ flexShrink: 0, borderBottom: `1px solid ${theme.palette.divider}` }}>
-                {/* Editor toolbar */}
-                <Box sx={{
-                  display: 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 0.75,
-                  bgcolor: 'background.paper', borderBottom: `1px solid ${theme.palette.divider}`,
-                }}>
-                  <FormControl size="small" sx={{ minWidth: 150 }}>
-                    <Select
-                      value={queryDb}
-                      onChange={e => setQueryDb(e.target.value)}
-                      displayEmpty
-                      sx={{ fontSize: '0.78rem', height: 28 }}
-                    >
-                      <MenuItem value="" sx={{ fontSize: '0.78rem', color: 'text.secondary' }}>(default db)</MenuItem>
-                      {databases.map(db => (
-                        <MenuItem key={db} value={db} sx={{ fontSize: '0.78rem' }}>{db}</MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                  <Box sx={{ flex: 1 }} />
-                  {queryDuration !== null && !queryRunning && (
-                    <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
-                      {fmtMs(queryDuration)}
-                    </Typography>
-                  )}
-                  {queryResult && !queryRunning && (
-                    <Typography variant="caption" color="text.secondary">
-                      {queryResult.rows.length} rows · {queryResult.columns.length} cols
-                      {queryResult.truncated && ' (truncated)'}
-                    </Typography>
-                  )}
-                  <Button
-                    size="small"
-                    variant="contained"
-                    startIcon={queryRunning ? <CircularProgress size={13} color="inherit" /> : <PlayArrow sx={{ fontSize: 16 }} />}
-                    onClick={runCurrentQuery}
-                    disabled={queryRunning || !sql.trim()}
-                    sx={{ fontSize: '0.78rem', py: 0.35 }}
-                  >
-                    Run
-                  </Button>
-                </Box>
-                {/* SQL textarea */}
-                <Box
-                  component="textarea"
-                  value={sql}
-                  onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setSql(e.target.value)}
-                  spellCheck={false}
-                  rows={6}
-                  placeholder="SELECT * FROM ..."
-                  onKeyDown={(e: React.KeyboardEvent) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                      e.preventDefault()
-                      runCurrentQuery()
-                    }
-                  }}
-                  sx={{
-                    display: 'block', width: '100%', resize: 'vertical',
-                    border: 'none', outline: 'none',
-                    bgcolor: theme.palette.mode === 'dark' ? '#0d1117' : '#fafafa',
-                    color: 'text.primary',
-                    fontFamily: '"JetBrains Mono", Consolas, "Courier New", monospace',
-                    fontSize: '0.85rem', lineHeight: 1.7, p: 1.5,
-                    boxSizing: 'border-box',
-                  }}
-                />
+              {/* Console tabs */}
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.5, borderBottom: `1px solid ${theme.palette.divider}`, bgcolor: 'background.paper', overflowX: 'auto' }}>
+                {consoles.map(c => {
+                  const active = c.id === (activeConsole?.id ?? '')
+                  return (
+                    <Box key={c.id} sx={{ display: 'flex', alignItems: 'center', borderRadius: 1, border: `1px solid ${active ? theme.palette.primary.main : theme.palette.divider}`, bgcolor: active ? alpha(theme.palette.primary.main, 0.12) : 'transparent', px: 0.75, py: 0.35 }}>
+                      <Typography sx={{ fontSize: '0.75rem', cursor: 'pointer' }} onClick={() => { setActiveConsoleId(c.id); setActiveCellId(c.cells[0]?.id ?? '') }}>
+                        {c.name}
+                      </Typography>
+                      <IconButton size="small" onClick={() => closeConsole(c.id)} sx={{ ml: 0.3, p: 0.2 }}>
+                        <Close sx={{ fontSize: 13 }} />
+                      </IconButton>
+                    </Box>
+                  )
+                })}
+                <Tooltip title="New console">
+                  <IconButton size="small" onClick={addConsole}>
+                    <Add sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Save active console (.sql)">
+                  <span>
+                    <IconButton size="small" onClick={saveActiveConsole} disabled={!activeConsole}>
+                      <Save sx={{ fontSize: 15 }} />
+                    </IconButton>
+                  </span>
+                </Tooltip>
               </Box>
 
-              {/* Results */}
-              <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-                {queryError && (
-                  <Alert severity="error" sx={{ m: 1.5, flexShrink: 0 }}>
-                    <Typography sx={{ fontWeight: 700, mb: 0.5 }}>
-                      {queryError.statusCode ? `SQL execution failed (${queryError.statusCode})` : 'SQL execution failed'}
+              {/* Cells + results */}
+              <Box ref={sqlWorkspaceRef} sx={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: `minmax(180px, ${100 - sqlResultsHeightPct}%) 6px minmax(160px, ${sqlResultsHeightPct}%)`, overflow: 'hidden' }}>
+                <Box sx={{ overflow: 'auto', p: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>
+                      SQL Cells
                     </Typography>
-                    <Typography sx={{ mb: 0.5 }}>{queryError.message}</Typography>
-                    {queryError.errorType && (
-                      <Typography sx={{ fontFamily: 'monospace', fontSize: '0.75rem', mb: 0.5 }}>
-                        Error type: {queryError.errorType}
-                      </Typography>
-                    )}
-                    {queryError.database && (
-                      <Typography sx={{ fontFamily: 'monospace', fontSize: '0.75rem', mb: 0.5 }}>
-                        Database: {queryError.database}
-                      </Typography>
-                    )}
-                    {queryError.sparkMessage && (
-                      <Box sx={{ mt: 0.5 }}>
-                        <Typography variant="caption" sx={{ fontWeight: 700 }}>Spark message</Typography>
-                        <Box component="pre" sx={{ m: 0, mt: 0.25, p: 1, borderRadius: 1, overflowX: 'auto', bgcolor: 'rgba(0,0,0,0.08)', fontFamily: 'monospace', fontSize: '0.74rem', whiteSpace: 'pre-wrap' }}>
-                          {queryError.sparkMessage}
-                        </Box>
-                      </Box>
-                    )}
-                    {queryError.sql && (
-                      <Box sx={{ mt: 0.75 }}>
-                        <Typography variant="caption" sx={{ fontWeight: 700 }}>SQL</Typography>
-                        <Box component="pre" sx={{ m: 0, mt: 0.25, p: 1, borderRadius: 1, overflowX: 'auto', bgcolor: 'rgba(0,0,0,0.08)', fontFamily: 'monospace', fontSize: '0.74rem', whiteSpace: 'pre-wrap' }}>
-                          {queryError.sql}
-                        </Box>
-                      </Box>
-                    )}
-                    {queryError.traceback && (
-                      <Box sx={{ mt: 0.75 }}>
-                        <Typography variant="caption" sx={{ fontWeight: 700 }}>Traceback</Typography>
-                        <Box component="pre" sx={{ m: 0, mt: 0.25, p: 1, borderRadius: 1, maxHeight: 240, overflow: 'auto', bgcolor: 'rgba(0,0,0,0.08)', fontFamily: 'monospace', fontSize: '0.72rem', whiteSpace: 'pre-wrap' }}>
-                          {queryError.traceback}
-                        </Box>
-                      </Box>
-                    )}
-                  </Alert>
-                )}
-                {queryRunning && (
-                  <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flex: 1 }}>
-                    <CircularProgress size={28} />
+                    <Button size="small" variant="outlined" startIcon={<Add sx={{ fontSize: 14 }} />} onClick={addCellToActiveConsole}>
+                      Add Cell
+                    </Button>
                   </Box>
-                )}
-                {queryResult && !queryRunning && (
-                  <RichGrid
-                    columns={queryResult.columns}
-                    rows={queryResult.rows}
-                    loading={false}
-                    page={queryPage}
-                    pageSize={queryPageSize}
-                    truncated={queryResult.truncated}
-                    totalRows={queryResult.total_rows}
-                    onPageChange={changeQueryPage}
-                    onPageSizeChange={s => { setQueryPageSize(s); setQueryPage(0) }}
-                  />
-                )}
-                {!queryRunning && !queryResult && !queryError && (
-                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'text.secondary', gap: 1 }}>
-                    <PlayArrow sx={{ fontSize: 40, opacity: 0.2 }} />
-                    <Typography variant="body2">Run a query to see results</Typography>
-                    <Typography variant="caption" color="text.disabled">⌘+Enter to run</Typography>
+
+                  {(activeConsole?.cells ?? []).map((cell, idx) => {
+                    const isActiveCell = cell.id === activeCell?.id
+                    return (
+                      <Box
+                        key={cell.id}
+                        onContextMenu={(event: React.MouseEvent<HTMLElement>) => openCellContextMenu(event, activeConsole!.id, cell.id)}
+                        sx={{ border: `1px solid ${isActiveCell ? theme.palette.primary.main : theme.palette.divider}`, borderRadius: 1, overflow: 'hidden', bgcolor: isActiveCell ? alpha(theme.palette.primary.main, 0.04) : 'background.paper' }}
+                      >
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.4, borderBottom: `1px solid ${theme.palette.divider}` }} onClick={() => setActiveCellId(cell.id)}>
+                          <Button
+                            size="small"
+                            color="success"
+                            variant="contained"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              runCell(activeConsole!.id, cell.id)
+                            }}
+                            disabled={cell.running || !cell.sql.trim()}
+                            startIcon={cell.running ? <CircularProgress size={12} color="inherit" /> : <PlayArrow sx={{ fontSize: 14 }} />}
+                            sx={{ fontSize: '0.7rem', py: 0.2, minWidth: 68 }}
+                          >
+                            Run
+                          </Button>
+                          <Typography sx={{ fontSize: '0.72rem', fontWeight: 700 }}>Cell {idx + 1}</Typography>
+                          <FormControl size="small" sx={{ minWidth: 140, ml: 0.5 }}>
+                            <Select
+                              value={cell.queryDb}
+                              displayEmpty
+                              onChange={e => updateConsoleCell(activeConsole!.id, cell.id, { queryDb: e.target.value })}
+                              sx={{ fontSize: '0.72rem', height: 24 }}
+                            >
+                              <MenuItem value="" sx={{ fontSize: '0.75rem' }}>(default db)</MenuItem>
+                              {databases.map(db => (
+                                <MenuItem key={db} value={db} sx={{ fontSize: '0.75rem' }}>{db}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          <Box sx={{ flex: 1 }} />
+                          {cell.duration != null && !cell.running && (
+                            <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>{fmtMs(cell.duration)}</Typography>
+                          )}
+                          <IconButton size="small" onClick={() => removeCell(activeConsole!.id, cell.id)}>
+                            <DeleteOutlined sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </Box>
+                        <Box
+                          component="textarea"
+                          value={cell.sql}
+                          spellCheck={false}
+                          rows={4}
+                          onClick={() => setActiveCellId(cell.id)}
+                          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => updateConsoleCell(activeConsole!.id, cell.id, { sql: e.target.value })}
+                          onKeyDown={(e: React.KeyboardEvent) => {
+                            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                              e.preventDefault()
+                              runCell(activeConsole!.id, cell.id)
+                            }
+                          }}
+                          style={{
+                            width: '100%',
+                            border: 'none',
+                            outline: 'none',
+                            resize: 'vertical',
+                            fontFamily: 'JetBrains Mono, Consolas, Courier New, monospace',
+                            fontSize: '0.82rem',
+                            lineHeight: 1.6,
+                            padding: '10px 12px',
+                            background: theme.palette.mode === 'dark' ? '#0d1117' : '#fafafa',
+                            color: theme.palette.text.primary,
+                            boxSizing: 'border-box',
+                          }}
+                        />
+                      </Box>
+                    )
+                  })}
+                </Box>
+
+                <Box
+                  onMouseDown={handleSqlSplitMouseDown}
+                  sx={{
+                    cursor: 'row-resize',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    bgcolor: 'background.paper',
+                    borderTop: `1px solid ${theme.palette.divider}`,
+                    borderBottom: `1px solid ${theme.palette.divider}`,
+                    '&:hover .sql-split-handle': { bgcolor: 'primary.main', opacity: 0.7 },
+                  }}
+                >
+                  <Box className="sql-split-handle" sx={{ width: 52, height: 3, borderRadius: 999, bgcolor: 'divider', transition: 'all 0.15s' }} />
+                </Box>
+
+                <Box sx={{ borderTop: `1px solid ${theme.palette.divider}`, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, px: 1, py: 0.6, borderBottom: `1px solid ${theme.palette.divider}`, bgcolor: 'background.paper' }}>
+                    <Typography variant="caption" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                      Results
+                    </Typography>
+                    <Box sx={{ flex: 1 }} />
+                    <Tooltip title="Export CSV (comma)">
+                      <span>
+                        <Button size="small" variant="outlined" startIcon={<FileDownload sx={{ fontSize: 14 }} />} disabled={!activeCell?.result} onClick={() => activeCell && exportCellCsv(activeCell, ',')}>
+                          CSV
+                        </Button>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title="Export TSV (tab)">
+                      <span>
+                        <Button size="small" variant="outlined" disabled={!activeCell?.result} onClick={() => activeCell && exportCellCsv(activeCell, '\t')}>
+                          TSV
+                        </Button>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title="Export XLSX">
+                      <span>
+                        <Button size="small" variant="outlined" disabled={!activeCell?.result} onClick={() => activeCell && exportCellXlsx(activeCell)}>
+                          XLSX
+                        </Button>
+                      </span>
+                    </Tooltip>
                   </Box>
-                )}
+
+                  <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                    {activeCell?.error && (
+                      <Alert severity="error" sx={{ m: 1.2, flexShrink: 0 }}>
+                        <Typography sx={{ fontWeight: 700, mb: 0.5 }}>
+                          {activeCell.error.statusCode ? `SQL execution failed (${activeCell.error.statusCode})` : 'SQL execution failed'}
+                        </Typography>
+                        <Typography sx={{ mb: 0.5 }}>{activeCell.error.message}</Typography>
+                        {activeCell.error.sparkMessage && (
+                          <Box component="pre" sx={{ m: 0, mt: 0.25, p: 1, borderRadius: 1, overflowX: 'auto', bgcolor: 'rgba(0,0,0,0.08)', fontFamily: 'monospace', fontSize: '0.74rem', whiteSpace: 'pre-wrap' }}>
+                            {sanitizeJvmNoise(activeCell.error.sparkMessage)}
+                          </Box>
+                        )}
+                      </Alert>
+                    )}
+
+                    {activeCell?.running && (
+                      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flex: 1 }}>
+                        <CircularProgress size={24} />
+                      </Box>
+                    )}
+
+                    {activeCell?.result && !activeCell.running && (
+                      <RichGrid
+                        columns={activeCell.result.columns}
+                        rows={activeCell.result.rows}
+                        loading={false}
+                        page={activeCell.page}
+                        pageSize={activeCell.pageSize}
+                        truncated={activeCell.result.truncated}
+                        totalRows={activeCell.result.total_rows}
+                        onPageChange={p => changeCellPage(activeConsole!.id, activeCell.id, p)}
+                        onPageSizeChange={s => {
+                          updateConsoleCell(activeConsole!.id, activeCell.id, { pageSize: s, page: 0 })
+                          changeCellPage(activeConsole!.id, activeCell.id, 0)
+                        }}
+                      />
+                    )}
+
+                    {!activeCell?.running && !activeCell?.result && !activeCell?.error && (
+                      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'text.secondary', gap: 1 }}>
+                        <PlayArrow sx={{ fontSize: 36, opacity: 0.2 }} />
+                        <Typography variant="body2">Run a SQL cell to view results</Typography>
+                        <Typography variant="caption" color="text.disabled">Ctrl/Cmd + Enter runs the focused cell</Typography>
+                      </Box>
+                    )}
+                  </Box>
+                </Box>
               </Box>
+
+              <Menu
+                anchorEl={cellMenuAnchor}
+                open={Boolean(cellMenuAnchor)}
+                onClose={closeCellContextMenu}
+              >
+                <MenuItem
+                  onClick={() => {
+                    if (cellMenuTarget) runCell(cellMenuTarget.consoleId, cellMenuTarget.cellId)
+                    closeCellContextMenu()
+                  }}
+                >
+                  Run Cell
+                </MenuItem>
+              </Menu>
             </Box>
           )}
 
