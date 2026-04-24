@@ -675,6 +675,7 @@ class ConnectionTestResult(BaseModel):
 class DictionaryEntryBase(BaseModel):
     key: str
     value: str
+    extra: Optional[dict[str, str]] = None
 
 
 class DictionaryEntryCreate(DictionaryEntryBase):
@@ -684,6 +685,7 @@ class DictionaryEntryCreate(DictionaryEntryBase):
 class DictionaryEntryUpdate(BaseModel):
     key: Optional[str] = None
     value: Optional[str] = None
+    extra: Optional[dict[str, str]] = None
 
 
 class DictionaryEntryOut(DictionaryEntryBase):
@@ -699,6 +701,7 @@ class DictionaryBase(BaseModel):
     description: Optional[str] = None
     key_label: str = "Key"
     value_label: str = "Value"
+    extra_columns: list[str] = Field(default_factory=list)
 
 
 class DictionaryCreate(DictionaryBase):
@@ -710,6 +713,7 @@ class DictionaryUpdate(BaseModel):
     description: Optional[str] = None
     key_label: Optional[str] = None
     value_label: Optional[str] = None
+    extra_columns: Optional[list[str]] = None
 
 
 class DictionaryOut(DictionaryBase):

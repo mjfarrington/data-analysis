@@ -212,6 +212,7 @@ export interface DictionaryEntry {
   id: number
   key: string
   value: string
+  extra?: Record<string, string>
 }
 
 export interface Dictionary {
@@ -220,6 +221,7 @@ export interface Dictionary {
   description?: string
   key_label: string
   value_label: string
+  extra_columns?: string[]
   entries: DictionaryEntry[]
 }
 
@@ -479,9 +481,9 @@ export const dictionariesApi = {
   update: (id: number, data: Partial<Dictionary>) =>
     api.put<Dictionary>(`/dictionaries/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/dictionaries/${id}`),
-  addEntry: (dictId: number, data: { key: string; value: string }) =>
+  addEntry: (dictId: number, data: { key: string; value: string; extra?: Record<string, string> }) =>
     api.post<DictionaryEntry>(`/dictionaries/${dictId}/entries`, data).then(r => r.data),
-  updateEntry: (dictId: number, entryId: number, data: { key?: string; value?: string }) =>
+  updateEntry: (dictId: number, entryId: number, data: { key?: string; value?: string; extra?: Record<string, string> }) =>
     api.put<DictionaryEntry>(`/dictionaries/${dictId}/entries/${entryId}`, data).then(r => r.data),
   deleteEntry: (dictId: number, entryId: number) =>
     api.delete(`/dictionaries/${dictId}/entries/${entryId}`),

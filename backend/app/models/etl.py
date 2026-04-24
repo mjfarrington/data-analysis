@@ -485,6 +485,7 @@ class Dictionary(Base):
     description: Mapped[Optional[str]] = mapped_column(Text)
     key_label: Mapped[str] = mapped_column(String(100), nullable=False, default="Key")
     value_label: Mapped[str] = mapped_column(String(100), nullable=False, default="Value")
+    extra_columns: Mapped[Optional[list[str]]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -507,6 +508,7 @@ class DictionaryEntry(Base):
     )
     key: Mapped[str] = mapped_column(String(500), nullable=False)
     value: Mapped[str] = mapped_column(String(500), nullable=False)
+    extra: Mapped[Optional[dict[str, str]]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

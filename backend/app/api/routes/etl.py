@@ -143,6 +143,26 @@ async def _apply_canvas_to_extract_cfg(
         if node_type == "iterator":
             dict_id = cfg.get("dictionary_id")
             selected_keys = [str(k) for k in (cfg.get("selected_keys") or [])]
+            entry_filters_raw = cfg.get("entry_filters") or []
+            entry_filters: list[tuple[str, str]] = []
+            for item in entry_filters_raw:
+                if not isinstance(item, dict):
+                    continue
+                column = str(item.get("column") or "").strip()
+                value = str(item.get("value") or "").strip()
+                if not column or not value:
+                    continue
+                entry_filters.append((column, value))
+
+            def _matches_entry_filters(entry: "DictionaryEntry") -> bool:
+                if not entry_filters:
+                    return True
+                extra = entry.extra or {}
+                for column, value in entry_filters:
+                    if str(extra.get(column, "")) != value:
+                        return False
+                return True
+
             if dict_id:
                 from app.models.etl import DictionaryEntry
                 if selected_keys:
@@ -152,6 +172,7 @@ async def _apply_canvas_to_extract_cfg(
                         .where(DictionaryEntry.key.in_(selected_keys))
                     )
                     entries = rows.scalars().all()
+                    entries = [e for e in entries if _matches_entry_filters(e)]
                     # Preserve selected key order for deterministic app iteration.
                     entry_map = {str(e.key): e for e in entries}
                     apps = [
@@ -167,9 +188,9 @@ async def _apply_canvas_to_extract_cfg(
                         .order_by(DictionaryEntry.id)
                     )
                     entries = rows.scalars().all()
+                    entries = [e for e in entries if _matches_entry_filters(e)]
                     apps = [{"id": str(e.key), "name": str(e.value)} for e in entries]
-                if apps:
-                    updates["apps"] = apps
+                updates["apps"] = apps
 
         elif node_type == "jdbc_extract":
             updates["source_type"] = "jdbc"

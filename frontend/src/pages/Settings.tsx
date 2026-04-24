@@ -10,7 +10,7 @@ import {
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { contextApi, sqlFilesApi } from '../api/client'
-import { useThemeStore, ThemeMode, Density } from '../store/theme'
+import { useThemeStore, ThemeMode, Density, LineRenderStyle } from '../store/theme'
 
 const APP_VERSION = '0.1.0'
 const BACKEND_URL = 'http://localhost:8000'
@@ -30,7 +30,12 @@ function TabPanel({ children, value, index }: {
 export default function Settings() {
   const qc = useQueryClient()
   const [tab, setTab] = useState(0)
-  const { mode, setMode, density, setDensity, sqlMinimap, setSqlMinimap } = useThemeStore()
+  const {
+    mode, setMode,
+    density, setDensity,
+    sqlMinimap, setSqlMinimap,
+    lineRenderStyle, setLineRenderStyle,
+  } = useThemeStore()
 
   const { data: ctx, isLoading } = useQuery({
     queryKey: ['execution-context'],
@@ -287,6 +292,25 @@ export default function Settings() {
               }
               label="Enable SQL minimap"
             />
+
+            <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+              Pipeline Canvas Lines
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+              Choose how connection lines are rendered in the pipeline editor.
+            </Typography>
+            <ToggleButtonGroup
+              value={lineRenderStyle}
+              exclusive
+              onChange={(_, val) => val && setLineRenderStyle(val as LineRenderStyle)}
+              size="small"
+            >
+              <ToggleButton value="curved" sx={{ px: 2.2 }}><Typography variant="caption">Curved</Typography></ToggleButton>
+              <ToggleButton value="angled" sx={{ px: 2.2 }}><Typography variant="caption">Angled</Typography></ToggleButton>
+              <ToggleButton value="smooth" sx={{ px: 2.2 }}><Typography variant="caption">Smooth</Typography></ToggleButton>
+              <ToggleButton value="straight" sx={{ px: 2.2 }}><Typography variant="caption">Straight</Typography></ToggleButton>
+            </ToggleButtonGroup>
           </CardContent>
         </Card>
       </TabPanel>
@@ -314,6 +338,9 @@ export default function Settings() {
 
               <Typography variant="body2" color="text.secondary">SQL Minimap</Typography>
               <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{sqlMinimap ? 'on' : 'off'}</Typography>
+
+              <Typography variant="body2" color="text.secondary">Pipeline Line Style</Typography>
+              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{lineRenderStyle}</Typography>
             </Box>
           </CardContent>
         </Card>

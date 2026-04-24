@@ -5,6 +5,7 @@ import ReactFlow, {
   Background, MiniMap,
   addEdge, useNodesState, useEdgesState,
   Connection as RFConnection, Edge, Node, NodeTypes,
+  ConnectionLineType,
   Handle, Position, MarkerType, Panel,
   ReactFlowInstance, Viewport, useReactFlow, useStore,
 } from 'reactflow'
@@ -38,10 +39,25 @@ import {
   pipelinesApi, connectionsApi, sqlFilesApi, dictionariesApi, transformApi, contextApi,
   Pipeline, Connection, SqlFile, Dictionary, PreviewResult, NotebookFile, RunSummary,
 } from '../api/client'
+import { useThemeStore, LineRenderStyle } from '../store/theme'
 import StatusChip from '../components/StatusChip'
 
 const DEFAULT_PIPELINE_CATEGORY = 'Unknown'
 const DEFAULT_PIPELINE_STATUS: Pipeline['status'] = 'draft'
+
+const EDGE_TYPE_BY_STYLE: Record<LineRenderStyle, Edge['type']> = {
+  curved: 'default',
+  angled: 'step',
+  straight: 'straight',
+  smooth: 'smoothstep',
+}
+
+const CONNECTION_LINE_TYPE_BY_STYLE: Record<LineRenderStyle, ConnectionLineType> = {
+  curved: ConnectionLineType.Bezier,
+  angled: ConnectionLineType.Step,
+  straight: ConnectionLineType.Straight,
+  smooth: ConnectionLineType.SmoothStep,
+}
 
 function normalizePipelineCategory(category?: string): string {
   const value = (category ?? '').trim()
@@ -138,6 +154,7 @@ function defaultConfig(type: string): Record<string, any> {
       return {
         dictionary_id: null,
         selected_keys: [],   // empty = all entries; non-empty = only these keys
+        entry_filters: [],   // [{ column, value }] matched against dictionary entry extra columns
         key_param: 'app_id',
         value_param: 'app_name',
       }
@@ -195,9 +212,11 @@ function defaultConfig(type: string): Record<string, any> {
 function nodeSummary(type: string, config: Record<string, any>, meta?: { connName?: string; sqlName?: string; dictName?: string; notebookName?: string }): string[] {
   switch (type) {
     case 'iterator': {
+      const filters = (config.entry_filters ?? []).filter((f: { column?: string; value?: string }) => f?.column && f?.value)
       return [
         meta?.dictName ?? (config.dictionary_id ? `Dict #${config.dictionary_id}` : '— No dictionary'),
         `$${config.key_param ?? 'app_id'} / $${config.value_param ?? 'app_name'}`,
+        filters.length > 0 ? `Filters: ${filters.length}` : 'Filters: none',
       ]
     }
     case 'dw_extract':
@@ -244,6 +263,23 @@ function nodeSummary(type: string, config: Record<string, any>, meta?: { connNam
     default:
       return []
   }
+}
+
+type IteratorEntryFilter = { column: string; value: string }
+
+function getIteratorActiveEntries(
+  dict: Dictionary | undefined,
+  selectedKeys: string[],
+  entryFilters: IteratorEntryFilter[],
+): Array<{ id: number; key: string; value: string; extra?: Record<string, string> }> {
+  if (!dict) return []
+  return dict.entries.filter((entry) => {
+    const selected = selectedKeys.length === 0 || selectedKeys.includes(entry.key)
+    if (!selected) return false
+    if (entryFilters.length === 0) return true
+    const extra = entry.extra ?? {}
+    return entryFilters.every((filter) => String(extra[filter.column] ?? '') === filter.value)
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -435,9 +471,10 @@ function PipelineNode({ id, data, selected }: { id: string; data: PipelineNodeDa
         {/* Iterator entry key chips */}
         {data.nodeType === 'iterator' && (() => {
           const dict = dictionaries.find(d => d.id === Number(data.config.dictionary_id))
-          const allKeys: string[] = dict?.entries.map(e => e.key) ?? []
           const selKeys: string[] = data.config.selected_keys ?? []
-          const keys = selKeys.length > 0 ? selKeys : allKeys
+          const entryFilters: IteratorEntryFilter[] = (data.config.entry_filters ?? [])
+            .filter((f: { column?: string; value?: string }) => f?.column && f?.value)
+          const keys = getIteratorActiveEntries(dict, selKeys, entryFilters).map(e => e.key)
           if (keys.length === 0) return null
           const visible = keys.slice(0, 3)
           const overflow = keys.length - 3
@@ -758,6 +795,13 @@ function JdbcSharedConfig({
 
   const params: SqlParam[] = config.params ?? []
   const selectedSql = sqlFiles.find(f => f.id === config.sql_file_id)
+  const extractSqlFiles = useMemo(
+    () => sqlFiles
+      .filter(f => f.file_type === 'extract')
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    [sqlFiles],
+  )
+  const selectedExtractSql = extractSqlFiles.find(f => f.id === config.sql_file_id) ?? null
   const filteredConnections = connections.filter(c => c.conn_type === connectionType)
 
   const addParam = (key = '', value = '') => onChange({ params: [...params, { key, value }] })
@@ -857,24 +901,32 @@ function JdbcSharedConfig({
       ) : (
         /* SQL file picker */
         <>
-          <FormControl size="small" fullWidth>
-            <InputLabel>SQL File</InputLabel>
-            <Select
-              label="SQL File"
-              value={config.sql_file_id ?? ''}
-              onChange={e => {
-                onChange({ sql_file_id: e.target.value || null, sql: '' })
-                if (hasInlineSql) onOpenSqlEditor?.()
-              }}
-            >
-              <MenuItem value=""><em>None</em></MenuItem>
-              {sqlFiles.filter(f => f.file_type === 'extract').map(f => (
-                <MenuItem key={f.id} value={f.id}>
-                  <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{f.name}</Typography>
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+          <Autocomplete
+            size="small"
+            fullWidth
+            options={extractSqlFiles}
+            value={selectedExtractSql}
+            onChange={(_, selected) => {
+              onChange({ sql_file_id: selected?.id ?? null, sql: '' })
+              if (hasInlineSql) onOpenSqlEditor?.()
+            }}
+            isOptionEqualToValue={(option, value) => option.id === value.id}
+            getOptionLabel={(option) => option.name}
+            renderOption={(props, option) => (
+              <li {...props}>
+                <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{option.name}</Typography>
+              </li>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="SQL File"
+                placeholder="Type SQL file name"
+              />
+            )}
+            noOptionsText="No extract SQL files"
+            clearOnEscape
+          />
           {selectedSql && (
             <Box
               onClick={hasInlineSql ? onOpenSqlEditor : undefined}
@@ -1677,6 +1729,7 @@ interface ExecutionPlanForkPreview {
   branches: IteratorPreviewBranch[]
   branchSteps: IteratorPreviewStep[]
   mergeStep?: IteratorPreviewStep
+  postMergeSteps: IteratorPreviewStep[]
   warnings: string[]
 }
 
@@ -1795,129 +1848,227 @@ function ExecutionPlanDialog({
                       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                         Fork Diagram
                       </Typography>
-                      <Box sx={{ mt: 0.5, display: 'flex', flexDirection: 'column', gap: 0.7 }}>
-                        {visibleBranches.map((branch, index) => (
-                          <Box key={`${iter.iteratorNodeId}-diagram-${branch.key}-${index}`} sx={{ display: 'flex', alignItems: 'center', gap: 0.55, flexWrap: 'wrap' }}>
-                            <Box
-                              sx={{
-                                px: 1,
-                                py: 0.65,
-                                borderRadius: 1,
-                                border: `1px solid ${alpha(ORCHESTRATION_COLOR, 0.35)}`,
-                                bgcolor: alpha(ORCHESTRATION_COLOR, 0.1),
-                                minWidth: 96,
-                              }}
-                            >
-                              <Typography sx={{ fontSize: '0.62rem', color: ORCHESTRATION_COLOR, fontWeight: 700, textTransform: 'uppercase' }}>
-                                Iterator
-                              </Typography>
-                              <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
-                                {iter.iteratorLabel}
-                              </Typography>
-                            </Box>
-                            <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>
-                            <Chip
-                              size="small"
-                              label={`${branch.key}`}
-                              sx={{ fontFamily: 'monospace', fontSize: '0.66rem', height: 22 }}
-                              color="secondary"
-                            />
-                            {iter.branchSteps.map(step => (
-                              <>
-                                <Typography key={`${branch.key}-${step.id}-arrow`} sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>
-                                <Box
-                                  key={`${branch.key}-${step.id}`}
-                                  sx={{
-                                    px: 1,
-                                    py: 0.65,
-                                    borderRadius: 1,
-                                    border: `1px solid ${alpha(step.color, 0.35)}`,
-                                    bgcolor: alpha(step.color, 0.1),
-                                    minWidth: 96,
-                                  }}
-                                >
-                                  <Typography sx={{ fontSize: '0.62rem', color: step.color, fontWeight: 700, textTransform: 'uppercase' }}>
-                                    {CATALOG_MAP[step.type]?.label ?? step.type}
-                                  </Typography>
-                                  <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
-                                    {step.label}
-                                  </Typography>
-                                </Box>
-                              </>
-                            ))}
-                            {iter.mergeStep && (
-                              <>
-                                <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>
-                                <Box
-                                  sx={{
-                                    px: 1,
-                                    py: 0.65,
-                                    borderRadius: 1,
-                                    border: `1px solid ${alpha(iter.mergeStep.color, 0.45)}`,
-                                    bgcolor: alpha(iter.mergeStep.color, 0.16),
-                                    minWidth: 96,
-                                  }}
-                                >
-                                  <Typography sx={{ fontSize: '0.62rem', color: iter.mergeStep.color, fontWeight: 700, textTransform: 'uppercase' }}>
-                                    Aggregate (Merge)
-                                  </Typography>
-                                  <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
-                                    {iter.mergeStep.label}
-                                  </Typography>
-                                </Box>
-                              </>
-                            )}
-                          </Box>
-                        ))}
-                      </Box>
-                    </Box>
+                      <Box sx={{ mt: 0.5, overflowX: 'auto' }}>
+                        {(() => {
+                          const stepCols: Array<{ key: string; title: string }> = [
+                            { key: 'iterator', title: 'Iterator' },
+                            { key: 'branch', title: `Fork (${iter.keyParam})` },
+                            ...iter.branchSteps.map((step, idx) => ({
+                              key: `branch-step-${idx}`,
+                              title: CATALOG_MAP[step.type]?.label ?? step.type,
+                            })),
+                            ...(iter.mergeStep ? [{ key: 'merge', title: 'Aggregate (Merge)' }] : []),
+                            ...iter.postMergeSteps.map((step, idx) => ({
+                              key: `post-step-${idx}`,
+                              title: CATALOG_MAP[step.type]?.label ?? step.type,
+                            })),
+                          ]
 
-                    <Box sx={{ mt: 0.8, display: 'flex', flexDirection: 'column', gap: 0.8 }}>
-                      {visibleBranches.map((branch, index) => (
-                        <Box
-                          key={`${iter.iteratorNodeId}-${branch.key}-${index}`}
-                          sx={{
-                            display: 'grid',
-                            gridTemplateColumns: '24px 1fr',
-                            gap: 1,
-                            alignItems: 'stretch',
-                          }}
-                        >
-                          <Box sx={{ position: 'relative', display: 'flex', justifyContent: 'center' }}>
-                            <Box
-                              sx={{
-                                position: 'absolute',
-                                top: 0,
-                                bottom: index === visibleBranches.length - 1 && hiddenCount === 0 ? '50%' : 0,
-                                width: 2,
-                                bgcolor: theme.palette.divider,
-                              }}
-                            />
-                            <Box
-                              sx={{
-                                width: 10,
-                                height: 10,
-                                borderRadius: '50%',
-                                bgcolor: ORCHESTRATION_COLOR,
-                                mt: 1.5,
-                                zIndex: 1,
-                              }}
-                            />
-                          </Box>
-                          <Paper variant="outlined" sx={{ p: 1 }}>
-                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                              {branch.params.map(param => (
-                                <Chip
-                                  key={`${branch.key}-${param.key}`}
-                                  label={`$${param.key} = ${param.value}`}
-                                  size="small"
-                                  sx={{ fontFamily: 'monospace', fontSize: '0.64rem' }}
-                                />
+                          const colCount = Math.max(stepCols.length, 2)
+                          const minDiagramWidth = colCount * 180
+
+                          return (
+                            <Box sx={{ minWidth: minDiagramWidth, display: 'flex', flexDirection: 'column', gap: 0.6 }}>
+                              <Box
+                                sx={{
+                                  display: 'grid',
+                                  gridTemplateColumns: `repeat(${colCount}, minmax(160px, 1fr))`,
+                                  gap: 0.6,
+                                }}
+                              >
+                                {stepCols.map((col, idx) => (
+                                  <Paper key={col.key} variant="outlined" sx={{ px: 0.75, py: 0.5, bgcolor: alpha(theme.palette.info.main, 0.06) }}>
+                                    <Typography sx={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'text.secondary', fontWeight: 700 }}>
+                                      Step {idx + 1}
+                                    </Typography>
+                                    <Typography sx={{ fontSize: '0.68rem', fontWeight: 600 }} noWrap>
+                                      {col.title}
+                                    </Typography>
+                                  </Paper>
+                                ))}
+                              </Box>
+
+                              {/* Single iterator start row */}
+                              <Box
+                                sx={{
+                                  display: 'grid',
+                                  gridTemplateColumns: `repeat(${colCount}, minmax(160px, 1fr))`,
+                                  gap: 0.6,
+                                }}
+                              >
+                                <Box sx={{
+                                  px: 1,
+                                  py: 0.65,
+                                  borderRadius: 1,
+                                  border: `1px solid ${alpha(ORCHESTRATION_COLOR, 0.35)}`,
+                                  bgcolor: alpha(ORCHESTRATION_COLOR, 0.1),
+                                }}>
+                                  <Typography sx={{ fontSize: '0.62rem', color: ORCHESTRATION_COLOR, fontWeight: 700, textTransform: 'uppercase' }}>
+                                    Iterator
+                                  </Typography>
+                                  <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
+                                    {iter.iteratorLabel}
+                                  </Typography>
+                                </Box>
+                                {Array.from({ length: colCount - 1 }).map((_, i) => (
+                                  <Box
+                                    key={`iter-empty-${i}`}
+                                    sx={{
+                                      border: `1px dashed ${theme.palette.divider}`,
+                                      borderRadius: 1,
+                                      minHeight: 46,
+                                    }}
+                                  />
+                                ))}
+                              </Box>
+
+                              {/* Branch rows */}
+                              {visibleBranches.map((branch, index) => (
+                                <Box
+                                  key={`${iter.iteratorNodeId}-diagram-${branch.key}-${index}`}
+                                  sx={{
+                                    display: 'grid',
+                                    gridTemplateColumns: `repeat(${colCount}, minmax(160px, 1fr))`,
+                                    gap: 0.6,
+                                  }}
+                                >
+                                  <Box sx={{ border: `1px dashed ${theme.palette.divider}`, borderRadius: 1, minHeight: 46, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                    <Box sx={{ position: 'relative', width: '76%', height: 2, bgcolor: alpha(theme.palette.text.secondary, 0.55), borderRadius: 999 }}>
+                                      <Box
+                                        sx={{
+                                          position: 'absolute',
+                                          right: -1,
+                                          top: '50%',
+                                          transform: 'translateY(-50%)',
+                                          width: 0,
+                                          height: 0,
+                                          borderTop: '5px solid transparent',
+                                          borderBottom: '5px solid transparent',
+                                          borderLeft: `8px solid ${alpha(theme.palette.text.secondary, 0.75)}`,
+                                        }}
+                                      />
+                                    </Box>
+                                  </Box>
+                                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', px: 0.75 }}>
+                                    <Box
+                                      sx={{
+                                        width: '100%',
+                                        px: 0.8,
+                                        py: 0.45,
+                                        borderRadius: 1,
+                                        border: `1px solid ${alpha(theme.palette.secondary.main, 0.35)}`,
+                                        bgcolor: alpha(theme.palette.secondary.main, 0.12),
+                                      }}
+                                    >
+                                      <Typography sx={{ fontSize: '0.58rem', color: 'secondary.main', fontWeight: 700, textTransform: 'uppercase' }}>
+                                        Fork
+                                      </Typography>
+                                      <Typography sx={{ fontFamily: 'monospace', fontSize: '0.67rem', fontWeight: 700 }} noWrap>
+                                        {iter.keyParam}: {branch.key}
+                                      </Typography>
+                                      <Typography sx={{ fontFamily: 'monospace', fontSize: '0.64rem', color: 'text.secondary' }} noWrap>
+                                        {iter.valueParam}: {branch.value}
+                                      </Typography>
+                                    </Box>
+                                  </Box>
+
+                                  {iter.branchSteps.map((step, stepIdx) => (
+                                    <Box
+                                      key={`${branch.key}-${step.id}-${stepIdx}`}
+                                      sx={{
+                                        px: 1,
+                                        py: 0.65,
+                                        borderRadius: 1,
+                                        border: `1px solid ${alpha(step.color, 0.35)}`,
+                                        bgcolor: alpha(step.color, 0.1),
+                                      }}
+                                    >
+                                      <Typography sx={{ fontSize: '0.62rem', color: step.color, fontWeight: 700, textTransform: 'uppercase' }}>
+                                        {CATALOG_MAP[step.type]?.label ?? step.type}
+                                      </Typography>
+                                      <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
+                                        {step.label}
+                                      </Typography>
+                                    </Box>
+                                  ))}
+
+                                  {Array.from({ length: colCount - (2 + iter.branchSteps.length) }).map((_, i) => (
+                                    <Box
+                                      key={`${branch.key}-tail-empty-${i}`}
+                                      sx={{
+                                        border: `1px dashed ${theme.palette.divider}`,
+                                        borderRadius: 1,
+                                        minHeight: 46,
+                                      }}
+                                    />
+                                  ))}
+                                </Box>
                               ))}
+
+                              {/* Single merge/load end row */}
+                              {(iter.mergeStep || iter.postMergeSteps.length > 0) && (
+                                <Box
+                                  sx={{
+                                    display: 'grid',
+                                    gridTemplateColumns: `repeat(${colCount}, minmax(160px, 1fr))`,
+                                    gap: 0.6,
+                                  }}
+                                >
+                                  {Array.from({ length: 2 + iter.branchSteps.length }).map((_, i) => (
+                                    <Box
+                                      key={`pre-merge-empty-${i}`}
+                                      sx={{
+                                        border: `1px dashed ${theme.palette.divider}`,
+                                        borderRadius: 1,
+                                        minHeight: 46,
+                                      }}
+                                    />
+                                  ))}
+
+                                  {iter.mergeStep && (
+                                    <Box
+                                      sx={{
+                                        px: 1,
+                                        py: 0.65,
+                                        borderRadius: 1,
+                                        border: `1px solid ${alpha(iter.mergeStep.color, 0.45)}`,
+                                        bgcolor: alpha(iter.mergeStep.color, 0.16),
+                                      }}
+                                    >
+                                      <Typography sx={{ fontSize: '0.62rem', color: iter.mergeStep.color, fontWeight: 700, textTransform: 'uppercase' }}>
+                                        Aggregate (Merge)
+                                      </Typography>
+                                      <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
+                                        {iter.mergeStep.label}
+                                      </Typography>
+                                    </Box>
+                                  )}
+
+                                  {iter.postMergeSteps.map((step, stepIdx) => (
+                                    <Box
+                                      key={`${iter.iteratorNodeId}-post-${step.id}-${stepIdx}`}
+                                      sx={{
+                                        px: 1,
+                                        py: 0.65,
+                                        borderRadius: 1,
+                                        border: `1px solid ${alpha(step.color, 0.35)}`,
+                                        bgcolor: alpha(step.color, 0.1),
+                                      }}
+                                    >
+                                      <Typography sx={{ fontSize: '0.62rem', color: step.color, fontWeight: 700, textTransform: 'uppercase' }}>
+                                        {CATALOG_MAP[step.type]?.label ?? step.type}
+                                      </Typography>
+                                      <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
+                                        {step.label}
+                                      </Typography>
+                                    </Box>
+                                  ))}
+                                </Box>
+                              )}
                             </Box>
-                          </Paper>
-                        </Box>
-                      ))}
+                          )
+                        })()}
+                      </Box>
                     </Box>
 
                     {hiddenCount > 0 && (
@@ -2153,11 +2304,41 @@ function IteratorForm({ config, onChange, dictionaries, onPreview }: {
 
   const selectedDict = dictionaries.find(d => d.id === Number(config.dictionary_id))
   const selectedKeys: string[] = config.selected_keys ?? []
+  const entryFilters: IteratorEntryFilter[] = (config.entry_filters ?? [])
+    .filter((f: { column?: string; value?: string }) => f?.column && f?.value)
+    .map((f: { column?: string; value?: string }) => ({
+      column: String(f.column).trim(),
+      value: String(f.value).trim(),
+    }))
+  const [pendingFilterColumn, setPendingFilterColumn] = useState('')
+  const [pendingFilterValue, setPendingFilterValue] = useState('')
+  const [isFilterEditorOpen, setIsFilterEditorOpen] = useState(false)
 
-  // If selected_keys is empty, all entries are active; otherwise only listed keys
-  const activeKeys = selectedKeys.length === 0
-    ? (selectedDict?.entries.map(e => e.key) ?? [])
-    : selectedKeys
+  const availableExtraColumns = useMemo(() => {
+    if (!selectedDict) return [] as string[]
+    const columns = new Set<string>(selectedDict.extra_columns ?? [])
+    selectedDict.entries.forEach(entry => {
+      Object.keys(entry.extra ?? {}).forEach(col => columns.add(col))
+    })
+    return Array.from(columns).sort((a, b) => a.localeCompare(b))
+  }, [selectedDict])
+
+  const filterValuesByColumn = useMemo(() => {
+    const map: Record<string, string[]> = {}
+    if (!selectedDict) return map
+    for (const column of availableExtraColumns) {
+      const values = new Set<string>()
+      selectedDict.entries.forEach(entry => {
+        const value = String((entry.extra ?? {})[column] ?? '').trim()
+        if (value) values.add(value)
+      })
+      map[column] = Array.from(values).sort((a, b) => a.localeCompare(b))
+    }
+    return map
+  }, [selectedDict, availableExtraColumns])
+
+  const activeEntries = getIteratorActiveEntries(selectedDict, selectedKeys, entryFilters)
+  const activeKeys = activeEntries.map(e => e.key)
 
   const toggleEntry = (key: string) => {
     if (selectedKeys.length === 0) {
@@ -2175,6 +2356,22 @@ function IteratorForm({ config, onChange, dictionaries, onPreview }: {
   }
 
   const selectAll = () => onChange({ selected_keys: [] })
+  const addEntryFilter = () => {
+    const column = pendingFilterColumn.trim()
+    const value = pendingFilterValue.trim()
+    if (!column || !value) return
+    const exists = entryFilters.some(f => f.column === column && f.value === value)
+    if (exists) return
+    onChange({ entry_filters: [...entryFilters, { column, value }] })
+    setPendingFilterColumn('')
+    setPendingFilterValue('')
+    setIsFilterEditorOpen(false)
+  }
+
+  const removeEntryFilter = (idx: number) => {
+    const next = entryFilters.filter((_, i) => i !== idx)
+    onChange({ entry_filters: next })
+  }
 
   const handlePreview = () => {
     try {
@@ -2193,7 +2390,10 @@ function IteratorForm({ config, onChange, dictionaries, onPreview }: {
           onChange={e => {
             const dictId = Number(e.target.value)
             const dict = dictionaries.find(d => d.id === dictId)
-            onChange({ dictionary_id: dictId || null, selected_keys: [], dict_name: dict?.name ?? null })
+            onChange({ dictionary_id: dictId || null, selected_keys: [], entry_filters: [], dict_name: dict?.name ?? null })
+            setPendingFilterColumn('')
+            setPendingFilterValue('')
+            setIsFilterEditorOpen(false)
           }}>
           <MenuItem value=""><em>None</em></MenuItem>
           {dictionaries.map(d => (
@@ -2232,6 +2432,102 @@ function IteratorForm({ config, onChange, dictionaries, onPreview }: {
       {/* Entry selection */}
       {selectedDict ? (
         <Box>
+          {availableExtraColumns.length > 0 && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75, mb: 0.8 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Typography variant="caption" color="text.secondary"
+                  sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.6rem', fontWeight: 700 }}>
+                  Entry filters {entryFilters.length > 0 ? `(${entryFilters.length})` : ''}
+                </Typography>
+                {!isFilterEditorOpen ? (
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={() => setIsFilterEditorOpen(true)}
+                    sx={{ fontSize: '0.66rem', minWidth: 0, px: 0.75 }}
+                  >
+                    Add filter
+                  </Button>
+                ) : (
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={() => {
+                      setIsFilterEditorOpen(false)
+                      setPendingFilterColumn('')
+                      setPendingFilterValue('')
+                    }}
+                    sx={{ fontSize: '0.66rem', minWidth: 0, px: 0.75 }}
+                  >
+                    Cancel
+                  </Button>
+                )}
+              </Box>
+
+              {isFilterEditorOpen && (
+                <Box sx={{ display: 'flex', gap: 0.75, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <FormControl size="small" sx={{ minWidth: 140, flex: '0 0 160px' }}>
+                    <InputLabel>Column</InputLabel>
+                    <Select
+                      label="Column"
+                      value={pendingFilterColumn}
+                      onChange={e => {
+                        const col = String(e.target.value || '')
+                        setPendingFilterColumn(col)
+                        setPendingFilterValue('')
+                      }}
+                    >
+                      <MenuItem value=""><em>Select</em></MenuItem>
+                      {availableExtraColumns.map(col => (
+                        <MenuItem key={col} value={col}>{col}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+
+                  <Autocomplete
+                    size="small"
+                    freeSolo
+                    sx={{ minWidth: 180, flex: '1 1 240px' }}
+                    value={pendingFilterValue}
+                    options={pendingFilterColumn ? (filterValuesByColumn[pendingFilterColumn] ?? []) : []}
+                    onInputChange={(_, value) => setPendingFilterValue(value)}
+                    renderInput={(params) => <TextField {...params} label="Value" placeholder="Type value" />}
+                  />
+
+                  <Button size="small" variant="outlined" onClick={addEntryFilter}>
+                    Add
+                  </Button>
+                </Box>
+              )}
+
+              {entryFilters.length > 0 && (
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                  {entryFilters.map((filter, idx) => (
+                    <Chip
+                      key={`${filter.column}-${filter.value}-${idx}`}
+                      size="small"
+                      label={`${filter.column}: ${filter.value}`}
+                      onDelete={() => removeEntryFilter(idx)}
+                      sx={{ fontFamily: 'monospace', fontSize: '0.65rem', height: 20 }}
+                    />
+                  ))}
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label="Clear"
+                    onClick={() => {
+                      onChange({ entry_filters: [] })
+                      setIsFilterEditorOpen(false)
+                      setPendingFilterColumn('')
+                      setPendingFilterValue('')
+                    }}
+                    sx={{ fontSize: '0.62rem', height: 20, cursor: 'pointer' }}
+                  />
+                </Box>
+              )}
+            </Box>
+          )}
+
           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5 }}>
             <Typography variant="caption" color="text.secondary"
               sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.6rem', fontWeight: 700 }}>
@@ -2247,14 +2543,24 @@ function IteratorForm({ config, onChange, dictionaries, onPreview }: {
             border: '1px solid', borderColor: 'divider', borderRadius: 1,
             maxHeight: 200, overflowY: 'auto',
           }}>
-            {selectedDict.entries.map(entry => {
+            {activeEntries.map(entry => {
               const checked = selectedKeys.length === 0 || selectedKeys.includes(entry.key)
+              const extra = entry.extra ?? {}
+              const appTypeColumn = Object.keys(extra).find(col => {
+                const normalized = col.toLowerCase()
+                return normalized === 'app_type' || normalized === 'type'
+              })
+              const appTypeValue = appTypeColumn ? String(extra[appTypeColumn] ?? '').trim() : ''
+              const extraPairs = availableExtraColumns
+                .filter(col => col !== appTypeColumn)
+                .map(col => ({ col, val: String(extra[col] ?? '').trim() }))
+                .filter(item => item.val.length > 0)
               return (
                 <Box
                   key={entry.id}
                   onClick={() => toggleEntry(entry.key)}
                   sx={{
-                    display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.4,
+                    display: 'flex', alignItems: 'flex-start', gap: 1, px: 1, py: 0.5,
                     cursor: 'pointer', borderBottom: '1px solid', borderColor: 'divider',
                     '&:last-child': { borderBottom: 'none' },
                     '&:hover': { bgcolor: 'action.hover' },
@@ -2268,18 +2574,51 @@ function IteratorForm({ config, onChange, dictionaries, onPreview }: {
                     icon={<CheckBoxOutlineBlank sx={{ fontSize: 16 }} />}
                     checkedIcon={<CheckBox sx={{ fontSize: 16 }} />}
                   />
-                  <Typography sx={{ fontFamily: 'monospace', fontSize: '0.72rem', fontWeight: 600, minWidth: 80 }}>
-                    {entry.key}
-                  </Typography>
-                  <Typography sx={{ fontSize: '0.68rem', color: 'text.secondary' }}>
-                    {entry.value}
-                  </Typography>
+                  <Box sx={{ minWidth: 0, flex: 1, display: 'flex', alignItems: 'center', gap: 0.75, overflow: 'hidden' }}>
+                    <Typography sx={{ fontFamily: 'monospace', fontSize: '0.72rem', fontWeight: 600, flexShrink: 0 }}>
+                      {entry.key}
+                    </Typography>
+                    <Typography sx={{ fontSize: '0.68rem', color: 'text.secondary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                      {entry.value}
+                    </Typography>
+                    {appTypeValue && (
+                      <Chip
+                        size="small"
+                        label={appTypeValue}
+                        sx={{ fontSize: '0.58rem', height: 17, fontFamily: 'monospace', flexShrink: 0 }}
+                        color="secondary"
+                        variant="outlined"
+                      />
+                    )}
+                    {extraPairs.slice(0, 2).map(item => (
+                      <Chip
+                        key={`${entry.id}-${item.col}`}
+                        size="small"
+                        label={`${item.col}: ${item.val}`}
+                        sx={{ fontSize: '0.58rem', height: 17, fontFamily: 'monospace', flexShrink: 0 }}
+                        variant="outlined"
+                      />
+                    ))}
+                    {extraPairs.length > 2 && (
+                      <Chip
+                        size="small"
+                        label={`+${extraPairs.length - 2}`}
+                        sx={{ fontSize: '0.58rem', height: 17, flexShrink: 0 }}
+                        variant="outlined"
+                      />
+                    )}
+                  </Box>
                 </Box>
               )
             })}
             {selectedDict.entries.length === 0 && (
               <Box sx={{ p: 2, textAlign: 'center' }}>
                 <Typography variant="caption" color="text.disabled">No entries in this dictionary</Typography>
+              </Box>
+            )}
+            {selectedDict.entries.length > 0 && activeEntries.length === 0 && (
+              <Box sx={{ p: 2, textAlign: 'center' }}>
+                <Typography variant="caption" color="text.disabled">No entries match current filters</Typography>
               </Box>
             )}
           </Box>
@@ -2384,12 +2723,15 @@ function PropertiesPanel({
     if (node.data.nodeType === 'iterator') {
       const dict = dictionaries.find(d => d.id === Number(node.data.config?.dictionary_id))
       const selectedKeys: string[] = node.data.config?.selected_keys ?? []
-      const activeKeys = selectedKeys.length > 0
-        ? selectedKeys
-        : (dict?.entries.map(e => e.key) ?? [])
+      const entryFilters: IteratorEntryFilter[] = (node.data.config?.entry_filters ?? [])
+        .filter((f: { column?: string; value?: string }) => f?.column && f?.value)
+      const activeKeys = getIteratorActiveEntries(dict, selectedKeys, entryFilters).map(e => e.key)
       const keyParam = node.data.config?.key_param ?? 'app_id'
       const valueParam = node.data.config?.value_param ?? 'app_name'
       inputs.push(`Dictionary: ${dict?.name ?? 'not selected'}`)
+      if (entryFilters.length > 0) {
+        inputs.push(`Filters: ${entryFilters.map(f => `${f.column}=${f.value}`).join(' ; ')}`)
+      }
       outputs.push(`Branches: ${activeKeys.length} (${activeKeys.slice(0, 6).join(', ')}${activeKeys.length > 6 ? ' ...' : ''})`)
       outputs.push(`Params emitted: $${keyParam}, $${valueParam}`)
     }
@@ -2408,14 +2750,21 @@ function PropertiesPanel({
       const iteratorNode = findUpstreamIterator()
       const dict = iteratorNode ? dictionaries.find(d => d.id === Number(iteratorNode.data.config?.dictionary_id)) : undefined
       const selectedKeys: string[] = iteratorNode?.data.config?.selected_keys ?? []
-      const activeKeys = selectedKeys.length > 0
-        ? selectedKeys
-        : (dict?.entries.map(e => e.key) ?? [])
+      const entryFilters: IteratorEntryFilter[] = (iteratorNode?.data.config?.entry_filters ?? [])
+        .filter((f: { column?: string; value?: string }) => f?.column && f?.value)
+      const activeKeys = getIteratorActiveEntries(dict, selectedKeys, entryFilters).map(e => e.key)
       const basePath = `data/pipeline/parquet/{business_date}/${pipelineName || 'pipeline'}`
+      inputs.push(`Source root: ${basePath}`)
       if (activeKeys.length > 0) {
-        inputs.push(`Source dirs: ${activeKeys.slice(0, 4).map(k => `${basePath}/${k}`).join(' ; ')}${activeKeys.length > 4 ? ' ; ...' : ''}`)
+        const previewKeys = activeKeys.slice(0, 6)
+        inputs.push('Source dirs:')
+        previewKeys.forEach(k => inputs.push(`• ${k}`))
+        if (activeKeys.length > previewKeys.length) {
+          inputs.push(`• +${activeKeys.length - previewKeys.length} more`)
+        }
       } else {
-        inputs.push(`Source dirs: ${basePath}/{app_id}`)
+        inputs.push('Source dirs:')
+        inputs.push('• {app_id}')
       }
     }
 
@@ -3191,10 +3540,16 @@ export default function PipelineEditor() {
   const [warnNoBizDate, setWarnNoBizDate] = useState(false)
   const [executionPlanOpen, setExecutionPlanOpen] = useState(false)
   const [runScope, setRunScope] = useState<'full' | 'extract' | 'load'>('full')
+  const lineRenderStyle = useThemeStore(s => s.lineRenderStyle)
   const checklistIncomplete = useMemo(
     () => setupChecklist.items.filter(i => !i.ok),
     [setupChecklist],
   )
+
+  useEffect(() => {
+    const nextEdgeType = EDGE_TYPE_BY_STYLE[lineRenderStyle]
+    setEdges(eds => eds.map(edge => ({ ...edge, type: nextEdgeType })))
+  }, [lineRenderStyle, setEdges])
 
   function buildPipelineRequestPayload(name: string, category: string, status: Pipeline['status']) {
     const dwNode = nodes.find(n => n.data.nodeType === 'dw_extract')
@@ -3330,10 +3685,11 @@ export default function PipelineEditor() {
   const onConnect = useCallback((connection: RFConnection) => {
     setEdges(eds => addEdge({
       ...connection,
+      type: EDGE_TYPE_BY_STYLE[lineRenderStyle],
       animated: true,
       markerEnd: { type: MarkerType.ArrowClosed },
     }, eds))
-  }, [setEdges])
+  }, [lineRenderStyle, setEdges])
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault()
@@ -3435,9 +3791,9 @@ export default function PipelineEditor() {
     if (!dict) throw new Error('Select a dictionary before previewing')
 
     const selectedKeys: string[] = iterCfg.selected_keys ?? []
-    const activeEntries = dict.entries.filter(
-      e => selectedKeys.length === 0 || selectedKeys.includes(e.key)
-    )
+    const entryFilters: IteratorEntryFilter[] = (iterCfg.entry_filters ?? [])
+      .filter((f: { column?: string; value?: string }) => f?.column && f?.value)
+    const activeEntries = getIteratorActiveEntries(dict, selectedKeys, entryFilters)
     if (activeEntries.length === 0) throw new Error('No iterator entries selected')
 
     const keyParam = iterCfg.key_param ?? 'app_id'
@@ -3565,19 +3921,20 @@ export default function PipelineEditor() {
       const iterCfg = iterNode.data.config ?? {}
       const dict = dictionaries.find(d => d.id === Number(iterCfg.dictionary_id))
       const selectedKeys: string[] = iterCfg.selected_keys ?? []
+      const entryFilters: IteratorEntryFilter[] = (iterCfg.entry_filters ?? [])
+        .filter((f: { column?: string; value?: string }) => f?.column && f?.value)
       const keyParam = iterCfg.key_param ?? 'app_id'
       const valueParam = iterCfg.value_param ?? 'app_name'
       const iterWarnings: string[] = []
       const branchSteps: IteratorPreviewStep[] = []
+      const postMergeSteps: IteratorPreviewStep[] = []
       let mergeStep: IteratorPreviewStep | undefined
 
       if (!dict) {
         iterWarnings.push('Dictionary is not selected.')
       }
 
-      const activeEntries = (dict?.entries ?? []).filter(
-        e => selectedKeys.length === 0 || selectedKeys.includes(e.key)
-      )
+      const activeEntries = getIteratorActiveEntries(dict, selectedKeys, entryFilters)
 
       if (dict && activeEntries.length === 0) {
         iterWarnings.push('No iterator entries selected.')
@@ -3620,6 +3977,35 @@ export default function PipelineEditor() {
 
         if (nextNode.data.nodeType === 'aggregate') {
           mergeStep = step
+          branchVisited.add(nextNode.id)
+
+          // Continue from aggregate to capture the single downstream path (typically load).
+          let mergeCurrent: Node<PipelineNodeData> | undefined = nextNode
+          while (mergeCurrent) {
+            const mergeNextEdges = outgoing.get(mergeCurrent.id) ?? []
+            if (mergeNextEdges.length === 0) break
+            if (mergeNextEdges.length > 1) {
+              iterWarnings.push(
+                `Merge node "${mergeCurrent.data.label || mergeCurrent.id}" has ${mergeNextEdges.length} outgoing paths. Diagram follows the first post-merge path.`,
+              )
+            }
+            const mergeNextNode = nodeById.get(mergeNextEdges[0].target)
+            if (!mergeNextNode) break
+            if (branchVisited.has(mergeNextNode.id)) {
+              iterWarnings.push('Loop detected in post-merge path. Diagram stops at loop start.')
+              break
+            }
+
+            const mergeCat = CATALOG_MAP[mergeNextNode.data.nodeType]
+            postMergeSteps.push({
+              id: mergeNextNode.id,
+              label: mergeNextNode.data.label || mergeCat?.label || mergeNextNode.data.nodeType,
+              type: mergeNextNode.data.nodeType,
+              color: mergeCat?.color ?? '#666',
+            })
+            branchVisited.add(mergeNextNode.id)
+            mergeCurrent = mergeNextNode
+          }
           break
         }
 
@@ -3638,6 +4024,7 @@ export default function PipelineEditor() {
         branches,
         branchSteps,
         ...(mergeStep ? { mergeStep } : {}),
+        postMergeSteps,
         warnings: iterWarnings,
       }
     }
@@ -3647,9 +4034,14 @@ export default function PipelineEditor() {
       const steps: IteratorPreviewStep[] = []
       const iteratorPreviews: ExecutionPlanForkPreview[] = []
       const visited = new Set<string>()
+      let loopDetected = false
 
       let current: Node<PipelineNodeData> | undefined = root
-      while (current && !visited.has(current.id)) {
+      while (current) {
+        if (visited.has(current.id)) {
+          loopDetected = true
+          break
+        }
         visited.add(current.id)
         seenOverall.add(current.id)
 
@@ -3683,7 +4075,7 @@ export default function PipelineEditor() {
         current = nextNode
       }
 
-      if (current && visited.has(current.id)) {
+      if (loopDetected) {
         laneWarnings.push('This path loops back to an earlier step. The preview stops where the loop begins.')
       }
 
@@ -3868,8 +4260,8 @@ export default function PipelineEditor() {
             sx={{ fontSize: '0.76rem', height: 32 }}
           >
             <MenuItem value="full">Run Full Pipeline</MenuItem>
-            <MenuItem value="extract">Run Extract Part</MenuItem>
-            <MenuItem value="load">Run Load Part</MenuItem>
+            <MenuItem value="extract">Run Extract</MenuItem>
+            <MenuItem value="load">Run Load</MenuItem>
           </Select>
         </FormControl>
         <Button
@@ -4025,6 +4417,12 @@ export default function PipelineEditor() {
             nodeTypes={nodeTypes}
             onInit={instance => { rfRef.current = instance }}
             onMoveEnd={(_, vp) => setViewport(vp)}
+            defaultEdgeOptions={{
+              type: EDGE_TYPE_BY_STYLE[lineRenderStyle],
+              animated: true,
+              markerEnd: { type: MarkerType.ArrowClosed },
+            }}
+            connectionLineType={CONNECTION_LINE_TYPE_BY_STYLE[lineRenderStyle]}
             deleteKeyCode="Delete"
             style={{ background: theme.palette.background.default }}
           >
@@ -4258,9 +4656,9 @@ export default function PipelineEditor() {
           // Use first active entry as sample values for preview
           const dict = dictionaries.find(d => d.id === iterCfg.dictionary_id)
           const selectedKeys: string[] = iterCfg.selected_keys ?? []
-          const activeEntries = dict?.entries.filter(
-            e => selectedKeys.length === 0 || selectedKeys.includes(e.key)
-          ) ?? []
+          const entryFilters: IteratorEntryFilter[] = (iterCfg.entry_filters ?? [])
+            .filter((f: { column?: string; value?: string }) => f?.column && f?.value)
+          const activeEntries = getIteratorActiveEntries(dict, selectedKeys, entryFilters)
           const sampleEntry = activeEntries[0]
           const ownKeys = new Set(ownParams.map(p => p.key))
           if (sampleEntry) {
