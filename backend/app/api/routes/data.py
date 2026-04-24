@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 
 _EXPORT_JOBS: dict[str, dict] = {}
 
+_ALLOWED_SQL_PREFIXES = (
+    "SELECT", "SHOW", "DESCRIBE", "EXPLAIN",
+    "DROP", "CREATE", "ALTER", "INSERT", "UPDATE", "DELETE",
+    "TRUNCATE", "WITH", "CACHE", "UNCACHE", "REFRESH", "ANALYZE",
+    "USE", "SET", "RESET",
+)
+
+
+def _check_sql_allowed(sql: str) -> None:
+    """Raise 400 if the SQL doesn't start with a recognised statement keyword."""
+    stripped = sql.strip().upper()
+    if not any(stripped.startswith(kw) for kw in _ALLOWED_SQL_PREFIXES):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Statement type not permitted. Allowed prefixes: {', '.join(_ALLOWED_SQL_PREFIXES)}",
+        )
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -320,13 +337,7 @@ async def preview_file_table(
 
 @router.post("/query", response_model=QueryResult)
 async def execute_query(body: QueryRequest):
-    # Basic SQL injection prevention — whitelist-style check for SELECT only
-    stripped = body.sql.strip().upper()
-    if not stripped.startswith("SELECT") and not stripped.startswith("SHOW") and not stripped.startswith("DESCRIBE"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only SELECT, SHOW, and DESCRIBE statements are allowed",
-        )
+    _check_sql_allowed(body.sql)
     try:
         result = await spark_service.execute_query(body.sql, body.limit, body.offset, database=body.database)
         return QueryResult(**result)
@@ -355,12 +366,7 @@ async def execute_query(body: QueryRequest):
 
 @router.post("/query/bulk", response_model=QueryResult)
 async def execute_query_bulk(body: BulkQueryRequest):
-    stripped = body.sql.strip().upper()
-    if not stripped.startswith("SELECT") and not stripped.startswith("SHOW") and not stripped.startswith("DESCRIBE"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only SELECT, SHOW, and DESCRIBE statements are allowed",
-        )
+    _check_sql_allowed(body.sql)
     try:
         result = await spark_service.execute_query_bulk(body.sql, body.max_rows, database=body.database)
         return QueryResult(**result)
@@ -389,12 +395,7 @@ async def execute_query_bulk(body: BulkQueryRequest):
 
 @router.post("/query/export")
 async def export_query_file(body: QueryExportRequest):
-    stripped = body.sql.strip().upper()
-    if not stripped.startswith("SELECT") and not stripped.startswith("SHOW") and not stripped.startswith("DESCRIBE"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only SELECT, SHOW, and DESCRIBE statements are allowed",
-        )
+    _check_sql_allowed(body.sql)
     try:
         result = await spark_service.execute_query_bulk(body.sql, body.max_rows, database=body.database)
         columns = result.get("columns", [])
@@ -436,12 +437,7 @@ async def export_query_file(body: QueryExportRequest):
 
 @router.post("/query/export/jobs")
 async def create_query_export_job(body: QueryExportRequest):
-    stripped = body.sql.strip().upper()
-    if not stripped.startswith("SELECT") and not stripped.startswith("SHOW") and not stripped.startswith("DESCRIBE"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only SELECT, SHOW, and DESCRIBE statements are allowed",
-        )
+    _check_sql_allowed(body.sql)
 
     job_id = uuid.uuid4().hex
     now = _utc_now_iso()

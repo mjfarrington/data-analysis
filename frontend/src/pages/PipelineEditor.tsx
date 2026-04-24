@@ -19,7 +19,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions,
   ToggleButton, ToggleButtonGroup, Alert, Collapse,
   Paper, InputAdornment, Table, TableHead, TableRow,
-  TableCell, TableBody, TableContainer, LinearProgress,
+  TableCell, TableBody, TableContainer,
   Menu,
 } from '@mui/material'
 import {
@@ -1675,6 +1675,8 @@ interface ExecutionPlanForkPreview {
   valueParam: string
   totalBranches: number
   branches: IteratorPreviewBranch[]
+  branchSteps: IteratorPreviewStep[]
+  mergeStep?: IteratorPreviewStep
   warnings: string[]
 }
 
@@ -1788,6 +1790,87 @@ function ExecutionPlanDialog({
                         {warning}
                       </Alert>
                     ))}
+
+                    <Box sx={{ mt: 0.8 }}>
+                      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                        Fork Diagram
+                      </Typography>
+                      <Box sx={{ mt: 0.5, display: 'flex', flexDirection: 'column', gap: 0.7 }}>
+                        {visibleBranches.map((branch, index) => (
+                          <Box key={`${iter.iteratorNodeId}-diagram-${branch.key}-${index}`} sx={{ display: 'flex', alignItems: 'center', gap: 0.55, flexWrap: 'wrap' }}>
+                            <Box
+                              sx={{
+                                px: 1,
+                                py: 0.65,
+                                borderRadius: 1,
+                                border: `1px solid ${alpha(ORCHESTRATION_COLOR, 0.35)}`,
+                                bgcolor: alpha(ORCHESTRATION_COLOR, 0.1),
+                                minWidth: 96,
+                              }}
+                            >
+                              <Typography sx={{ fontSize: '0.62rem', color: ORCHESTRATION_COLOR, fontWeight: 700, textTransform: 'uppercase' }}>
+                                Iterator
+                              </Typography>
+                              <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
+                                {iter.iteratorLabel}
+                              </Typography>
+                            </Box>
+                            <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>
+                            <Chip
+                              size="small"
+                              label={`${branch.key}`}
+                              sx={{ fontFamily: 'monospace', fontSize: '0.66rem', height: 22 }}
+                              color="secondary"
+                            />
+                            {iter.branchSteps.map(step => (
+                              <>
+                                <Typography key={`${branch.key}-${step.id}-arrow`} sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>
+                                <Box
+                                  key={`${branch.key}-${step.id}`}
+                                  sx={{
+                                    px: 1,
+                                    py: 0.65,
+                                    borderRadius: 1,
+                                    border: `1px solid ${alpha(step.color, 0.35)}`,
+                                    bgcolor: alpha(step.color, 0.1),
+                                    minWidth: 96,
+                                  }}
+                                >
+                                  <Typography sx={{ fontSize: '0.62rem', color: step.color, fontWeight: 700, textTransform: 'uppercase' }}>
+                                    {CATALOG_MAP[step.type]?.label ?? step.type}
+                                  </Typography>
+                                  <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
+                                    {step.label}
+                                  </Typography>
+                                </Box>
+                              </>
+                            ))}
+                            {iter.mergeStep && (
+                              <>
+                                <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>
+                                <Box
+                                  sx={{
+                                    px: 1,
+                                    py: 0.65,
+                                    borderRadius: 1,
+                                    border: `1px solid ${alpha(iter.mergeStep.color, 0.45)}`,
+                                    bgcolor: alpha(iter.mergeStep.color, 0.16),
+                                    minWidth: 96,
+                                  }}
+                                >
+                                  <Typography sx={{ fontSize: '0.62rem', color: iter.mergeStep.color, fontWeight: 700, textTransform: 'uppercase' }}>
+                                    Aggregate (Merge)
+                                  </Typography>
+                                  <Typography sx={{ fontSize: '0.7rem', fontWeight: 600 }} noWrap>
+                                    {iter.mergeStep.label}
+                                  </Typography>
+                                </Box>
+                              </>
+                            )}
+                          </Box>
+                        ))}
+                      </Box>
+                    </Box>
 
                     <Box sx={{ mt: 0.8, display: 'flex', flexDirection: 'column', gap: 0.8 }}>
                       {visibleBranches.map((branch, index) => (
@@ -2902,6 +2985,7 @@ export default function PipelineEditor() {
   const [pipelineCategory, setPipelineCategory] = useState(DEFAULT_PIPELINE_CATEGORY)
   const [pipelineStatus, setPipelineStatus] = useState<Pipeline['status']>(DEFAULT_PIPELINE_STATUS)
   const [editMetaOpen, setEditMetaOpen] = useState(false)
+  const [metaEditorMode, setMetaEditorMode] = useState<'edit' | 'clone'>('edit')
   const [metaDraftName, setMetaDraftName] = useState('')
   const [metaDraftCategory, setMetaDraftCategory] = useState(DEFAULT_PIPELINE_CATEGORY)
   const [metaDraftStatus, setMetaDraftStatus] = useState<Pipeline['status']>(DEFAULT_PIPELINE_STATUS)
@@ -3107,8 +3191,83 @@ export default function PipelineEditor() {
   const [warnNoBizDate, setWarnNoBizDate] = useState(false)
   const [executionPlanOpen, setExecutionPlanOpen] = useState(false)
   const [runScope, setRunScope] = useState<'full' | 'extract' | 'load'>('full')
-  const [checklistVisible, setChecklistVisible] = useState(true)
-  const [checklistExpanded, setChecklistExpanded] = useState(false)
+  const checklistIncomplete = useMemo(
+    () => setupChecklist.items.filter(i => !i.ok),
+    [setupChecklist],
+  )
+
+  function buildPipelineRequestPayload(name: string, category: string, status: Pipeline['status']) {
+    const dwNode = nodes.find(n => n.data.nodeType === 'dw_extract')
+    const loadNode =
+      nodes.find(n => n.data.nodeType === 'load_sql')
+      ?? nodes.find(n => n.data.nodeType === 'load_parquet')
+
+    // Topological sort of canvas nodes → determine execution order
+    const adj: Record<string, string[]> = {}
+    const inDeg: Record<string, number> = {}
+    for (const n of nodes) { adj[n.id] = []; inDeg[n.id] = 0 }
+    for (const e of edges) { adj[e.source].push(e.target); inDeg[e.target]++ }
+    const queue = nodes.filter(n => inDeg[n.id] === 0).map(n => n.id)
+    const order: string[] = []
+    while (queue.length > 0) {
+      const cur = queue.shift()!
+      order.push(cur)
+      for (const next of adj[cur] ?? []) { if (--inDeg[next] === 0) queue.push(next) }
+    }
+    const TRANSFORM_TYPES = ['filter', 'join', 'sort', 'lookup', 'sql_transform', 'aggregate', 'notebook_transform']
+    const transforms_pipeline = order
+      .map(nid => nodes.find(n => n.id === nid)!)
+      .filter(n => n && TRANSFORM_TYPES.includes(n.data.nodeType))
+      .map(n => ({ node_id: n.id, node_type: n.data.nodeType, config: n.data.config }))
+
+    const jdbcNode = nodes.find(n => n.data.nodeType === 'jdbc_extract')
+
+    const extract_config = dwNode ? {
+      source_type: 'datawarehouse',
+      dw_connection_id: dwNode.data.config.connection_id,
+      jdbc_sql_file_id: dwNode.data.config.sql_file_id,
+      jdbc_date_var_format: dwNode.data.config.date_format,
+      jdbc_date_range_mode: dwNode.data.config.date_range_mode,
+      jdbc_date_range_from: dwNode.data.config.date_from,
+      jdbc_date_range_to: dwNode.data.config.date_to,
+      output_format: dwNode.data.config.output_format,
+    } : jdbcNode ? {
+      source_type: 'jdbc',
+      jdbc_connection_id: jdbcNode.data.config.connection_id,
+      jdbc_sql: jdbcNode.data.config.sql || undefined,
+      jdbc_sql_file_id: jdbcNode.data.config.sql_file_id || undefined,
+      jdbc_date_var_format: jdbcNode.data.config.date_format,
+    } : undefined
+
+    const load_config = loadNode ? {
+      target: loadNode.data.nodeType === 'load_parquet' ? 'parquet' : 'spark_table',
+      ...loadNode.data.config,
+      ...(loadNode.data.nodeType === 'load_sql'
+        ? {
+            namespace_db:
+              (loadNode.data.config.namespace_db ?? loadNode.data.config.database ?? '').trim()
+              || deriveSparkDatabaseName(execContext?.business_date),
+          }
+        : {}),
+    } : undefined
+
+    return {
+      name,
+      category,
+      status,
+      canvas_config: {
+        nodes: nodes.map(n => ({
+          id: n.id, type: n.type, position: n.position,
+          data: n.data,
+        })),
+        edges: edges.map(e => ({ id: e.id, source: e.source, target: e.target })),
+        viewport,
+      },
+      ...(extract_config && { extract_config }),
+      ...(load_config && { load_config }),
+      transform_config: { transforms_pipeline },
+    }
+  }
 
   const runMut = useMutation({
     mutationFn: (scope: 'full' | 'extract' | 'load') => pipelinesApi.run(Number(id), { run_scope: scope }),
@@ -3137,80 +3296,32 @@ export default function PipelineEditor() {
 
   const saveMut = useMutation({
     mutationFn: () => {
-      const dwNode = nodes.find(n => n.data.nodeType === 'dw_extract')
-      const loadNode =
-        nodes.find(n => n.data.nodeType === 'load_sql')
-        ?? nodes.find(n => n.data.nodeType === 'load_parquet')
-
-      // Topological sort of canvas nodes → determine execution order
-      const adj: Record<string, string[]> = {}
-      const inDeg: Record<string, number> = {}
-      for (const n of nodes) { adj[n.id] = []; inDeg[n.id] = 0 }
-      for (const e of edges) { adj[e.source].push(e.target); inDeg[e.target]++ }
-      const queue = nodes.filter(n => inDeg[n.id] === 0).map(n => n.id)
-      const order: string[] = []
-      while (queue.length > 0) {
-        const cur = queue.shift()!
-        order.push(cur)
-        for (const next of adj[cur] ?? []) { if (--inDeg[next] === 0) queue.push(next) }
-      }
-      const TRANSFORM_TYPES = ['filter', 'join', 'sort', 'lookup', 'sql_transform', 'aggregate', 'notebook_transform']
-      const transforms_pipeline = order
-        .map(nid => nodes.find(n => n.id === nid)!)
-        .filter(n => n && TRANSFORM_TYPES.includes(n.data.nodeType))
-        .map(n => ({ node_id: n.id, node_type: n.data.nodeType, config: n.data.config }))
-
-      const jdbcNode = nodes.find(n => n.data.nodeType === 'jdbc_extract')
-
-      const extract_config = dwNode ? {
-        source_type: 'datawarehouse',
-        dw_connection_id: dwNode.data.config.connection_id,
-        jdbc_sql_file_id: dwNode.data.config.sql_file_id,
-        jdbc_date_var_format: dwNode.data.config.date_format,
-        jdbc_date_range_mode: dwNode.data.config.date_range_mode,
-        jdbc_date_range_from: dwNode.data.config.date_from,
-        jdbc_date_range_to:   dwNode.data.config.date_to,
-        output_format: dwNode.data.config.output_format,
-      } : jdbcNode ? {
-        source_type: 'jdbc',
-        jdbc_connection_id: jdbcNode.data.config.connection_id,
-        jdbc_sql: jdbcNode.data.config.sql || undefined,
-        jdbc_sql_file_id: jdbcNode.data.config.sql_file_id || undefined,
-        jdbc_date_var_format: jdbcNode.data.config.date_format,
-      } : undefined
-
-      const load_config = loadNode ? {
-        target: loadNode.data.nodeType === 'load_parquet' ? 'parquet' : 'spark_table',
-        ...loadNode.data.config,
-        ...(loadNode.data.nodeType === 'load_sql'
-          ? {
-              namespace_db:
-                (loadNode.data.config.namespace_db ?? loadNode.data.config.database ?? '').trim()
-                || deriveSparkDatabaseName(execContext?.business_date),
-            }
-          : {}),
-      } : undefined
-
-      return pipelinesApi.update(Number(id), {
-        name: pipelineName,
-        category: pipelineCategory.trim() || DEFAULT_PIPELINE_CATEGORY,
-        status: pipelineStatus,
-        canvas_config: {
-          nodes: nodes.map(n => ({
-            id: n.id, type: n.type, position: n.position,
-            data: n.data,
-          })),
-          edges: edges.map(e => ({ id: e.id, source: e.source, target: e.target })),
-          viewport,
-        },
-        ...(extract_config && { extract_config }),
-        ...(load_config && { load_config }),
-        transform_config: { transforms_pipeline },
-      })
+      const payload = buildPipelineRequestPayload(
+        pipelineName,
+        pipelineCategory.trim() || DEFAULT_PIPELINE_CATEGORY,
+        pipelineStatus,
+      )
+      return pipelinesApi.update(Number(id), payload)
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['pipelines'] })
       qc.invalidateQueries({ queryKey: ['pipeline', id] })
+    },
+  })
+
+  const cloneMut = useMutation({
+    mutationFn: () => {
+      const payload = buildPipelineRequestPayload(
+        metaDraftName.trim(),
+        normalizePipelineCategory(metaDraftCategory),
+        metaDraftStatus,
+      )
+      return pipelinesApi.create(payload)
+    },
+    onSuccess: (created) => {
+      qc.invalidateQueries({ queryKey: ['pipelines'] })
+      closeMetaEditor()
+      navigate(`/pipelines/${created.id}/edit`)
     },
   })
 
@@ -3457,6 +3568,8 @@ export default function PipelineEditor() {
       const keyParam = iterCfg.key_param ?? 'app_id'
       const valueParam = iterCfg.value_param ?? 'app_name'
       const iterWarnings: string[] = []
+      const branchSteps: IteratorPreviewStep[] = []
+      let mergeStep: IteratorPreviewStep | undefined
 
       if (!dict) {
         iterWarnings.push('Dictionary is not selected.')
@@ -3479,6 +3592,42 @@ export default function PipelineEditor() {
         ],
       }))
 
+      // Walk the first downstream path from iterator to model branch steps and merge point.
+      const branchVisited = new Set<string>([iterNode.id])
+      let current: Node<PipelineNodeData> | undefined = iterNode
+      while (current) {
+        const nextEdges = outgoing.get(current.id) ?? []
+        if (nextEdges.length === 0) break
+        if (nextEdges.length > 1) {
+          iterWarnings.push(
+            `Node "${current.data.label || current.id}" has ${nextEdges.length} outgoing paths. Diagram follows the first path.`,
+          )
+        }
+        const nextNode = nodeById.get(nextEdges[0].target)
+        if (!nextNode) break
+        if (branchVisited.has(nextNode.id)) {
+          iterWarnings.push('Loop detected in iterator downstream path. Diagram stops at loop start.')
+          break
+        }
+
+        const cat = CATALOG_MAP[nextNode.data.nodeType]
+        const step: IteratorPreviewStep = {
+          id: nextNode.id,
+          label: nextNode.data.label || cat?.label || nextNode.data.nodeType,
+          type: nextNode.data.nodeType,
+          color: cat?.color ?? '#666',
+        }
+
+        if (nextNode.data.nodeType === 'aggregate') {
+          mergeStep = step
+          break
+        }
+
+        branchSteps.push(step)
+        branchVisited.add(nextNode.id)
+        current = nextNode
+      }
+
       return {
         iteratorNodeId: iterNode.id,
         iteratorLabel: iterNode.data.label,
@@ -3487,6 +3636,8 @@ export default function PipelineEditor() {
         valueParam,
         totalBranches: branches.length,
         branches,
+        branchSteps,
+        ...(mergeStep ? { mergeStep } : {}),
         warnings: iterWarnings,
       }
     }
@@ -3585,7 +3736,17 @@ export default function PipelineEditor() {
   }
 
   function openMetaEditor() {
+    setMetaEditorMode('edit')
     setMetaDraftName(pipelineName)
+    setMetaDraftCategory(pipelineCategory)
+    setMetaDraftStatus(pipelineStatus)
+    setMetaEditError('')
+    setEditMetaOpen(true)
+  }
+
+  function openCloneEditor() {
+    setMetaEditorMode('clone')
+    setMetaDraftName(`${pipelineName || 'Pipeline'} Copy`)
     setMetaDraftCategory(pipelineCategory)
     setMetaDraftStatus(pipelineStatus)
     setMetaEditError('')
@@ -3601,6 +3762,10 @@ export default function PipelineEditor() {
     const nextName = metaDraftName.trim()
     if (!nextName) {
       setMetaEditError('Name is required')
+      return
+    }
+    if (metaEditorMode === 'clone') {
+      cloneMut.mutate()
       return
     }
     setPipelineName(nextName)
@@ -3652,10 +3817,47 @@ export default function PipelineEditor() {
             <Edit sx={{ fontSize: 16 }} />
           </IconButton>
         </Tooltip>
+        <Tooltip title="Clone pipeline">
+          <IconButton size="small" onClick={openCloneEditor} disabled={!hasExistingPipelineId || cloneMut.isPending}>
+            <ContentCopy sx={{ fontSize: 16 }} />
+          </IconButton>
+        </Tooltip>
         <Box sx={{ flex: 1 }} />
         <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.68rem' }}>
           {nodes.length} node{nodes.length !== 1 ? 's' : ''} · {edges.length} edge{edges.length !== 1 ? 's' : ''}
         </Typography>
+        <Tooltip
+          arrow
+          title={
+            <Box sx={{ py: 0.25 }}>
+              <Typography variant="caption" sx={{ fontWeight: 700 }}>
+                Pipeline Setup
+              </Typography>
+              <Typography variant="caption" sx={{ display: 'block', opacity: 0.9, mb: checklistIncomplete.length ? 0.5 : 0 }}>
+                {setupChecklist.completeCount}/{setupChecklist.total} complete ({setupChecklist.percent}%)
+              </Typography>
+              {checklistIncomplete.length === 0 ? (
+                <Typography variant="caption">All required setup fields are complete.</Typography>
+              ) : (
+                <Box component="ul" sx={{ m: 0, pl: 2 }}>
+                  {checklistIncomplete.map(item => (
+                    <Box component="li" key={item.key} sx={{ mb: 0.25 }}>
+                      <Typography variant="caption">{item.label}</Typography>
+                    </Box>
+                  ))}
+                </Box>
+              )}
+            </Box>
+          }
+        >
+          <Chip
+            size="small"
+            color={setupChecklist.completeCount === setupChecklist.total ? 'success' : 'warning'}
+            icon={setupChecklist.completeCount === setupChecklist.total ? <CheckBox sx={{ fontSize: 14 }} /> : <CheckBoxOutlineBlank sx={{ fontSize: 13 }} />}
+            label={`${setupChecklist.completeCount}/${setupChecklist.total}`}
+            sx={{ height: 20, fontSize: '0.66rem', cursor: 'help' }}
+          />
+        </Tooltip>
         {saveMut.isSuccess && (
           <Typography variant="caption" color="success.main" sx={{ fontSize: '0.72rem' }}>Saved ✓</Typography>
         )}
@@ -3707,73 +3909,12 @@ export default function PipelineEditor() {
         >
           {saveMut.isPending ? <CircularProgress size={14} /> : 'Save'}
         </Button>
-        <Button
-          size="small"
-          variant={checklistVisible ? 'text' : 'outlined'}
-          onClick={() => {
-            setChecklistVisible(v => !v)
-            if (!checklistVisible) setChecklistExpanded(false)
-          }}
-          sx={{ minWidth: 84 }}
-        >
-          {checklistVisible ? 'Hide Checklist' : 'Show Checklist'}
-        </Button>
         <Tooltip title="Delete pipeline">
           <IconButton size="small" color="error" onClick={() => setDeletePipelineConfirm(true)} disabled={!hasExistingPipelineId}>
             <Delete sx={{ fontSize: 16 }} />
           </IconButton>
         </Tooltip>
       </Box>
-
-      {checklistVisible && <Box sx={{ px: 1, py: 0.55, borderBottom: `1px solid ${theme.palette.divider}`, bgcolor: alpha(theme.palette.info.main, 0.04) }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5 }}>
-          <Typography variant="caption" sx={{ fontWeight: 700, fontSize: '0.72rem' }}>
-            Pipeline Setup Checklist
-          </Typography>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
-            <Chip
-              size="small"
-              color={setupChecklist.completeCount === setupChecklist.total ? 'success' : 'warning'}
-              label={`${setupChecklist.completeCount}/${setupChecklist.total}`}
-              sx={{ height: 18, fontSize: '0.62rem' }}
-            />
-            <Tooltip title={checklistExpanded ? 'Collapse checklist' : 'Expand checklist'}>
-              <IconButton size="small" onClick={() => setChecklistExpanded(v => !v)}>
-                {checklistExpanded ? <ExpandLess sx={{ fontSize: 16 }} /> : <ExpandMore sx={{ fontSize: 16 }} />}
-              </IconButton>
-            </Tooltip>
-            <Tooltip title="Close checklist">
-              <IconButton size="small" onClick={() => setChecklistVisible(false)}>
-                <Close sx={{ fontSize: 14 }} />
-              </IconButton>
-            </Tooltip>
-          </Box>
-        </Box>
-        <LinearProgress
-          variant="determinate"
-          value={setupChecklist.percent}
-          color={setupChecklist.percent === 100 ? 'success' : 'info'}
-          sx={{ height: 5, borderRadius: 999, mb: checklistExpanded ? 0.6 : 0 }}
-        />
-        {checklistExpanded && (
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-            {setupChecklist.items.filter(i => !i.ok).length === 0 ? (
-              <Chip size="small" color="success" icon={<CheckBox sx={{ fontSize: 14 }} />} label="All required setup fields are complete" sx={{ fontSize: '0.64rem' }} />
-            ) : (
-              setupChecklist.items.filter(i => !i.ok).map(item => (
-                <Chip
-                  key={item.key}
-                  size="small"
-                  color="warning"
-                  icon={<CheckBoxOutlineBlank sx={{ fontSize: 13 }} />}
-                  label={item.label}
-                  sx={{ fontSize: '0.62rem', maxWidth: '100%' }}
-                />
-              ))
-            )}
-          </Box>
-        )}
-      </Box>}
 
       {/* ── Layout row ──────────────────────────────────────────────── */}
       <Box
@@ -4151,7 +4292,7 @@ export default function PipelineEditor() {
       />
 
       <Dialog open={editMetaOpen} onClose={closeMetaEditor} maxWidth="sm" fullWidth>
-        <DialogTitle>Edit Pipeline Details</DialogTitle>
+        <DialogTitle>{metaEditorMode === 'clone' ? 'Clone Pipeline' : 'Edit Pipeline Details'}</DialogTitle>
         <DialogContent sx={{ pt: '16px !important' }}>
           {metaEditError && <Alert severity="error" sx={{ mb: 1.5 }}>{metaEditError}</Alert>}
           <TextField
@@ -4197,8 +4338,10 @@ export default function PipelineEditor() {
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={closeMetaEditor}>Cancel</Button>
-          <Button variant="contained" onClick={applyMetaEditor}>Apply</Button>
+          <Button onClick={closeMetaEditor} disabled={cloneMut.isPending}>Cancel</Button>
+          <Button variant="contained" onClick={applyMetaEditor} disabled={cloneMut.isPending}>
+            {cloneMut.isPending ? <CircularProgress size={14} /> : (metaEditorMode === 'clone' ? 'Save Clone' : 'Apply')}
+          </Button>
         </DialogActions>
       </Dialog>
 

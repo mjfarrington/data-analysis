@@ -133,7 +133,7 @@ class PipelineBase(BaseModel):
 
 
 class PipelineCreate(PipelineBase):
-    pass
+    status: Optional[str] = None
 
 
 class PipelineUpdate(BaseModel):

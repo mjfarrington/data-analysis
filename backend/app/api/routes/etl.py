@@ -307,9 +307,12 @@ async def create_pipeline(
         name=body.name,
         category=body.category,
         description=body.description,
+        status=body.status or "active",
+        tags=body.tags,
         extract_config=body.extract_config.model_dump(),
         transform_config=body.transform_config.model_dump(),
         load_config=body.load_config.model_dump(),
+        canvas_config=body.canvas_config,
         schedule=body.schedule,
         schedule_enabled=body.schedule_enabled,
     )
