@@ -287,6 +287,18 @@ class QueryRequest(BaseModel):
     database: Optional[str] = None  # If set, USE this database before executing
 
 
+class BulkQueryRequest(BaseModel):
+    sql: str = Field(..., min_length=1, max_length=10_000)
+    max_rows: int = Field(default=100_000, ge=1, le=200_000)
+    database: Optional[str] = None
+
+class QueryExportRequest(BaseModel):
+    sql: str = Field(..., min_length=1, max_length=10_000)
+    format: Literal["csv", "xlsx"] = "csv"
+    max_rows: int = Field(default=100_000, ge=1, le=200_000)
+    database: Optional[str] = None
+
+
 class QueryResult(BaseModel):
     columns: list[str]
     rows: list[list[Any]]

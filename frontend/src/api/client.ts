@@ -406,12 +406,40 @@ export interface ExtractResult {
   files: string[]
 }
 
+export interface QueryExportJob {
+  id: string
+  status: string
+  phase?: string
+  format: 'csv' | 'xlsx'
+  rows_exported: number
+  max_rows: number
+  database?: string
+  created_at: string
+  started_at?: string
+  completed_at?: string
+  updated_at?: string
+  error?: string
+  download_ready: boolean
+}
+
 export const dataApi = {
   listTables: () => api.get<DataTable[]>('/data/tables').then(r => r.data),
   previewTable: (name: string, limit = 200, offset = 0) =>
     api.get<QueryResult>(`/data/tables/${encodeURIComponent(name)}/preview`, { params: { limit, offset } }).then(r => r.data),
-  query: (sql: string, limit = 200, offset = 0, database?: string) =>
-    api.post<QueryResult>('/data/query', { sql, limit, offset, database }).then(r => r.data),
+  query: (sql: string, limit = 200, offset = 0, database?: string, signal?: AbortSignal) =>
+    api.post<QueryResult>('/data/query', { sql, limit, offset, database }, { signal }).then(r => r.data),
+  bulkQuery: (sql: string, maxRows = 100000, database?: string, signal?: AbortSignal) =>
+    api.post<QueryResult>('/data/query/bulk', { sql, max_rows: maxRows, database }, { signal }).then(r => r.data),
+  exportQueryFile: (sql: string, maxRows = 100000, database?: string, signal?: AbortSignal) =>
+    api.post<Blob>('/data/query/export', { sql, format: 'csv', max_rows: maxRows, database }, { responseType: 'blob', signal }).then(r => r.data),
+  createExportJob: (sql: string, maxRows = 100000, database?: string, format: 'csv' | 'xlsx' = 'csv') =>
+    api.post<QueryExportJob>('/data/query/export/jobs', { sql, format, max_rows: maxRows, database }).then(r => r.data),
+  getExportJob: (jobId: string) =>
+    api.get<QueryExportJob>(`/data/query/export/jobs/${encodeURIComponent(jobId)}`).then(r => r.data),
+  cancelExportJob: (jobId: string) =>
+    api.post<QueryExportJob>(`/data/query/export/jobs/${encodeURIComponent(jobId)}/cancel`).then(r => r.data),
+  downloadExportJob: (jobId: string, signal?: AbortSignal) =>
+    api.get<Blob>(`/data/query/export/jobs/${encodeURIComponent(jobId)}/download`, { responseType: 'blob', signal }).then(r => r.data),
   listBrowser: () => api.get<BrowserDir[]>('/data/browser').then(r => r.data),
   listCatalogTables: () => api.get<CatalogTable[]>('/data/catalog/tables').then(r => r.data),
   listDatabases: () => api.get<string[]>('/data/catalog/databases').then(r => r.data),

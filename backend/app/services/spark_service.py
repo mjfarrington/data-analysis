@@ -533,6 +533,48 @@ class SparkService:
             }
         return await asyncio.to_thread(_run)
 
+    async def execute_query_bulk(self, sql: str, max_rows: int = 100_000, database: Optional[str] = None) -> dict:
+        """Run SQL on Spark and return up to max_rows quickly in a single pass."""
+        import time as _time
+
+        suppressed = frozenset(self._suppressed_views)
+
+        def _run():
+            spark = _get_spark()
+            _register_file_views(spark, suppress=suppressed)
+            for v in suppressed:
+                try:
+                    spark.sql(f"DROP VIEW IF EXISTS `{v}`")
+                except Exception:
+                    pass
+            if database:
+                try:
+                    spark.sql(f"USE `{database}`")
+                except Exception as exc:
+                    logger.warning("Could not USE database %s: %s", database, exc)
+
+            effective_sql = sql
+            if database and sql.strip().upper() == "SHOW TABLES":
+                effective_sql = f"SHOW TABLES IN `{database}`"
+
+            t0 = _time.perf_counter()
+            df = spark.sql(effective_sql)
+            sampled = df.limit(max_rows + 1)
+            rows_collected = sampled.collect()
+            elapsed = (_time.perf_counter() - t0) * 1000
+
+            is_truncated = len(rows_collected) > max_rows
+            rows = [list(row) for row in rows_collected[:max_rows]]
+            return {
+                "columns": df.columns,
+                "rows": rows,
+                "row_count": len(rows),
+                "truncated": is_truncated,
+                "duration_ms": round(elapsed, 2),
+            }
+
+        return await asyncio.to_thread(_run)
+
     async def list_tables(self) -> list[dict]:
         """List available data tables/files.
 

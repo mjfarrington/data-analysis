@@ -1,5 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import Editor, { BeforeMount, OnMount } from '@monaco-editor/react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   Box, Typography, TextField, Button, CircularProgress, Chip,
   InputAdornment, Alert, Tooltip, IconButton, Select, MenuItem,
@@ -10,11 +12,11 @@ import {
   Search, PlayArrow, TableChart, FolderOpen, ExpandMore, ChevronRight,
   Storage, FilterList, ArrowUpward, ArrowDownward, UnfoldMore,
   KeyboardArrowLeft, KeyboardArrowRight, Description, Visibility,
-  Refresh, LinkOff, Link as LinkIcon, DeleteOutlined, Add, Save, Close, FileDownload,
+  Refresh, LinkOff, Link as LinkIcon, DeleteOutlined, Add, Save, Close, FileDownload, DragIndicator, SwapVert,
 } from '@mui/icons-material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { dataApi, DataTable, QueryResult, CatalogTable, CatalogDatabaseIntrospection } from '../api/client'
-import * as XLSX from 'xlsx'
+import { dataApi, DataTable, QueryResult, CatalogTable, CatalogDatabaseIntrospection, QueryExportJob } from '../api/client'
+import ExcelJS from 'exceljs'
 
 // ── Module-level tree state — survives React Router navigations ───────────────
 const _treeState = {
@@ -49,7 +51,9 @@ interface QueryErrorInfo {
 
 interface SqlConsoleCell {
   id: string
+  kind: 'sql' | 'markdown'
   sql: string
+  markdownPreview: boolean
   queryDb: string
   page: number
   pageSize: number
@@ -72,12 +76,26 @@ interface DatabaseSchemaCacheEntry {
   error?: string
 }
 
+interface FullExportProgress {
+  format: 'csv' | 'xlsx'
+  rowsFetched: number
+  pagesFetched: number
+  totalRows?: number
+  startedAtMs: number
+  phase?: string
+  jobId?: string
+}
+
 const DEFAULT_PAGE_SIZE = 100
+const SQL_SESSION_STORAGE_KEY = 'dataExplorer.sqlSession'
+const SERVER_EXPORT_JOB_ID_KEY = 'dataExplorer.serverExportJobId'
 
 function createSqlCell(seedSql = ''): SqlConsoleCell {
   return {
     id: `cell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'sql',
     sql: seedSql,
+    markdownPreview: false,
     queryDb: '',
     page: 0,
     pageSize: DEFAULT_PAGE_SIZE,
@@ -85,6 +103,49 @@ function createSqlCell(seedSql = ''): SqlConsoleCell {
     error: null,
     duration: null,
     running: false,
+  }
+}
+
+function createMarkdownCell(seedMarkdown = '## Notes\n\nDescribe the query intent, assumptions, or expected output here.'): SqlConsoleCell {
+  return {
+    id: `cell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'markdown',
+    sql: seedMarkdown,
+    markdownPreview: true,
+    queryDb: '',
+    page: 0,
+    pageSize: DEFAULT_PAGE_SIZE,
+    result: null,
+    error: null,
+    duration: null,
+    running: false,
+  }
+}
+
+function normalizeConsoleCell(cell: Partial<SqlConsoleCell>): SqlConsoleCell {
+  return {
+    id: cell.id || `cell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    kind: cell.kind === 'markdown' ? 'markdown' : 'sql',
+    sql: typeof cell.sql === 'string' ? cell.sql : '',
+    markdownPreview: cell.kind === 'markdown' ? Boolean(cell.markdownPreview) : false,
+    queryDb: typeof cell.queryDb === 'string' ? cell.queryDb : '',
+    page: typeof cell.page === 'number' ? cell.page : 0,
+    pageSize: typeof cell.pageSize === 'number' ? cell.pageSize : DEFAULT_PAGE_SIZE,
+    result: cell.result ?? null,
+    error: cell.error ?? null,
+    duration: typeof cell.duration === 'number' ? cell.duration : null,
+    running: Boolean(cell.running),
+  }
+}
+
+function normalizeConsole(console: Partial<SqlConsole>, index: number): SqlConsole {
+  const cells = Array.isArray(console.cells) && console.cells.length > 0
+    ? console.cells.map(cell => normalizeConsoleCell(cell))
+    : [createSqlCell('SELECT * FROM ...')]
+  return {
+    id: console.id || `console_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: typeof console.name === 'string' && console.name.trim() ? console.name : `Console ${index + 1}`,
+    cells,
   }
 }
 
@@ -124,6 +185,10 @@ function fmtBytes(b: number): string {
 
 function fmtMs(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`
+}
+
+function excelColor(hex: string): string {
+  return `FF${hex.replace('#', '').toUpperCase()}`
 }
 
 function parseQueryError(err: unknown): QueryErrorInfo {
@@ -202,22 +267,44 @@ function RichGrid({
   const [sortCol, setSortCol] = useState<number | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [rowFilter, setRowFilter] = useState('')
+  const [transposed, setTransposed] = useState(false)
+  const [transposeColFilters, setTransposeColFilters] = useState<string[]>([])
+  const [colFilters, setColFilters] = useState<string[]>([])
+  const [showColFilters, setShowColFilters] = useState(false)
 
   useEffect(() => {
     setSortCol(null)
     setSortDir('asc')
     setRowFilter('')
+    setTransposed(false)
+    setTransposeColFilters([])
+    setColFilters([])
+    setShowColFilters(false)
   }, [columns.join('|')])
 
   const filteredRows = useMemo(() => {
-    if (!rowFilter) return rows
-    const lower = rowFilter.toLowerCase()
-    return rows.filter(row =>
-      (row as unknown[]).some(
-        cell => cell !== null && cell !== undefined && String(cell).toLowerCase().includes(lower),
-      ),
-    )
-  }, [rows, rowFilter])
+    let result = rows
+    if (rowFilter) {
+      const lower = rowFilter.toLowerCase()
+      result = result.filter(row =>
+        (row as unknown[]).some(
+          cell => cell !== null && cell !== undefined && String(cell).toLowerCase().includes(lower),
+        ),
+      )
+    }
+    const activeColFilters = colFilters.map(f => f?.toLowerCase() ?? '')
+    if (activeColFilters.some(f => f)) {
+      result = result.filter(row =>
+        activeColFilters.every((f, ci) => {
+          if (!f) return true
+          const cell = (row as unknown[])[ci]
+          if (cell === null || cell === undefined) return 'null'.includes(f)
+          return String(cell).toLowerCase().includes(f)
+        }),
+      )
+    }
+    return result
+  }, [rows, rowFilter, colFilters])
 
   const sortedRows = useMemo(() => {
     if (sortCol === null) return filteredRows
@@ -235,6 +322,45 @@ function RichGrid({
     if (sortCol === i) setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
     else { setSortCol(i); setSortDir('asc') }
   }
+
+  // Filtered column indices for transposed view
+  const filteredTransposeColIndices = useMemo(() => {
+    return columns.reduce<number[]>((acc, col, ci) => {
+      const nameFilter = (transposeColFilters[0] ?? '').toLowerCase()
+      if (nameFilter && !col.toLowerCase().includes(nameFilter)) return acc
+      // Check each row-column filter (index 1 = Row 1 etc.)
+      for (let ri = 0; ri < sortedRows.length; ri++) {
+        const f = (transposeColFilters[ri + 1] ?? '').toLowerCase()
+        if (!f) continue
+        const cell = (sortedRows[ri] as unknown[])[ci]
+        if (cell === null || cell === undefined) {
+          if (!'null'.includes(f)) return acc
+        } else if (!String(cell).toLowerCase().includes(f)) {
+          return acc
+        }
+      }
+      acc.push(ci)
+      return acc
+    }, [])
+  }, [columns, transposeColFilters, sortedRows])
+
+  function setTransposeFilter(colIdx: number, value: string) {
+    setTransposeColFilters(prev => {
+      const next = [...prev]
+      next[colIdx] = value
+      return next
+    })
+  }
+
+  function setColFilter(ci: number, value: string) {
+    setColFilters(prev => {
+      const next = [...prev]
+      next[ci] = value
+      return next
+    })
+  }
+
+  const anyColFilter = colFilters.some(f => f) || transposeColFilters.some(f => f)
 
   const knownTotal = totalRows ?? (truncated ? (page + 2) * pageSize : page * pageSize + rows.length)
   const pageCount = Math.max(1, Math.ceil(knownTotal / pageSize))
@@ -263,30 +389,31 @@ function RichGrid({
         display: 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 0.5, flexShrink: 0,
         borderBottom: `1px solid ${theme.palette.divider}`, bgcolor: 'background.paper',
       }}>
-        <TextField
-          placeholder="Filter rows…"
-          value={rowFilter}
-          onChange={e => setRowFilter(e.target.value)}
-          size="small"
-          sx={{ width: 190 }}
-          slotProps={{
-            input: {
-              startAdornment: (
-                <InputAdornment position="start">
-                  <FilterList sx={{ fontSize: 14 }} />
-                </InputAdornment>
-              ),
-            },
-            htmlInput: { style: { fontSize: '0.75rem', paddingTop: 3, paddingBottom: 3 } },
-          }}
-        />
+        <Tooltip title="Column filters">
+          <IconButton
+            size="small"
+            onClick={() => setShowColFilters(v => !v)}
+            sx={{ p: 0.25, color: (showColFilters || anyColFilter) ? 'primary.main' : 'text.secondary' }}
+          >
+            <FilterList sx={{ fontSize: 16 }} />
+          </IconButton>
+        </Tooltip>
         <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
-          {rowFilter && filteredRows.length !== rows.length
+          {filteredRows.length !== rows.length
             ? `${sortedRows.length} / ${rows.length} rows (page) · `
             : `${rows.length} rows · `}
           {columns.length} cols
           {totalRows !== undefined && ` · ${totalRows.toLocaleString()} total`}
         </Typography>
+        <Tooltip title={transposed ? 'Normal view' : 'Transpose table'}>
+          <IconButton
+            size="small"
+            onClick={() => setTransposed(t => !t)}
+            sx={{ p: 0.25, color: transposed ? 'primary.main' : 'text.secondary' }}
+          >
+            <SwapVert sx={{ fontSize: 16 }} />
+          </IconButton>
+        </Tooltip>
         <Select
           value={pageSize}
           onChange={e => { onPageSizeChange(Number(e.target.value)); onPageChange(0) }}
@@ -310,7 +437,122 @@ function RichGrid({
 
       {/* Table */}
       <Box sx={{ flex: 1, overflow: 'auto' }}>
-        <Table size="small" stickyHeader sx={{ minWidth: 400 }}>
+        {transposed ? (
+          // ── Transposed view: each original column is a row ──────────────────
+          <Table size="small" stickyHeader sx={{ minWidth: 400 }}>
+            <TableHead>
+              <TableRow>
+                <TableCell sx={{
+                  whiteSpace: 'nowrap', bgcolor: theme.palette.mode === 'dark' ? 'grey.900' : 'grey.100',
+                  py: 0.75, px: 1.5, fontFamily: 'monospace', fontSize: '0.7rem', fontWeight: 700,
+                }}>
+                  Column
+                </TableCell>
+                {sortedRows.map((_, ri) => (
+                  <TableCell key={ri} sx={{
+                    whiteSpace: 'nowrap', bgcolor: theme.palette.mode === 'dark' ? 'grey.900' : 'grey.100',
+                    py: 0.75, px: 1.5, fontFamily: 'monospace', fontSize: '0.7rem', fontWeight: 700,
+                  }}>
+                    Row {ri + 1}
+                  </TableCell>
+                ))}
+              </TableRow>
+              {/* Per-column filter row */}
+              {showColFilters && (
+              <TableRow>
+                <TableCell sx={{
+                  bgcolor: theme.palette.mode === 'dark' ? 'grey.900' : 'grey.100',
+                  py: 0.25, px: 0.75, position: 'sticky', left: 0, zIndex: 2,
+                }}>
+                  <TextField
+                    placeholder="Filter…"
+                    value={transposeColFilters[0] ?? ''}
+                    onChange={e => setTransposeFilter(0, e.target.value)}
+                    size="small"
+                    variant="outlined"
+                    sx={{ width: 110 }}
+                    slotProps={{
+                      input: {
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <FilterList sx={{ fontSize: 12, opacity: 0.5 }} />
+                          </InputAdornment>
+                        ),
+                      },
+                      htmlInput: { style: { fontSize: '0.72rem', paddingTop: 2, paddingBottom: 2 } },
+                    }}
+                  />
+                </TableCell>
+                {sortedRows.map((_, ri) => (
+                  <TableCell key={ri} sx={{
+                    bgcolor: theme.palette.mode === 'dark' ? 'grey.900' : 'grey.100',
+                    py: 0.25, px: 0.75,
+                  }}>
+                    <TextField
+                      placeholder="Filter…"
+                      value={transposeColFilters[ri + 1] ?? ''}
+                      onChange={e => setTransposeFilter(ri + 1, e.target.value)}
+                      size="small"
+                      variant="outlined"
+                      sx={{ width: 110 }}
+                      slotProps={{
+                        input: {
+                          startAdornment: (
+                            <InputAdornment position="start">
+                              <FilterList sx={{ fontSize: 12, opacity: 0.5 }} />
+                            </InputAdornment>
+                          ),
+                        },
+                        htmlInput: { style: { fontSize: '0.72rem', paddingTop: 2, paddingBottom: 2 } },
+                      }}
+                    />
+                  </TableCell>
+                ))}
+              </TableRow>
+              )}
+            </TableHead>
+            <TableBody>
+              {filteredTransposeColIndices.map(ci => {
+                const col = columns[ci]
+                return (
+                <TableRow key={ci} hover>
+                  <TableCell sx={{
+                    whiteSpace: 'nowrap', py: 0.5, px: 1.5, fontFamily: 'monospace', fontSize: '0.72rem',
+                    fontWeight: 700, bgcolor: theme.palette.mode === 'dark' ? 'grey.900' : 'grey.100',
+                    position: 'sticky', left: 0, zIndex: 1,
+                  }}>
+                    {col}
+                  </TableCell>
+                  {sortedRows.map((row, ri) => {
+                    const cell = (row as unknown[])[ci]
+                    return (
+                      <TableCell key={ri} sx={{
+                        whiteSpace: 'nowrap', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis',
+                        py: 0.5, px: 1.5, fontFamily: 'monospace', fontSize: '0.75rem',
+                      }}>
+                        {cell === null || cell === undefined
+                          ? <Box component="span" sx={{ color: 'text.disabled', fontStyle: 'italic', fontSize: '0.72rem' }}>null</Box>
+                          : typeof cell === 'boolean'
+                            ? <Chip label={String(cell)} size="small" color={cell ? 'success' : 'default'} sx={{ height: 16, fontSize: '0.65rem' }} />
+                            : String(cell).length > 100
+                              ? (
+                                <Tooltip title={String(cell)} placement="top-start">
+                                  <span>{String(cell).slice(0, 100)}…</span>
+                                </Tooltip>
+                              )
+                              : <span>{String(cell)}</span>
+                        }
+                      </TableCell>
+                    )
+                  })}
+                </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        ) : (
+          // ── Normal view ─────────────────────────────────────────────────────
+          <Table size="small" stickyHeader sx={{ minWidth: 400 }}>
           <TableHead>
             <TableRow>
               {columns.map((col, i) => (
@@ -336,6 +578,35 @@ function RichGrid({
                 </TableCell>
               ))}
             </TableRow>
+            {showColFilters && (
+              <TableRow>
+                {columns.map((_, ci) => (
+                  <TableCell key={ci} sx={{
+                    bgcolor: theme.palette.mode === 'dark' ? 'grey.900' : 'grey.100',
+                    py: 0.25, px: 0.75,
+                  }}>
+                    <TextField
+                      placeholder="Filter…"
+                      value={colFilters[ci] ?? ''}
+                      onChange={e => setColFilter(ci, e.target.value)}
+                      size="small"
+                      variant="outlined"
+                      sx={{ width: 110 }}
+                      slotProps={{
+                        input: {
+                          startAdornment: (
+                            <InputAdornment position="start">
+                              <FilterList sx={{ fontSize: 12, opacity: 0.5 }} />
+                            </InputAdornment>
+                          ),
+                        },
+                        htmlInput: { style: { fontSize: '0.72rem', paddingTop: 2, paddingBottom: 2 } },
+                      }}
+                    />
+                  </TableCell>
+                ))}
+              </TableRow>
+            )}
           </TableHead>
           <TableBody>
             {sortedRows.map((row, ri) => (
@@ -370,6 +641,7 @@ function RichGrid({
             )}
           </TableBody>
         </Table>
+        )}
       </Box>
     </Box>
   )
@@ -388,6 +660,8 @@ export default function DataExplorer() {
   const schemaCacheRef = useRef<Record<string, DatabaseSchemaCacheEntry>>(_viewState.schemaCache)
   const activeCellRef = useRef<SqlConsoleCell | null>(null)
   const selectedItemRef = useRef<SelectedItem | null>(_viewState.selectedItem)
+  const hasRestoredSqlSessionRef = useRef(false)
+  const sqlAutosaveTimerRef = useRef<number | null>(null)
 
   // Left panel state — initialised from module-level store so it survives navigation
   const [leftSearch, setLeftSearch] = useState(() => _viewState.leftSearch)
@@ -422,6 +696,15 @@ export default function DataExplorer() {
   })
   const [sqlResultsHeightPct, setSqlResultsHeightPct] = useState(() => _viewState.sqlResultsHeightPct)
   const [schemaCache, setSchemaCache] = useState<Record<string, DatabaseSchemaCacheEntry>>(() => _viewState.schemaCache)
+  const [sessionSavedAt, setSessionSavedAt] = useState<string>('')
+  const [draggedCellId, setDraggedCellId] = useState<string>('')
+  const [dropTargetCellId, setDropTargetCellId] = useState<string>('')
+  const [fullExportBusy, setFullExportBusy] = useState<'csv' | 'xlsx' | 'xlsx-server' | null>(null)
+  const [fullExportProgress, setFullExportProgress] = useState<FullExportProgress | null>(null)
+  const fullExportAbortRef = useRef<AbortController | null>(null)
+  const fullExportHeartbeatRef = useRef<number | null>(null)
+  const serverExportPollRef = useRef<number | null>(null)
+  const serverExportJobIdRef = useRef<string>('')
 
   const activeConsole = useMemo(
     () => consoles.find(c => c.id === activeConsoleId) ?? consoles[0] ?? null,
@@ -815,6 +1098,13 @@ export default function DataExplorer() {
     setActiveCellId(newCell.id)
   }
 
+  function addMarkdownCellToActiveConsole() {
+    if (!activeConsole) return
+    const newCell = createMarkdownCell()
+    setConsoles(prev => prev.map(c => c.id !== activeConsole.id ? c : { ...c, cells: [...c.cells, newCell] }))
+    setActiveCellId(newCell.id)
+  }
+
   function removeCell(consoleId: string, cellId: string) {
     setConsoles(prev => prev.map(c => {
       if (c.id !== consoleId) return c
@@ -823,6 +1113,38 @@ export default function DataExplorer() {
       if (activeCellId === cellId) setActiveCellId(nextCells[0]?.id ?? '')
       return { ...c, cells: nextCells }
     }))
+  }
+
+  function reorderConsoleCells(consoleId: string, sourceCellId: string, targetCellId: string) {
+    if (!sourceCellId || !targetCellId || sourceCellId === targetCellId) return
+    setConsoles(prev => prev.map(console => {
+      if (console.id !== consoleId) return console
+      const sourceIndex = console.cells.findIndex(cell => cell.id === sourceCellId)
+      const targetIndex = console.cells.findIndex(cell => cell.id === targetCellId)
+      if (sourceIndex === -1 || targetIndex === -1 || sourceIndex === targetIndex) return console
+      const nextCells = [...console.cells]
+      const [movedCell] = nextCells.splice(sourceIndex, 1)
+      nextCells.splice(targetIndex, 0, movedCell)
+      return { ...console, cells: nextCells }
+    }))
+  }
+
+  function handleCellDragStart(consoleId: string, cellId: string) {
+    setActiveConsoleId(consoleId)
+    setActiveCellId(cellId)
+    setDraggedCellId(cellId)
+    setDropTargetCellId(cellId)
+  }
+
+  function handleCellDrop(consoleId: string, targetCellId: string) {
+    reorderConsoleCells(consoleId, draggedCellId, targetCellId)
+    setDraggedCellId('')
+    setDropTargetCellId('')
+  }
+
+  function clearCellDragState() {
+    setDraggedCellId('')
+    setDropTargetCellId('')
   }
 
   function openCellContextMenu(event: React.MouseEvent<HTMLElement>, consoleId: string, cellId: string) {
@@ -841,7 +1163,7 @@ export default function DataExplorer() {
   async function runCell(consoleId: string, cellId: string) {
     const console = consoles.find(c => c.id === consoleId)
     const cell = console?.cells.find(c => c.id === cellId)
-    if (!cell || !cell.sql.trim()) return
+    if (!cell || cell.kind !== 'sql' || !cell.sql.trim()) return
 
     updateConsoleCell(consoleId, cellId, {
       running: true,
@@ -873,7 +1195,7 @@ export default function DataExplorer() {
   async function changeCellPage(consoleId: string, cellId: string, newPage: number) {
     const console = consoles.find(c => c.id === consoleId)
     const cell = console?.cells.find(c => c.id === cellId)
-    if (!cell || !cell.sql.trim()) return
+    if (!cell || cell.kind !== 'sql' || !cell.sql.trim()) return
     updateConsoleCell(consoleId, cellId, { running: true, page: newPage })
     try {
       const result = await dataApi.query(cell.sql, cell.pageSize, newPage * cell.pageSize, cell.queryDb || undefined)
@@ -895,9 +1217,38 @@ export default function DataExplorer() {
     }
   }
 
-  function saveActiveConsole() {
+  function persistSqlSession(autosave = false) {
+    try {
+      sessionStorage.setItem(SQL_SESSION_STORAGE_KEY, JSON.stringify({
+        consoles,
+        activeConsoleId,
+        activeCellId,
+        sqlResultsHeightPct,
+        schemaCache,
+      }))
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      setSessionSavedAt(`${autosave ? 'Auto-saved' : 'Saved'} ${time}`)
+    } catch {
+      // ignore browser storage failures
+    }
+  }
+
+  function saveSqlSession() {
+    persistSqlSession(false)
+  }
+
+  function exportActiveConsoleSql() {
     if (!activeConsole) return
-    const joined = activeConsole.cells.map((c, i) => `-- Cell ${i + 1}\n${c.sql.trim() || ''}`).join('\n\n')
+    const joined = activeConsole.cells.map((c, i) => {
+      if (c.kind === 'markdown') {
+        const commented = (c.sql.trim() || '')
+          .split('\n')
+          .map(line => `-- ${line}`)
+          .join('\n')
+        return `-- Markdown ${i + 1}\n${commented}`
+      }
+      return `-- SQL Cell ${i + 1}\n${c.sql.trim() || ''}`
+    }).join('\n\n')
     const blob = new Blob([joined], { type: 'text/sql;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -910,14 +1261,15 @@ export default function DataExplorer() {
 
   function exportCellCsv(cell: SqlConsoleCell, delimiter: ',' | '\t') {
     if (!cell.result) return
+    const queryResult = cell.result
     const esc = (v: unknown) => {
       const s = String(v ?? '')
       const needsQuote = s.includes('"') || s.includes('\n') || s.includes('\r') || s.includes(delimiter)
       const norm = s.replace(/"/g, '""')
       return needsQuote ? `"${norm}"` : norm
     }
-    const header = cell.result.columns.map(esc).join(delimiter)
-    const rows = (cell.result.rows ?? []).map(r => (r as unknown[]).map(esc).join(delimiter))
+    const header = queryResult.columns.map(esc).join(delimiter)
+    const rows = (queryResult.rows ?? []).map(r => (r as unknown[]).map(esc).join(delimiter))
     const content = [header, ...rows].join('\n')
     const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
     const a = document.createElement('a')
@@ -929,25 +1281,362 @@ export default function DataExplorer() {
     URL.revokeObjectURL(a.href)
   }
 
-  function exportCellXlsx(cell: SqlConsoleCell) {
+  function exportQueryResultCsv(result: QueryResult, delimiter: ',' | '\t', fileName: string) {
+    const esc = (v: unknown) => {
+      const s = String(v ?? '')
+      const needsQuote = s.includes('"') || s.includes('\n') || s.includes('\r') || s.includes(delimiter)
+      const norm = s.replace(/"/g, '""')
+      return needsQuote ? `"${norm}"` : norm
+    }
+    const header = result.columns.map(esc).join(delimiter)
+    const rows = (result.rows ?? []).map(r => (r as unknown[]).map(esc).join(delimiter))
+    const content = [header, ...rows].join('\n')
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = fileName
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(a.href)
+  }
+
+  async function exportCellXlsx(cell: SqlConsoleCell) {
     if (!cell.result) return
-    const rows = (cell.result.rows ?? []).map(r => {
-      const obj: Record<string, unknown> = {}
-      cell.result!.columns.forEach((c, idx) => { obj[c] = (r as unknown[])[idx] })
-      return obj
+    await exportQueryResultXlsx(cell.result, 'query_result.xlsx')
+  }
+
+  async function exportQueryResultXlsx(result: QueryResult, fileName: string) {
+    const columns = result.columns ?? []
+    const dataRows = (result.rows ?? []) as unknown[][]
+    if (columns.length === 0) return
+
+    // Export palette is fixed for readability in Excel across all app themes.
+    const headerAccent = excelColor('#1E3A5F')
+    const headerText = excelColor('#F8FAFC')
+    const stripeBg = excelColor('#EAF2FB')
+    const borderColor = excelColor('#C9D7E6')
+    const defaultBg = excelColor('#FFFFFF')
+
+    const workbook = new ExcelJS.Workbook()
+    const worksheet = workbook.addWorksheet('QueryResult', {
+      views: [{ state: 'frozen', ySplit: 1 }],
     })
-    const ws = XLSX.utils.json_to_sheet(rows)
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'QueryResult')
-    XLSX.writeFile(wb, 'query_result.xlsx')
+
+    worksheet.columns = columns.map((name, columnIndex) => {
+      const sampled = dataRows.slice(0, 300)
+      const maxLen = Math.max(
+        name.length,
+        ...sampled.map(row => (row[columnIndex] === null || row[columnIndex] === undefined ? 0 : String(row[columnIndex]).length)),
+      )
+      return {
+        header: name,
+        key: `col_${columnIndex}`,
+        width: Math.min(46, Math.max(10, maxLen + 2)),
+      }
+    })
+
+    dataRows.forEach(row => {
+      const record: Record<string, unknown> = {}
+      columns.forEach((_, columnIndex) => {
+        record[`col_${columnIndex}`] = row[columnIndex]
+      })
+      worksheet.addRow(record)
+    })
+
+    worksheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: 1, column: columns.length },
+    }
+
+    const headerRow = worksheet.getRow(1)
+    headerRow.height = 24
+    headerRow.eachCell(cellRef => {
+      cellRef.font = { bold: true, color: { argb: headerText } }
+      cellRef.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: headerAccent } }
+      cellRef.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true }
+      cellRef.border = {
+        top: { style: 'thin', color: { argb: borderColor } },
+        left: { style: 'thin', color: { argb: borderColor } },
+        bottom: { style: 'thin', color: { argb: borderColor } },
+        right: { style: 'thin', color: { argb: borderColor } },
+      }
+    })
+
+    columns.forEach((columnName, columnIndex) => {
+      const column = worksheet.getColumn(columnIndex + 1)
+      const numericValues = dataRows
+        .map(row => row[columnIndex])
+        .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+      const isNumeric = numericValues.length > 0
+      const isPercent = /percent|pct|ratio|rate|%/i.test(columnName)
+      const hasDecimal = numericValues.some(v => !Number.isInteger(v))
+
+      if (isNumeric) {
+        column.numFmt = isPercent ? '0.00%' : hasDecimal ? '#,##0.0000' : '#,##0'
+      }
+
+      column.eachCell({ includeEmpty: false }, (cellRef, rowNumber) => {
+        if (rowNumber === 1) return
+        const isStriped = rowNumber % 2 === 0
+        cellRef.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: isStriped ? stripeBg : defaultBg },
+        }
+        cellRef.border = {
+          top: { style: 'thin', color: { argb: borderColor } },
+          left: { style: 'thin', color: { argb: borderColor } },
+          bottom: { style: 'thin', color: { argb: borderColor } },
+          right: { style: 'thin', color: { argb: borderColor } },
+        }
+        if (isNumeric) {
+          cellRef.alignment = { vertical: 'top', horizontal: 'right' }
+        } else {
+          cellRef.alignment = { vertical: 'top', horizontal: 'left', wrapText: true }
+        }
+      })
+    })
+
+    const buffer = await workbook.xlsx.writeBuffer()
+    const blob = new Blob([buffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = fileName
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(link.href)
+  }
+
+  function getCellFromContextMenu(): SqlConsoleCell | null {
+    if (!cellMenuTarget) return null
+    const console = consoles.find(c => c.id === cellMenuTarget.consoleId)
+    return console?.cells.find(c => c.id === cellMenuTarget.cellId) ?? null
+  }
+
+  async function fetchFullQueryResult(
+    cell: SqlConsoleCell,
+    signal?: AbortSignal,
+    onProgress?: (progress: { rowsFetched: number; pagesFetched: number; totalRows?: number }) => void,
+  ): Promise<QueryResult> {
+    const fastMaxRows = 100_000
+    const fast = await dataApi.bulkQuery(cell.sql, fastMaxRows, cell.queryDb || undefined, signal)
+    const columns: string[] = fast.columns ?? []
+    const rows: unknown[][] = [...((fast.rows ?? []) as unknown[][])]
+    let pageCount = 1
+    onProgress?.({ rowsFetched: rows.length, pagesFetched: pageCount, totalRows: fast.truncated ? undefined : rows.length })
+
+    // For the requested 100k-row use case this exits quickly after one request.
+    if (!fast.truncated) {
+      return {
+        columns,
+        rows,
+        row_count: rows.length,
+        total_rows: rows.length,
+        truncated: false,
+      }
+    }
+
+    // If query is larger than fast cap, continue with paged fetch from that offset.
+    const pageSize = 5_000
+    let offset = rows.length
+    let truncated = true
+
+    while (truncated) {
+      const page = await dataApi.query(cell.sql, pageSize, offset, cell.queryDb || undefined, signal)
+      const pageRows = (page.rows ?? []) as unknown[][]
+      rows.push(...pageRows)
+      truncated = Boolean(page.truncated)
+      offset += pageRows.length
+      pageCount += 1
+      onProgress?.({ rowsFetched: rows.length, pagesFetched: pageCount })
+      if (pageRows.length === 0 || pageCount > 5000) break
+    }
+
+    return {
+      columns,
+      rows,
+      row_count: rows.length,
+      total_rows: rows.length,
+      truncated: false,
+    }
+  }
+
+  function cancelFullExport() {
+    if (serverExportJobIdRef.current) {
+      dataApi.cancelExportJob(serverExportJobIdRef.current).catch(() => undefined)
+      setSessionSavedAt('Cancel requested for server export')
+      return
+    }
+    fullExportAbortRef.current?.abort()
+  }
+
+  function stopServerExportPolling() {
+    if (serverExportPollRef.current != null) {
+      window.clearInterval(serverExportPollRef.current)
+      serverExportPollRef.current = null
+    }
+  }
+
+  async function pollServerExportJob(jobId: string) {
+    try {
+      const job = await dataApi.getExportJob(jobId)
+      const jobFmt = job.format ?? 'csv'
+      setFullExportProgress(prev => ({
+        format: jobFmt,
+        rowsFetched: job.rows_exported,
+        pagesFetched: Math.max(prev?.pagesFetched ?? 0, 1),
+        totalRows: job.max_rows,
+        startedAtMs: prev?.startedAtMs ?? Date.now(),
+        phase: job.phase,
+        jobId,
+      }))
+
+      if (job.status === 'completed' && job.download_ready) {
+        const blob = await dataApi.downloadExportJob(jobId)
+        const ext = jobFmt === 'xlsx' ? 'xlsx' : 'csv'
+        const link = document.createElement('a')
+        link.href = URL.createObjectURL(blob)
+        link.download = `query_server_export_${jobId.slice(0, 8)}.${ext}`
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(link.href)
+        stopServerExportPolling()
+        serverExportJobIdRef.current = ''
+        sessionStorage.removeItem(SERVER_EXPORT_JOB_ID_KEY)
+        setFullExportBusy(null)
+        setFullExportProgress(null)
+        setSessionSavedAt('Server export complete')
+        return
+      }
+
+      if (job.status === 'failed' || job.status === 'canceled') {
+        stopServerExportPolling()
+        serverExportJobIdRef.current = ''
+        sessionStorage.removeItem(SERVER_EXPORT_JOB_ID_KEY)
+        setFullExportBusy(null)
+        setFullExportProgress(null)
+        setSessionSavedAt(job.status === 'canceled' ? 'Server export canceled' : 'Server export failed')
+      }
+    } catch {
+      // Keep polling; transient errors can happen during long jobs.
+    }
+  }
+
+  function startServerExportPolling(jobId: string) {
+    stopServerExportPolling()
+    serverExportJobIdRef.current = jobId
+    sessionStorage.setItem(SERVER_EXPORT_JOB_ID_KEY, jobId)
+    void pollServerExportJob(jobId)
+    serverExportPollRef.current = window.setInterval(() => {
+      void pollServerExportJob(jobId)
+    }, 1500)
+  }
+
+  useEffect(() => {
+    if (!fullExportProgress) return
+    if (fullExportHeartbeatRef.current != null) {
+      window.clearInterval(fullExportHeartbeatRef.current)
+    }
+    fullExportHeartbeatRef.current = window.setInterval(() => {
+      setFullExportProgress(prev => prev ? { ...prev } : prev)
+    }, 1000)
+    return () => {
+      if (fullExportHeartbeatRef.current != null) {
+        window.clearInterval(fullExportHeartbeatRef.current)
+      }
+    }
+  }, [fullExportProgress?.format, fullExportProgress?.startedAtMs])
+
+  async function exportServerSide(format: 'csv' | 'xlsx' = 'csv') {
+    const targetCell = getCellFromContextMenu()
+    if (!targetCell || targetCell.kind !== 'sql' || !targetCell.sql.trim()) return
+    if (fullExportBusy) return
+    const busyKey: 'csv' | 'xlsx-server' = format === 'xlsx' ? 'xlsx-server' : 'csv'
+    setFullExportBusy(busyKey)
+    setFullExportProgress({
+      format,
+      rowsFetched: 0,
+      pagesFetched: 0,
+      startedAtMs: Date.now(),
+      phase: 'queued',
+    })
+    try {
+      const job = await dataApi.createExportJob(targetCell.sql, 100_000, targetCell.queryDb || undefined, format)
+      setFullExportProgress(prev => prev ? {
+        ...prev,
+        phase: job.phase,
+        jobId: job.id,
+      } : prev)
+      startServerExportPolling(job.id)
+      setSessionSavedAt(`Server export job ${job.id.slice(0, 8)} started`)
+    } catch (err) {
+      setFullExportBusy(null)
+      setFullExportProgress(null)
+      setSessionSavedAt('Server export failed to start')
+    }
+    closeCellContextMenu()
+  }
+
+  const exportServerSideCsv = () => exportServerSide('csv')
+
+  async function exportFullCellQuery(format: 'csv' | 'xlsx') {
+    const targetCell = getCellFromContextMenu()
+    if (!targetCell || targetCell.kind !== 'sql' || !targetCell.sql.trim()) return
+    if (fullExportBusy) return
+    const controller = new AbortController()
+    fullExportAbortRef.current = controller
+    setFullExportBusy(format)
+    setFullExportProgress({ format, rowsFetched: 0, pagesFetched: 0, startedAtMs: Date.now() })
+    try {
+      const fullResult = await fetchFullQueryResult(
+        targetCell,
+        controller.signal,
+        ({ rowsFetched, pagesFetched, totalRows }) => {
+          setFullExportProgress(prev => ({
+            format,
+            rowsFetched,
+            pagesFetched,
+            totalRows,
+            startedAtMs: prev?.startedAtMs ?? Date.now(),
+          }))
+        },
+      )
+      if (format === 'csv') {
+        exportQueryResultCsv(fullResult, ',', 'query_full_result.csv')
+      } else {
+        await exportQueryResultXlsx(fullResult, 'query_full_result.xlsx')
+      }
+      setSessionSavedAt(`Exported ${fullResult.rows.length.toLocaleString()} row(s) to ${format.toUpperCase()}`)
+    } catch (err) {
+      if ((err as Error)?.name === 'CanceledError' || (err as Error)?.name === 'AbortError') {
+        setSessionSavedAt('Full export canceled')
+      } else {
+        setSessionSavedAt('Full export failed')
+      }
+    } finally {
+      fullExportAbortRef.current = null
+      setFullExportBusy(null)
+      setFullExportProgress(null)
+      closeCellContextMenu()
+    }
   }
 
   async function runQuery(sqlStr: string, db?: string, switchTab = true) {
     if (!sqlStr.trim()) return
-    if (!activeConsole || !activeCell) return
-    updateConsoleCell(activeConsole.id, activeCell.id, { sql: sqlStr, queryDb: db ?? activeCell.queryDb })
+    if (!activeConsole) return
+    const targetCell = activeCell?.kind === 'sql' ? activeCell : createSqlCell(sqlStr)
+    if (activeCell?.kind !== 'sql') {
+      setConsoles(prev => prev.map(c => c.id !== activeConsole.id ? c : { ...c, cells: [...c.cells, targetCell] }))
+      setActiveCellId(targetCell.id)
+    }
+    updateConsoleCell(activeConsole.id, targetCell.id, { sql: sqlStr, queryDb: db ?? targetCell.queryDb, kind: 'sql' })
     if (switchTab) setActiveTab('query')
-    await runCell(activeConsole.id, activeCell.id)
+    await runCell(activeConsole.id, targetCell.id)
   }
 
   // ── Persist tree state to module-level store on every change ─────────────────
@@ -977,16 +1666,6 @@ export default function DataExplorer() {
     _viewState.schemaResult = schemaResult
     _viewState.schemaError = schemaError
 
-    try {
-      localStorage.setItem('dataExplorer.sqlConsoles', JSON.stringify({
-        consoles,
-        activeConsoleId,
-        activeCellId,
-        sqlResultsHeightPct,
-      }))
-    } catch {
-      // ignore localStorage failures
-    }
   }, [
     leftSearch,
     leftCollapsed,
@@ -1005,20 +1684,68 @@ export default function DataExplorer() {
   ])
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('dataExplorer.sqlConsoles')
-      if (!raw) return
-      const parsed = JSON.parse(raw) as { consoles?: SqlConsole[]; activeConsoleId?: string; activeCellId?: string }
-      if (parsed.consoles && parsed.consoles.length > 0) {
-        setConsoles(parsed.consoles)
-        setActiveConsoleId(parsed.activeConsoleId || parsed.consoles[0].id)
-        setActiveCellId(parsed.activeCellId || parsed.consoles[0].cells[0]?.id || '')
+    if (!hasRestoredSqlSessionRef.current) return
+    if (sqlAutosaveTimerRef.current != null) {
+      window.clearTimeout(sqlAutosaveTimerRef.current)
+    }
+    sqlAutosaveTimerRef.current = window.setTimeout(() => {
+      persistSqlSession(true)
+    }, 700)
+    return () => {
+      if (sqlAutosaveTimerRef.current != null) {
+        window.clearTimeout(sqlAutosaveTimerRef.current)
       }
-      if (typeof (parsed as { sqlResultsHeightPct?: number }).sqlResultsHeightPct === 'number') {
-        setSqlResultsHeightPct((parsed as { sqlResultsHeightPct?: number }).sqlResultsHeightPct || 46)
+    }
+  }, [consoles, activeConsoleId, activeCellId, sqlResultsHeightPct, schemaCache])
+
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(SQL_SESSION_STORAGE_KEY) || localStorage.getItem('dataExplorer.sqlConsoles')
+      if (!raw) return
+      const parsed = JSON.parse(raw) as {
+        consoles?: Partial<SqlConsole>[]
+        activeConsoleId?: string
+        activeCellId?: string
+        sqlResultsHeightPct?: number
+        schemaCache?: Record<string, DatabaseSchemaCacheEntry>
+      }
+      if (parsed.consoles && parsed.consoles.length > 0) {
+        const normalizedConsoles = parsed.consoles.map((console, index) => normalizeConsole(console, index))
+        setConsoles(normalizedConsoles)
+        setActiveConsoleId(parsed.activeConsoleId || normalizedConsoles[0].id)
+        setActiveCellId(parsed.activeCellId || normalizedConsoles[0].cells[0]?.id || '')
+      }
+      if (typeof parsed.sqlResultsHeightPct === 'number') {
+        setSqlResultsHeightPct(parsed.sqlResultsHeightPct || 46)
+      }
+      if (parsed.schemaCache && typeof parsed.schemaCache === 'object') {
+        setSchemaCache(parsed.schemaCache)
       }
     } catch {
       // ignore malformed local storage
+    } finally {
+      hasRestoredSqlSessionRef.current = true
+    }
+  }, [])
+
+  useEffect(() => {
+    const existingJobId = sessionStorage.getItem(SERVER_EXPORT_JOB_ID_KEY)
+    if (!existingJobId) return
+    setFullExportBusy('csv')
+    setFullExportProgress({
+      format: 'csv',
+      rowsFetched: 0,
+      pagesFetched: 0,
+      startedAtMs: Date.now(),
+      phase: 'resuming',
+      jobId: existingJobId,
+    })
+    startServerExportPolling(existingJobId)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      stopServerExportPolling()
     }
   }, [])
 
@@ -1618,24 +2345,60 @@ export default function DataExplorer() {
                     <Add sx={{ fontSize: 16 }} />
                   </IconButton>
                 </Tooltip>
-                <Tooltip title="Save active console (.sql)">
+                <Tooltip title="Save current session in memory">
                   <span>
-                    <IconButton size="small" onClick={saveActiveConsole} disabled={!activeConsole}>
+                    <IconButton size="small" onClick={saveSqlSession} disabled={!activeConsole}>
                       <Save sx={{ fontSize: 15 }} />
                     </IconButton>
                   </span>
                 </Tooltip>
+                <Tooltip title="Export active console as .sql">
+                  <span>
+                    <IconButton size="small" onClick={exportActiveConsoleSql} disabled={!activeConsole}>
+                      <FileDownload sx={{ fontSize: 15 }} />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                {sessionSavedAt && (
+                  <Chip label={sessionSavedAt} size="small" variant="outlined" sx={{ height: 20, fontSize: '0.62rem', ml: 0.5 }} />
+                )}
+                {fullExportProgress && (
+                  <Box sx={{ ml: 0.75, minWidth: 220, maxWidth: 360, display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                    <Box sx={{ flex: 1 }}>
+                      <Typography sx={{ fontSize: '0.66rem', lineHeight: 1.2, color: 'text.secondary' }}>
+                        Exporting {fullExportProgress.format.toUpperCase()} ({fullExportProgress.phase || 'running'}) - {fullExportProgress.rowsFetched.toLocaleString()} rows, {fullExportProgress.pagesFetched} pages, {Math.max(0, Math.floor((Date.now() - fullExportProgress.startedAtMs) / 1000))}s
+                      </Typography>
+                      <LinearProgress
+                        variant={typeof fullExportProgress.totalRows === 'number' && fullExportProgress.totalRows > 0 ? 'determinate' : 'indeterminate'}
+                        value={typeof fullExportProgress.totalRows === 'number' && fullExportProgress.totalRows > 0
+                          ? Math.min(100, (fullExportProgress.rowsFetched / fullExportProgress.totalRows) * 100)
+                          : undefined}
+                        sx={{ mt: 0.25, height: 4, borderRadius: 999 }}
+                      />
+                    </Box>
+                    <Tooltip title="Cancel full export">
+                      <span>
+                        <IconButton size="small" color="error" onClick={cancelFullExport}>
+                          <Close sx={{ fontSize: 14 }} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </Box>
+                )}
               </Box>
 
               {/* Cells + results */}
               <Box ref={sqlWorkspaceRef} sx={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: `minmax(180px, ${100 - sqlResultsHeightPct}%) 6px minmax(160px, ${sqlResultsHeightPct}%)`, overflow: 'hidden' }}>
                 <Box sx={{ overflow: 'auto', p: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
                     <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>
-                      SQL Cells
+                      Console Cells
                     </Typography>
                     <Button size="small" variant="outlined" startIcon={<Add sx={{ fontSize: 14 }} />} onClick={addCellToActiveConsole}>
-                      Add Cell
+                      Add SQL
+                    </Button>
+                    <Button size="small" variant="outlined" startIcon={<Description sx={{ fontSize: 14 }} />} onClick={addMarkdownCellToActiveConsole}>
+                      Add Markdown
                     </Button>
                   </Box>
 
@@ -1643,88 +2406,174 @@ export default function DataExplorer() {
                     const isActiveCell = cell.id === activeCell?.id
                     const cellDatabase = cell.queryDb || selectedItem?.database || 'default'
                     const cellSchemaEntry = schemaCache[cellDatabase]
+                    const isSqlCell = cell.kind === 'sql'
+                    const isDropTarget = dropTargetCellId === cell.id && draggedCellId && draggedCellId !== cell.id
                     return (
                       <Box
                         key={cell.id}
                         onContextMenu={(event: React.MouseEvent<HTMLElement>) => openCellContextMenu(event, activeConsole!.id, cell.id)}
-                        sx={{ border: `1px solid ${isActiveCell ? theme.palette.primary.main : theme.palette.divider}`, borderRadius: 1, overflow: 'hidden', bgcolor: isActiveCell ? alpha(theme.palette.primary.main, 0.04) : 'background.paper' }}
+                        onDragOver={(event: React.DragEvent<HTMLElement>) => {
+                          event.preventDefault()
+                          if (draggedCellId && draggedCellId !== cell.id) setDropTargetCellId(cell.id)
+                        }}
+                        onDrop={(event: React.DragEvent<HTMLElement>) => {
+                          event.preventDefault()
+                          handleCellDrop(activeConsole!.id, cell.id)
+                        }}
+                        onDragEnd={clearCellDragState}
+                        sx={{
+                          border: `1px solid ${isActiveCell ? theme.palette.primary.main : theme.palette.divider}`,
+                          borderRadius: 1,
+                          overflow: 'hidden',
+                          bgcolor: isActiveCell ? alpha(theme.palette.primary.main, 0.04) : 'background.paper',
+                          boxShadow: isDropTarget ? `0 0 0 2px ${alpha(theme.palette.primary.main, 0.35)}` : 'none',
+                          transform: draggedCellId === cell.id ? 'scale(0.995)' : 'none',
+                          opacity: draggedCellId === cell.id ? 0.75 : 1,
+                          transition: 'box-shadow 0.15s ease, opacity 0.15s ease, transform 0.15s ease',
+                        }}
                       >
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.4, borderBottom: `1px solid ${theme.palette.divider}` }} onClick={() => setActiveCellId(cell.id)}>
-                          <Button
-                            size="small"
-                            color="success"
-                            variant="contained"
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              runCell(activeConsole!.id, cell.id)
-                            }}
-                            disabled={cell.running || !cell.sql.trim()}
-                            startIcon={cell.running ? <CircularProgress size={12} color="inherit" /> : <PlayArrow sx={{ fontSize: 14 }} />}
-                            sx={{ fontSize: '0.7rem', py: 0.2, minWidth: 68 }}
-                          >
-                            Run
-                          </Button>
-                          <Typography sx={{ fontSize: '0.72rem', fontWeight: 700 }}>Cell {idx + 1}</Typography>
-                          <FormControl size="small" sx={{ minWidth: 140, ml: 0.5 }}>
-                            <Select
-                              value={cell.queryDb}
-                              displayEmpty
-                              onChange={e => updateConsoleCell(activeConsole!.id, cell.id, { queryDb: e.target.value })}
-                              sx={{ fontSize: '0.72rem', height: 24 }}
-                            >
-                              <MenuItem value="" sx={{ fontSize: '0.75rem' }}>(default db)</MenuItem>
-                              {databases.map(db => (
-                                <MenuItem key={db} value={db} sx={{ fontSize: '0.75rem' }}>{db}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          <Tooltip
-                            title={cellSchemaEntry?.loaded
-                              ? `Autocomplete ready for ${cellDatabase}`
-                              : `Introspect ${cellDatabase} from the left catalog tree to enable column suggestions`}
-                          >
-                            <Chip
-                              label={cellSchemaEntry?.loaded ? 'Autocomplete ready' : 'Needs introspection'}
+                          <Tooltip title="Drag to reorder cell">
+                            <IconButton
                               size="small"
-                              color={cellSchemaEntry?.loaded ? 'success' : 'default'}
-                              variant={cellSchemaEntry?.loaded ? 'filled' : 'outlined'}
-                              sx={{ height: 18, fontSize: '0.62rem' }}
-                            />
+                              draggable
+                              onDragStart={() => handleCellDragStart(activeConsole!.id, cell.id)}
+                              onMouseDown={event => event.stopPropagation()}
+                              sx={{ cursor: 'grab', p: 0.25, color: 'text.disabled' }}
+                            >
+                              <DragIndicator sx={{ fontSize: 16 }} />
+                            </IconButton>
                           </Tooltip>
+                          {isSqlCell ? (
+                            <Button
+                              size="small"
+                              color="primary"
+                              variant="contained"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                runCell(activeConsole!.id, cell.id)
+                              }}
+                              disabled={cell.running || !cell.sql.trim()}
+                              startIcon={cell.running ? <CircularProgress size={12} color="inherit" /> : <PlayArrow sx={{ fontSize: 14 }} />}
+                              sx={{ fontSize: '0.7rem', py: 0.2, minWidth: 68 }}
+                            >
+                              Run
+                            </Button>
+                          ) : (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                updateConsoleCell(activeConsole!.id, cell.id, { markdownPreview: !cell.markdownPreview })
+                              }}
+                              startIcon={cell.markdownPreview ? <Description sx={{ fontSize: 14 }} /> : <Visibility sx={{ fontSize: 14 }} />}
+                              sx={{ fontSize: '0.7rem', py: 0.2, minWidth: 96 }}
+                            >
+                              {cell.markdownPreview ? 'Edit' : 'View'}
+                            </Button>
+                          )}
+                          <Typography sx={{ fontSize: '0.72rem', fontWeight: 700 }}>
+                            {isSqlCell ? `SQL ${idx + 1}` : `Markdown ${idx + 1}`}
+                          </Typography>
+                          {isSqlCell ? (
+                            <>
+                              <FormControl size="small" sx={{ minWidth: 140, ml: 0.5 }}>
+                                <Select
+                                  value={cell.queryDb}
+                                  displayEmpty
+                                  onChange={e => updateConsoleCell(activeConsole!.id, cell.id, { queryDb: e.target.value })}
+                                  sx={{ fontSize: '0.72rem', height: 24 }}
+                                >
+                                  <MenuItem value="" sx={{ fontSize: '0.75rem' }}>(default db)</MenuItem>
+                                  {databases.map(db => (
+                                    <MenuItem key={db} value={db} sx={{ fontSize: '0.75rem' }}>{db}</MenuItem>
+                                  ))}
+                                </Select>
+                              </FormControl>
+                              <Tooltip
+                                title={cellSchemaEntry?.loaded
+                                  ? `Autocomplete ready for ${cellDatabase}`
+                                  : `Introspect ${cellDatabase} from the left catalog tree to enable column suggestions`}
+                              >
+                                <Chip
+                                  label={cellSchemaEntry?.loaded ? 'Autocomplete ready' : 'Needs introspection'}
+                                  size="small"
+                                  color={cellSchemaEntry?.loaded ? 'success' : 'default'}
+                                  variant={cellSchemaEntry?.loaded ? 'filled' : 'outlined'}
+                                  sx={{ height: 18, fontSize: '0.62rem' }}
+                                />
+                              </Tooltip>
+                            </>
+                          ) : (
+                            <Chip label={cell.markdownPreview ? 'Preview' : 'Editing'} size="small" variant="outlined" sx={{ height: 18, fontSize: '0.62rem' }} />
+                          )}
                           <Box sx={{ flex: 1 }} />
-                          {cell.duration != null && !cell.running && (
+                          {isSqlCell && cell.duration != null && !cell.running && (
                             <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>{fmtMs(cell.duration)}</Typography>
                           )}
                           <IconButton size="small" onClick={() => removeCell(activeConsole!.id, cell.id)}>
                             <DeleteOutlined sx={{ fontSize: 14 }} />
                           </IconButton>
                         </Box>
-                        <Box onClick={() => setActiveCellId(cell.id)} sx={{ minHeight: 172, bgcolor: theme.palette.mode === 'dark' ? '#0d1117' : '#fafafa' }}>
-                          <Editor
-                            path={`data-explorer/${activeConsole!.id}/${cell.id}.sql`}
-                            defaultLanguage="sql"
-                            value={cell.sql}
-                            beforeMount={beforeEditorMount}
-                            onMount={createEditorMount(activeConsole!.id, cell.id)}
-                            onChange={(value) => updateConsoleCell(activeConsole!.id, cell.id, { sql: value ?? '' })}
-                            theme={theme.palette.mode === 'dark' ? 'sql-workspace-dark' : 'sql-workspace-light'}
-                            options={{
-                              minimap: { enabled: false },
-                              fontSize: 13,
-                              fontFamily: 'JetBrains Mono, Consolas, Courier New, monospace',
-                              lineNumbers: 'on',
-                              wordWrap: 'on',
-                              automaticLayout: true,
-                              scrollBeyondLastLine: false,
-                              quickSuggestions: true,
-                              suggestOnTriggerCharacters: true,
-                              tabSize: 2,
-                              padding: { top: 10, bottom: 10 },
-                              contextmenu: false,
-                            }}
-                            height="172px"
-                          />
-                        </Box>
+                        {isSqlCell ? (
+                          <Box onClick={() => setActiveCellId(cell.id)} sx={{ minHeight: 172, bgcolor: theme.palette.mode === 'dark' ? '#0d1117' : '#fafafa' }}>
+                            <Editor
+                              path={`data-explorer/${activeConsole!.id}/${cell.id}.sql`}
+                              defaultLanguage="sql"
+                              value={cell.sql}
+                              beforeMount={beforeEditorMount}
+                              onMount={createEditorMount(activeConsole!.id, cell.id)}
+                              onChange={(value) => updateConsoleCell(activeConsole!.id, cell.id, { sql: value ?? '' })}
+                              theme={theme.palette.mode === 'dark' ? 'sql-workspace-dark' : 'sql-workspace-light'}
+                              options={{
+                                minimap: { enabled: false },
+                                fontSize: 13,
+                                fontFamily: 'JetBrains Mono, Consolas, Courier New, monospace',
+                                lineNumbers: 'on',
+                                wordWrap: 'on',
+                                automaticLayout: true,
+                                scrollBeyondLastLine: false,
+                                quickSuggestions: true,
+                                suggestOnTriggerCharacters: true,
+                                tabSize: 2,
+                                padding: { top: 10, bottom: 10 },
+                                contextmenu: false,
+                              }}
+                              height="172px"
+                            />
+                          </Box>
+                        ) : cell.markdownPreview ? (
+                          <Box sx={{ minHeight: 172, px: 2, py: 1.5, bgcolor: theme.palette.mode === 'dark' ? alpha('#fff', 0.02) : '#fbfbfb', overflow: 'auto' }}>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {cell.sql || '*No markdown content yet.*'}
+                            </ReactMarkdown>
+                          </Box>
+                        ) : (
+                          <Box onClick={() => setActiveCellId(cell.id)} sx={{ minHeight: 172, bgcolor: theme.palette.mode === 'dark' ? '#11161d' : '#fafafa' }}>
+                            <Editor
+                              path={`data-explorer/${activeConsole!.id}/${cell.id}.md`}
+                              defaultLanguage="markdown"
+                              value={cell.sql}
+                              onMount={createEditorMount(activeConsole!.id, cell.id)}
+                              onChange={(value) => updateConsoleCell(activeConsole!.id, cell.id, { sql: value ?? '' })}
+                              theme={theme.palette.mode === 'dark' ? 'sql-workspace-dark' : 'sql-workspace-light'}
+                              options={{
+                                minimap: { enabled: false },
+                                fontSize: 13,
+                                fontFamily: 'JetBrains Mono, Consolas, Courier New, monospace',
+                                lineNumbers: 'on',
+                                wordWrap: 'on',
+                                automaticLayout: true,
+                                scrollBeyondLastLine: false,
+                                tabSize: 2,
+                                padding: { top: 10, bottom: 10 },
+                                contextmenu: false,
+                              }}
+                              height="172px"
+                            />
+                          </Box>
+                        )}
                       </Box>
                     )
                   })}
@@ -1776,7 +2625,7 @@ export default function DataExplorer() {
                   </Box>
 
                   <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-                    {activeCell?.error && (
+                    {activeCell?.kind === 'sql' && activeCell?.error && (
                       <Alert severity="error" sx={{ m: 1.2, flexShrink: 0 }}>
                         <Typography sx={{ fontWeight: 700, mb: 0.5 }}>
                           {activeCell.error.statusCode ? `SQL execution failed (${activeCell.error.statusCode})` : 'SQL execution failed'}
@@ -1790,13 +2639,13 @@ export default function DataExplorer() {
                       </Alert>
                     )}
 
-                    {activeCell?.running && (
+                    {activeCell?.kind === 'sql' && activeCell?.running && (
                       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flex: 1 }}>
                         <CircularProgress size={24} />
                       </Box>
                     )}
 
-                    {activeCell?.result && !activeCell.running && (
+                    {activeCell?.kind === 'sql' && activeCell?.result && !activeCell.running && (
                       <RichGrid
                         columns={activeCell.result.columns}
                         rows={activeCell.result.rows}
@@ -1813,7 +2662,14 @@ export default function DataExplorer() {
                       />
                     )}
 
-                    {!activeCell?.running && !activeCell?.result && !activeCell?.error && (
+                    {activeCell?.kind === 'markdown' && (
+                      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'text.secondary', gap: 1 }}>
+                        <Description sx={{ fontSize: 36, opacity: 0.2 }} />
+                        <Typography variant="body2">Markdown cells document the SQL workflow and do not produce query results</Typography>
+                      </Box>
+                    )}
+
+                    {activeCell?.kind !== 'markdown' && !activeCell?.running && !activeCell?.result && !activeCell?.error && (
                       <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'text.secondary', gap: 1 }}>
                         <PlayArrow sx={{ fontSize: 36, opacity: 0.2 }} />
                         <Typography variant="body2">Run a SQL cell to view results</Typography>
@@ -1828,14 +2684,68 @@ export default function DataExplorer() {
                 anchorEl={cellMenuAnchor}
                 open={Boolean(cellMenuAnchor)}
                 onClose={closeCellContextMenu}
+                slotProps={{
+                  paper: {
+                    sx: {
+                      '& .MuiMenuItem-root': {
+                        fontSize: '0.74rem',
+                        minHeight: 28,
+                      },
+                    },
+                  },
+                }}
               >
                 <MenuItem
                   onClick={() => {
                     if (cellMenuTarget) runCell(cellMenuTarget.consoleId, cellMenuTarget.cellId)
                     closeCellContextMenu()
                   }}
+                  disabled={activeCell?.kind !== 'sql'}
                 >
                   Run Cell
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    exportFullCellQuery('csv')
+                  }}
+                  disabled={activeCell?.kind !== 'sql' || fullExportBusy !== null}
+                >
+                  {fullExportBusy === 'csv' ? 'Exporting Full CSV...' : 'Export Full Query CSV'}
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    exportServerSideCsv()
+                  }}
+                  disabled={activeCell?.kind !== 'sql' || fullExportBusy !== null}
+                >
+                  {fullExportBusy === 'csv' ? 'Server Export Running...' : 'Server Export CSV (Fast)'}
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    exportServerSide('xlsx')
+                  }}
+                  disabled={activeCell?.kind !== 'sql' || fullExportBusy !== null}
+                >
+                  {fullExportBusy === 'xlsx-server' ? 'Server Export Running...' : 'Server Export XLSX (Fast)'}
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    exportFullCellQuery('xlsx')
+                  }}
+                  disabled={activeCell?.kind !== 'sql' || fullExportBusy !== null}
+                >
+                  {fullExportBusy === 'xlsx' ? 'Exporting Full XLSX...' : 'Export Full Query XLSX'}
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    if (cellMenuTarget && activeCell?.kind === 'markdown') {
+                      updateConsoleCell(cellMenuTarget.consoleId, cellMenuTarget.cellId, { markdownPreview: !activeCell.markdownPreview })
+                    }
+                    closeCellContextMenu()
+                  }}
+                  disabled={activeCell?.kind !== 'markdown'}
+                >
+                  Toggle Markdown View
                 </MenuItem>
               </Menu>
             </Box>
