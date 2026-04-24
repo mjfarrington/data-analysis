@@ -277,6 +277,21 @@ export interface CatalogTable {
   is_temporary: boolean
 }
 
+export interface CatalogColumnInfo {
+  name: string
+  type?: string
+}
+
+export interface CatalogTableSchema {
+  name: string
+  columns: CatalogColumnInfo[]
+}
+
+export interface CatalogDatabaseIntrospection {
+  database: string
+  tables: CatalogTableSchema[]
+}
+
 export interface ExecutionContext {
   business_date: string
   namespace: string
@@ -400,6 +415,7 @@ export const dataApi = {
   listBrowser: () => api.get<BrowserDir[]>('/data/browser').then(r => r.data),
   listCatalogTables: () => api.get<CatalogTable[]>('/data/catalog/tables').then(r => r.data),
   listDatabases: () => api.get<string[]>('/data/catalog/databases').then(r => r.data),
+  introspectDatabase: (database: string) => api.get<CatalogDatabaseIntrospection>(`/data/catalog/databases/${encodeURIComponent(database)}/introspect`).then(r => r.data),
   sparkReconnect: () => api.post<{ status: string }>('/data/catalog/reconnect').then(r => r.data),
   sparkDisconnect: () => api.post<{ status: string }>('/data/catalog/disconnect').then(r => r.data),
   dropTempView: (viewName: string) => api.delete<{ status: string }>(`/data/catalog/views/${encodeURIComponent(viewName)}`).then(r => r.data),

@@ -205,6 +205,38 @@ async def list_catalog_databases():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.get("/catalog/databases/{database}/introspect")
+async def introspect_catalog_database(database: str):
+    """Return table and column metadata for a Spark database."""
+    try:
+        tables = await spark_service.list_catalog_tables()
+        database_tables = sorted(
+            [t["name"] for t in tables if t.get("database") == database and not t.get("is_temporary")]
+        )
+
+        result: list[dict] = []
+        for table_name in database_tables:
+            describe = await spark_service.execute_query(
+                f"DESCRIBE `{database}`.`{table_name}`",
+                limit=1000,
+                offset=0,
+                database=database,
+            )
+            columns: list[dict] = []
+            for row in describe.get("rows", []):
+                col_name = str(row[0] or "").strip() if len(row) > 0 else ""
+                data_type = str(row[1] or "").strip() if len(row) > 1 else ""
+                if not col_name or col_name.startswith("#"):
+                    continue
+                columns.append({"name": col_name, "type": data_type})
+            result.append({"name": table_name, "columns": columns})
+
+        return {"database": database, "tables": result}
+    except Exception as exc:
+        logger.exception("Error introspecting Spark database %s", database)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/catalog/tables")
 async def list_catalog_tables():
     """List all Spark catalog tables and views across all databases."""

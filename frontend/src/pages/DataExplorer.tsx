@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
+import Editor, { BeforeMount, OnMount } from '@monaco-editor/react'
 import {
   Box, Typography, TextField, Button, CircularProgress, Chip,
   InputAdornment, Alert, Tooltip, IconButton, Select, MenuItem,
@@ -12,7 +13,7 @@ import {
   Refresh, LinkOff, Link as LinkIcon, DeleteOutlined, Add, Save, Close, FileDownload,
 } from '@mui/icons-material'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { dataApi, DataTable, QueryResult, CatalogTable } from '../api/client'
+import { dataApi, DataTable, QueryResult, CatalogTable, CatalogDatabaseIntrospection } from '../api/client'
 import * as XLSX from 'xlsx'
 
 // ── Module-level tree state — survives React Router navigations ───────────────
@@ -64,6 +65,13 @@ interface SqlConsole {
   cells: SqlConsoleCell[]
 }
 
+interface DatabaseSchemaCacheEntry {
+  loading: boolean
+  loaded: boolean
+  tables: CatalogDatabaseIntrospection['tables']
+  error?: string
+}
+
 const DEFAULT_PAGE_SIZE = 100
 
 function createSqlCell(seedSql = ''): SqlConsoleCell {
@@ -100,6 +108,7 @@ const _viewState = {
   activeConsoleId: '' as string,
   activeCellId: '' as string,
   sqlResultsHeightPct: 46,
+  schemaCache: {} as Record<string, DatabaseSchemaCacheEntry>,
   schemaResult: null as QueryResult | null,
   schemaError: '',
 }
@@ -375,6 +384,10 @@ export default function DataExplorer() {
   const [cellMenuAnchor, setCellMenuAnchor] = useState<null | HTMLElement>(null)
   const [cellMenuTarget, setCellMenuTarget] = useState<{ consoleId: string; cellId: string } | null>(null)
   const sqlWorkspaceRef = useRef<HTMLDivElement | null>(null)
+  const completionDisposableRef = useRef<any>(null)
+  const schemaCacheRef = useRef<Record<string, DatabaseSchemaCacheEntry>>(_viewState.schemaCache)
+  const activeCellRef = useRef<SqlConsoleCell | null>(null)
+  const selectedItemRef = useRef<SelectedItem | null>(_viewState.selectedItem)
 
   // Left panel state — initialised from module-level store so it survives navigation
   const [leftSearch, setLeftSearch] = useState(() => _viewState.leftSearch)
@@ -408,6 +421,7 @@ export default function DataExplorer() {
     return _viewState.consoles[0]?.cells[0]?.id ?? ''
   })
   const [sqlResultsHeightPct, setSqlResultsHeightPct] = useState(() => _viewState.sqlResultsHeightPct)
+  const [schemaCache, setSchemaCache] = useState<Record<string, DatabaseSchemaCacheEntry>>(() => _viewState.schemaCache)
 
   const activeConsole = useMemo(
     () => consoles.find(c => c.id === activeConsoleId) ?? consoles[0] ?? null,
@@ -418,6 +432,23 @@ export default function DataExplorer() {
     () => activeConsole?.cells.find(c => c.id === activeCellId) ?? activeConsole?.cells[0] ?? null,
     [activeConsole, activeCellId],
   )
+
+  useEffect(() => {
+    activeCellRef.current = activeCell
+  }, [activeCell])
+
+  useEffect(() => {
+    selectedItemRef.current = selectedItem
+  }, [selectedItem])
+
+  useEffect(() => {
+    schemaCacheRef.current = schemaCache
+  }, [schemaCache])
+
+  useEffect(() => () => {
+    completionDisposableRef.current?.dispose?.()
+    completionDisposableRef.current = null
+  }, [])
 
   useEffect(() => {
     if (!activeConsole && consoles[0]) {
@@ -570,6 +601,162 @@ export default function DataExplorer() {
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
+  }
+
+  function normalizeSqlIdentifier(value: string): string {
+    return value.replace(/`/g, '').trim()
+  }
+
+  function resolveTableFromReference(reference: string, database: string): string | null {
+    const normalized = normalizeSqlIdentifier(reference)
+    const parts = normalized.split('.').filter(Boolean)
+    if (parts.length === 0) return null
+    if (parts.length === 1) return parts[0]
+    if (parts.length === 2) return parts[1]
+    if (parts[parts.length - 2] === database) return parts[parts.length - 1]
+    return parts[parts.length - 1]
+  }
+
+  function parseAliasTableMap(sql: string, database: string): Record<string, string> {
+    const aliasMap: Record<string, string> = {}
+    const pattern = /\b(?:FROM|JOIN)\s+((?:`?[\w]+`?\.)?`?[\w]+`?)\s+(?:AS\s+)?([A-Za-z_][\w]*)/gi
+    for (const match of sql.matchAll(pattern)) {
+      const reference = match[1]
+      const alias = match[2]
+      const tableName = resolveTableFromReference(reference, database)
+      if (tableName) aliasMap[alias.toUpperCase()] = tableName
+    }
+    return aliasMap
+  }
+
+  function getEditorDatabase(): string {
+    return activeCellRef.current?.queryDb || selectedItemRef.current?.database || 'default'
+  }
+
+  async function introspectDatabase(database: string, options?: { force?: boolean }) {
+    const existing = schemaCacheRef.current[database]
+    if (existing?.loading) return
+    if (existing?.loaded && !options?.force) return
+
+    setSchemaCache(prev => ({
+      ...prev,
+      [database]: {
+        loading: true,
+        loaded: false,
+        tables: prev[database]?.tables ?? [],
+        error: undefined,
+      },
+    }))
+
+    try {
+      const result = await dataApi.introspectDatabase(database)
+      setSchemaCache(prev => ({
+        ...prev,
+        [database]: {
+          loading: false,
+          loaded: true,
+          tables: result.tables,
+          error: undefined,
+        },
+      }))
+    } catch (err) {
+      setSchemaCache(prev => ({
+        ...prev,
+        [database]: {
+          loading: false,
+          loaded: false,
+          tables: prev[database]?.tables ?? [],
+          error: err instanceof Error ? err.message : String(err),
+        },
+      }))
+    }
+  }
+
+  const beforeEditorMount: BeforeMount = (monaco) => {
+    monaco.editor.defineTheme('sql-workspace-dark', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [],
+      colors: {
+        'editor.background': '#0d1117',
+        'editorGutter.background': '#0d1117',
+        'editorLineNumber.foreground': '#6e7681',
+        'editorLineNumber.activeForeground': '#c9d1d9',
+      },
+    })
+    monaco.editor.defineTheme('sql-workspace-light', {
+      base: 'vs',
+      inherit: true,
+      rules: [],
+      colors: {
+        'editor.background': '#fafafa',
+        'editorGutter.background': '#fafafa',
+      },
+    })
+
+    if (completionDisposableRef.current) return
+    completionDisposableRef.current = monaco.languages.registerCompletionItemProvider('sql', {
+      triggerCharacters: ['.'],
+      provideCompletionItems: (model: any, position: any) => {
+        const database = getEditorDatabase()
+        const schemaEntry = schemaCacheRef.current[database]
+        if (!schemaEntry?.loaded || schemaEntry.tables.length === 0) {
+          return { suggestions: [] }
+        }
+
+        const linePrefix = model.getLineContent(position.lineNumber).slice(0, position.column - 1)
+        const word = model.getWordUntilPosition(position)
+        const range = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: word.startColumn,
+          endColumn: word.endColumn,
+        }
+
+        const aliasMatch = linePrefix.match(/([A-Za-z_][\w]*)\.\s*$/)
+        if (aliasMatch) {
+          const aliasMap = parseAliasTableMap(model.getValue(), database)
+          const tableName = aliasMap[aliasMatch[1].toUpperCase()]
+          if (!tableName) return { suggestions: [] }
+          const table = schemaEntry.tables.find(t => t.name.toUpperCase() === tableName.toUpperCase())
+          if (!table) return { suggestions: [] }
+          return {
+            suggestions: table.columns.map(column => ({
+              label: column.name,
+              kind: monaco.languages.CompletionItemKind.Field,
+              insertText: column.name,
+              detail: column.type || `Column from ${table.name}`,
+              range,
+            })),
+          }
+        }
+
+        const lowerPrefix = word.word.toLowerCase()
+        return {
+          suggestions: schemaEntry.tables
+            .filter(table => !lowerPrefix || table.name.toLowerCase().includes(lowerPrefix))
+            .map(table => ({
+              label: table.name,
+              kind: monaco.languages.CompletionItemKind.Class,
+              insertText: table.name,
+              detail: `${table.columns.length} columns`,
+              range,
+            })),
+        }
+      },
+    })
+  }
+
+  function createEditorMount(consoleId: string, cellId: string): OnMount {
+    return (editor, monaco) => {
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+        runCell(consoleId, cellId)
+      })
+      editor.onDidFocusEditorText(() => {
+        setActiveConsoleId(consoleId)
+        setActiveCellId(cellId)
+      })
+    }
   }
 
   // ── Schema fetch ─────────────────────────────────────────────────────────────
@@ -786,6 +973,7 @@ export default function DataExplorer() {
     _viewState.activeConsoleId = activeConsoleId
     _viewState.activeCellId = activeCellId
     _viewState.sqlResultsHeightPct = sqlResultsHeightPct
+    _viewState.schemaCache = schemaCache
     _viewState.schemaResult = schemaResult
     _viewState.schemaError = schemaError
 
@@ -811,6 +999,7 @@ export default function DataExplorer() {
     activeConsoleId,
     activeCellId,
     sqlResultsHeightPct,
+    schemaCache,
     schemaResult,
     schemaError,
   ])
@@ -865,6 +1054,7 @@ export default function DataExplorer() {
     try {
       await dataApi.sparkReconnect()
       setSparkStatus('connected')
+      setSchemaCache({})
       handleSparkRefresh()
     } catch {
       setSparkStatus('disconnected')
@@ -878,6 +1068,7 @@ export default function DataExplorer() {
     try {
       await dataApi.sparkDisconnect()
       setSparkStatus('disconnected')
+      setSchemaCache({})
       queryClient.setQueryData(['catalog-tables'], [])
       queryClient.setQueryData(['catalog-databases'], [])
     } finally {
@@ -1106,6 +1297,7 @@ export default function DataExplorer() {
                   .map(([db, { tables, tempViews }]) => {
                     const dbExpanded = expandedDbs.has(db)
                     const totalCount = tables.length + tempViews.length
+                    const schemaEntry = schemaCache[db]
                     return (
                       <Box key={db}>
                         <Box
@@ -1118,9 +1310,32 @@ export default function DataExplorer() {
                           <Typography sx={{ fontSize: '0.74rem', fontFamily: 'monospace', flex: 1, color: 'text.secondary' }}>
                             {db}
                           </Typography>
+                          {schemaEntry?.loaded && (
+                            <Chip label="schema" size="small" color="success" variant="outlined" sx={{ height: 14, fontSize: '0.56rem', mr: 0.5 }} />
+                          )}
+                          <Tooltip title={schemaEntry?.loading ? `Introspecting ${db}...` : `Introspect ${db} tables and columns for SQL autocomplete`}>
+                            <span>
+                              <IconButton
+                                size="small"
+                                disabled={schemaEntry?.loading}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  introspectDatabase(db, { force: true })
+                                }}
+                                sx={{ p: 0.25, mr: 0.35 }}
+                              >
+                                {schemaEntry?.loading ? <CircularProgress size={11} /> : <Visibility sx={{ fontSize: 12 }} />}
+                              </IconButton>
+                            </span>
+                          </Tooltip>
                           <Chip label={totalCount} size="small" sx={{ height: 14, fontSize: '0.6rem' }} />
                         </Box>
                         <Collapse in={dbExpanded}>
+                          {schemaEntry?.error && (
+                            <Typography sx={{ px: 4, pt: 0.25, pb: 0.5, fontSize: '0.66rem', color: 'error.main' }}>
+                              {schemaEntry.error}
+                            </Typography>
+                          )}
                           {tables.length > 0 && (
                             <>
                               <Typography sx={{ fontSize: '0.63rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', px: 4, pt: 0.5, pb: 0.25, color: 'text.disabled' }}>
@@ -1426,6 +1641,8 @@ export default function DataExplorer() {
 
                   {(activeConsole?.cells ?? []).map((cell, idx) => {
                     const isActiveCell = cell.id === activeCell?.id
+                    const cellDatabase = cell.queryDb || selectedItem?.database || 'default'
+                    const cellSchemaEntry = schemaCache[cellDatabase]
                     return (
                       <Box
                         key={cell.id}
@@ -1461,6 +1678,19 @@ export default function DataExplorer() {
                               ))}
                             </Select>
                           </FormControl>
+                          <Tooltip
+                            title={cellSchemaEntry?.loaded
+                              ? `Autocomplete ready for ${cellDatabase}`
+                              : `Introspect ${cellDatabase} from the left catalog tree to enable column suggestions`}
+                          >
+                            <Chip
+                              label={cellSchemaEntry?.loaded ? 'Autocomplete ready' : 'Needs introspection'}
+                              size="small"
+                              color={cellSchemaEntry?.loaded ? 'success' : 'default'}
+                              variant={cellSchemaEntry?.loaded ? 'filled' : 'outlined'}
+                              sx={{ height: 18, fontSize: '0.62rem' }}
+                            />
+                          </Tooltip>
                           <Box sx={{ flex: 1 }} />
                           {cell.duration != null && !cell.running && (
                             <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>{fmtMs(cell.duration)}</Typography>
@@ -1469,33 +1699,32 @@ export default function DataExplorer() {
                             <DeleteOutlined sx={{ fontSize: 14 }} />
                           </IconButton>
                         </Box>
-                        <Box
-                          component="textarea"
-                          value={cell.sql}
-                          spellCheck={false}
-                          rows={4}
-                          onClick={() => setActiveCellId(cell.id)}
-                          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => updateConsoleCell(activeConsole!.id, cell.id, { sql: e.target.value })}
-                          onKeyDown={(e: React.KeyboardEvent) => {
-                            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                              e.preventDefault()
-                              runCell(activeConsole!.id, cell.id)
-                            }
-                          }}
-                          style={{
-                            width: '100%',
-                            border: 'none',
-                            outline: 'none',
-                            resize: 'vertical',
-                            fontFamily: 'JetBrains Mono, Consolas, Courier New, monospace',
-                            fontSize: '0.82rem',
-                            lineHeight: 1.6,
-                            padding: '10px 12px',
-                            background: theme.palette.mode === 'dark' ? '#0d1117' : '#fafafa',
-                            color: theme.palette.text.primary,
-                            boxSizing: 'border-box',
-                          }}
-                        />
+                        <Box onClick={() => setActiveCellId(cell.id)} sx={{ minHeight: 172, bgcolor: theme.palette.mode === 'dark' ? '#0d1117' : '#fafafa' }}>
+                          <Editor
+                            path={`data-explorer/${activeConsole!.id}/${cell.id}.sql`}
+                            defaultLanguage="sql"
+                            value={cell.sql}
+                            beforeMount={beforeEditorMount}
+                            onMount={createEditorMount(activeConsole!.id, cell.id)}
+                            onChange={(value) => updateConsoleCell(activeConsole!.id, cell.id, { sql: value ?? '' })}
+                            theme={theme.palette.mode === 'dark' ? 'sql-workspace-dark' : 'sql-workspace-light'}
+                            options={{
+                              minimap: { enabled: false },
+                              fontSize: 13,
+                              fontFamily: 'JetBrains Mono, Consolas, Courier New, monospace',
+                              lineNumbers: 'on',
+                              wordWrap: 'on',
+                              automaticLayout: true,
+                              scrollBeyondLastLine: false,
+                              quickSuggestions: true,
+                              suggestOnTriggerCharacters: true,
+                              tabSize: 2,
+                              padding: { top: 10, bottom: 10 },
+                              contextmenu: false,
+                            }}
+                            height="172px"
+                          />
+                        </Box>
                       </Box>
                     )
                   })}
