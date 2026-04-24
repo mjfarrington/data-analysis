@@ -142,22 +142,32 @@ async def _apply_canvas_to_extract_cfg(
 
         if node_type == "iterator":
             dict_id = cfg.get("dictionary_id")
-            selected_keys = [str(k) for k in (cfg.get("selected_keys") or []) if not str(k).isdigit()]
-            if dict_id and selected_keys:
+            selected_keys = [str(k) for k in (cfg.get("selected_keys") or [])]
+            if dict_id:
                 from app.models.etl import DictionaryEntry
-                rows = await db.execute(
-                    _sel(DictionaryEntry)
-                    .where(DictionaryEntry.dictionary_id == int(dict_id))
-                    .where(DictionaryEntry.key.in_(selected_keys))
-                )
-                entries = rows.scalars().all()
-                # Preserve order of selected_keys
-                entry_map = {e.key: e for e in entries}
-                apps = [
-                    {"id": str(entry_map[k].key), "name": str(entry_map[k].value)}
-                    for k in selected_keys
-                    if k in entry_map
-                ]
+                if selected_keys:
+                    rows = await db.execute(
+                        _sel(DictionaryEntry)
+                        .where(DictionaryEntry.dictionary_id == int(dict_id))
+                        .where(DictionaryEntry.key.in_(selected_keys))
+                    )
+                    entries = rows.scalars().all()
+                    # Preserve selected key order for deterministic app iteration.
+                    entry_map = {str(e.key): e for e in entries}
+                    apps = [
+                        {"id": str(entry_map[k].key), "name": str(entry_map[k].value)}
+                        for k in selected_keys
+                        if k in entry_map
+                    ]
+                else:
+                    # Empty selected_keys means "all entries" in the iterator UI.
+                    rows = await db.execute(
+                        _sel(DictionaryEntry)
+                        .where(DictionaryEntry.dictionary_id == int(dict_id))
+                        .order_by(DictionaryEntry.id)
+                    )
+                    entries = rows.scalars().all()
+                    apps = [{"id": str(e.key), "name": str(e.value)} for e in entries]
                 if apps:
                     updates["apps"] = apps
 
@@ -399,7 +409,15 @@ async def trigger_run(
     async def _bg():
         async with AsyncSessionLocal() as bg_db:
             bg_run = await bg_db.get(ETLRun, run.id)
-            await execute_pipeline(bg_db, bg_run, extract_cfg, transform_cfg, load_cfg, business_date=_resolved_date)
+            await execute_pipeline(
+                bg_db,
+                bg_run,
+                extract_cfg,
+                transform_cfg,
+                load_cfg,
+                business_date=_resolved_date,
+                run_scope=body.run_scope,
+            )
 
     asyncio.create_task(_bg())
     return RunSummary.model_validate(run)

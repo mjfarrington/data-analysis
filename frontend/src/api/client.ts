@@ -16,6 +16,12 @@ export interface RunSummary {
   error_message?: string
 }
 
+export interface RunTriggerRequest {
+  business_date?: string
+  run_scope?: 'full' | 'extract' | 'load'
+  extract_config?: Record<string, unknown>
+}
+
 export interface Pipeline {
   id: number
   name: string
@@ -301,8 +307,8 @@ export const pipelinesApi = {
   update: (id: number, data: Partial<Pipeline>) =>
     api.put<Pipeline>(`/etl/pipelines/${id}`, data).then(r => r.data),
   delete: (id: number) => api.delete(`/etl/pipelines/${id}`),
-  run: (id: number) =>
-    api.post<RunSummary>(`/etl/pipelines/${id}/run`).then(r => r.data),
+  run: (id: number, body?: RunTriggerRequest) =>
+    api.post<RunSummary>(`/etl/pipelines/${id}/run`, body ?? {}).then(r => r.data),
   getRuns: (id: number) =>
     api.get<RunSummary[]>(`/etl/pipelines/${id}/runs`).then(r => r.data),
   getGraph: () =>

@@ -56,6 +56,11 @@ function buildPipelineCategoryOptions(categories: string[]): string[] {
   })
 }
 
+function deriveSparkDatabaseName(businessDate?: string): string {
+  const compact = (businessDate ?? '{business_date}').replace(/-/g, '')
+  return `data_${compact}`
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Node catalog
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,12 +91,28 @@ const CATALOG: CatalogItem[] = [
   { type: 'sql_transform', label: 'SQL Transform',      color: TRANSFORM_COLOR,  category: 'transform', icon: <Code fontSize="inherit" /> },
   { type: 'notebook_transform', label: 'Notebook',      color: TRANSFORM_COLOR,  category: 'transform', icon: <LibraryBooks fontSize="inherit" /> },
   { type: 'aggregate',     label: 'Aggregate',          color: TRANSFORM_COLOR,  category: 'transform', icon: <Functions fontSize="inherit" /> },
-  { type: 'load_parquet',  label: 'Parquet File',       color: LOAD_COLOR,       category: 'load',      icon: <FolderOpen fontSize="inherit" /> },
+  { type: 'load_parquet',  label: 'Parquet File',       color: LOAD_COLOR,       category: 'load',      icon: <FolderOpen fontSize="inherit" /> , dualHandle: true },
   { type: 'load_sql',      label: 'SQL/Spark Table',    color: LOAD_COLOR,       category: 'load',      icon: <TableChart fontSize="inherit" /> },
   { type: 'load_s3',      label: 'S3 Bucket',    color: LOAD_COLOR,       category: 'load',      icon: <TableChart fontSize="inherit" /> },
 ]
 
 const CATALOG_MAP: Record<string, CatalogItem> = Object.fromEntries(CATALOG.map(c => [c.type, c]))
+
+interface TemplateItem {
+  id: string
+  label: string
+  description: string
+  color: string
+}
+
+const PIPELINE_TEMPLATES: TemplateItem[] = [
+  {
+    id: 'iterator-jdbc-aggregate-spark',
+    label: 'Interator ETL',
+    description: '',
+    color: '#0ea5a6',
+  },
+]
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Default configs per node type
@@ -160,7 +181,7 @@ function defaultConfig(type: string): Record<string, any> {
     case 'load_parquet':
       return { output_dir: '', path_template: '', partition_by: ['date'], mode: 'overwrite' }
     case 'load_sql':
-      return { database: '', table_name: '', mode: 'overwrite' }
+      return { namespace_db: '', database: '', table_name: '', mode: 'overwrite' }
     default:
       return {}
   }
@@ -212,7 +233,10 @@ function nodeSummary(type: string, config: Record<string, any>, meta?: { connNam
     case 'notebook_transform':
       return [meta?.notebookName ?? 'No notebook']
     case 'aggregate':
-      return [`${config.aggregations?.length ?? 0} aggregation(s)`]
+      return [
+        `${config.aggregations?.length ?? 0} aggregation(s)`,
+        (config.group_by ?? []).includes('app_id') ? 'Grouped by app_id' : 'No app_id grouping',
+      ]
     case 'load_parquet':
       return [config.path_template || config.output_dir || 'Default dir', config.mode]
     case 'load_sql':
@@ -772,14 +796,7 @@ function JdbcSharedConfig({
             )}
             {filteredConnections.map(c => (
               <MenuItem key={c.id} value={c.id}>
-                <Box>
-                  <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{c.name}</Typography>
-                  {c.host && (
-                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
-                      {c.host}{c.port ? `:${c.port}` : ''}{c.database ? `/${c.database}` : ''}
-                    </Typography>
-                  )}
-                </Box>
+                <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{c.name}</Typography>
               </MenuItem>
             ))}
           </Select>
@@ -1589,13 +1606,22 @@ function LoadParquetForm({ config, onChange }: {
   )
 }
 
-function LoadSQLForm({ config, onChange }: {
+function LoadSQLForm({ config, onChange, defaultDatabase }: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   config: Record<string, any>; onChange: (p: Record<string, any>) => void
+  defaultDatabase: string
 }) {
+  const dbValue = (config.namespace_db ?? config.database ?? '').toString()
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-      <TextField label="Database" size="small" fullWidth value={config.database ?? ''} onChange={e => onChange({ database: e.target.value })} />
+      <TextField
+        label="Database"
+        size="small"
+        fullWidth
+        value={dbValue || defaultDatabase}
+        onChange={e => onChange({ namespace_db: e.target.value, database: e.target.value })}
+        helperText={`Defaults to ${defaultDatabase}`}
+      />
       <TextField label="Table Name" size="small" fullWidth value={config.table_name ?? ''} onChange={e => onChange({ table_name: e.target.value })} />
       <FormControl size="small" fullWidth>
         <InputLabel>Write Mode</InputLabel>
@@ -2204,7 +2230,7 @@ function IteratorForm({ config, onChange, dictionaries, onPreview }: {
 }
 
 function PropertiesPanel({
-  node, onUpdateConfig, connections, sqlFiles, dictionaries, notebooks, onOpenSqlEditor, onPreviewIterator,
+  node, onUpdateConfig, connections, sqlFiles, dictionaries, notebooks, onOpenSqlEditor, onPreviewIterator, nodes, edges, pipelineName, businessDate,
 }: {
   node: Node<PipelineNodeData>
   onUpdateConfig: (nodeId: string, patch: Record<string, unknown>) => void
@@ -2214,7 +2240,131 @@ function PropertiesPanel({
   onOpenSqlEditor: () => void
   onPreviewIterator: (nodeId: string) => IteratorPreviewModel
   dictionaries: Dictionary[]
+  nodes: Node<PipelineNodeData>[]
+  edges: Edge[]
+  pipelineName: string
+  businessDate?: string
 }) {
+  const nodeById = useMemo(
+    () => new Map(nodes.map(n => [n.id, n])),
+    [nodes],
+  )
+  const incomingNodeIds = useMemo(
+    () => edges.filter(e => e.target === node.id).map(e => e.source),
+    [edges, node.id],
+  )
+  const outgoingNodeIds = useMemo(
+    () => edges.filter(e => e.source === node.id).map(e => e.target),
+    [edges, node.id],
+  )
+
+  const findUpstreamIterator = useCallback((): Node<PipelineNodeData> | null => {
+    const visited = new Set<string>()
+    const queue = [...incomingNodeIds]
+    while (queue.length > 0) {
+      const currentId = queue.shift()!
+      if (visited.has(currentId)) continue
+      visited.add(currentId)
+      const current = nodeById.get(currentId)
+      if (!current) continue
+      if (current.data.nodeType === 'iterator') return current
+      const parents = edges.filter(e => e.target === currentId).map(e => e.source)
+      queue.push(...parents)
+    }
+    return null
+  }, [incomingNodeIds, nodeById, edges])
+
+  const ioPreview = useMemo(() => {
+    const nodeName = node.data.label || CATALOG_MAP[node.data.nodeType]?.label || node.data.nodeType
+    const upstream = incomingNodeIds
+      .map(id => nodeById.get(id))
+      .filter((n): n is Node<PipelineNodeData> => Boolean(n))
+    const downstream = outgoingNodeIds
+      .map(id => nodeById.get(id))
+      .filter((n): n is Node<PipelineNodeData> => Boolean(n))
+
+    const inputs: string[] = []
+    const outputs: string[] = []
+
+    if (upstream.length > 0) {
+      inputs.push(`From: ${upstream.map(n => n.data.label || CATALOG_MAP[n.data.nodeType]?.label || n.data.nodeType).join(', ')}`)
+    } else {
+      inputs.push('From: Pipeline start')
+    }
+
+    if (downstream.length > 0) {
+      outputs.push(`To: ${downstream.map(n => n.data.label || CATALOG_MAP[n.data.nodeType]?.label || n.data.nodeType).join(', ')}`)
+    } else {
+      outputs.push('To: Final output sink')
+    }
+
+    if (node.data.nodeType === 'iterator') {
+      const dict = dictionaries.find(d => d.id === Number(node.data.config?.dictionary_id))
+      const selectedKeys: string[] = node.data.config?.selected_keys ?? []
+      const activeKeys = selectedKeys.length > 0
+        ? selectedKeys
+        : (dict?.entries.map(e => e.key) ?? [])
+      const keyParam = node.data.config?.key_param ?? 'app_id'
+      const valueParam = node.data.config?.value_param ?? 'app_name'
+      inputs.push(`Dictionary: ${dict?.name ?? 'not selected'}`)
+      outputs.push(`Branches: ${activeKeys.length} (${activeKeys.slice(0, 6).join(', ')}${activeKeys.length > 6 ? ' ...' : ''})`)
+      outputs.push(`Params emitted: $${keyParam}, $${valueParam}`)
+    }
+
+    if (node.data.nodeType === 'jdbc_extract' || node.data.nodeType === 'dw_extract') {
+      const sqlConfigured = Boolean((node.data.config?.sql ?? '').trim() || node.data.config?.sql_file_id)
+      inputs.push(sqlConfigured ? 'SQL: configured' : 'SQL: not configured')
+      const limit = Number(node.data.config?.limit)
+      outputs.push(Number.isFinite(limit) && limit > 0
+        ? `Rows: up to ${limit.toLocaleString()} per run`
+        : 'Rows: all matching rows')
+      outputs.push(`Chunk size: ${(Number(node.data.config?.chunk_size) || 50000).toLocaleString()} rows`)
+    }
+
+    if (node.data.nodeType === 'aggregate' || node.data.nodeType === 'load_sql') {
+      const iteratorNode = findUpstreamIterator()
+      const dict = iteratorNode ? dictionaries.find(d => d.id === Number(iteratorNode.data.config?.dictionary_id)) : undefined
+      const selectedKeys: string[] = iteratorNode?.data.config?.selected_keys ?? []
+      const activeKeys = selectedKeys.length > 0
+        ? selectedKeys
+        : (dict?.entries.map(e => e.key) ?? [])
+      const basePath = `data/pipeline/parquet/{business_date}/${pipelineName || 'pipeline'}`
+      if (activeKeys.length > 0) {
+        inputs.push(`Source dirs: ${activeKeys.slice(0, 4).map(k => `${basePath}/${k}`).join(' ; ')}${activeKeys.length > 4 ? ' ; ...' : ''}`)
+      } else {
+        inputs.push(`Source dirs: ${basePath}/{app_id}`)
+      }
+    }
+
+    if (node.data.nodeType === 'aggregate') {
+      const groupBy = (node.data.config?.group_by ?? []) as string[]
+      const aggCount = ((node.data.config?.aggregations ?? []) as unknown[]).length
+      inputs.push(groupBy.length > 0 ? `Group by: ${groupBy.join(', ')}` : 'Group by: none (global aggregate)')
+      outputs.push(`Aggregations: ${aggCount}`)
+      outputs.push(`Output dataset: ${nodeName} (in-memory)`)
+    }
+
+    if (node.data.nodeType === 'load_parquet') {
+      const pathTemplate = (node.data.config?.path_template ?? '').trim()
+      const outputDir = (node.data.config?.output_dir ?? '').trim()
+      outputs.push(`Parquet path: ${outputDir || pathTemplate || 'data/pipeline/parquet/{business_date}/{pipeline_name}/{app_id}'}`)
+      outputs.push(`Write mode: ${node.data.config?.mode ?? 'overwrite'}`)
+    }
+
+    if (node.data.nodeType === 'load_sql') {
+      const database = (node.data.config?.namespace_db ?? node.data.config?.database ?? deriveSparkDatabaseName(businessDate)).trim() || deriveSparkDatabaseName(businessDate)
+      const table = (node.data.config?.table_name ?? '').trim() || '{table_name}'
+      outputs.push(`Spark table: ${database}.${table}`)
+      outputs.push(`Write mode: ${node.data.config?.mode ?? 'overwrite'}`)
+    }
+
+    if (node.data.nodeType === 'filter' || node.data.nodeType === 'sort' || node.data.nodeType === 'join' || node.data.nodeType === 'lookup' || node.data.nodeType === 'sql_transform' || node.data.nodeType === 'notebook_transform') {
+      outputs.push('Output dataset: transformed rows')
+    }
+
+    return { inputs, outputs }
+  }, [node, incomingNodeIds, outgoingNodeIds, nodeById, dictionaries, findUpstreamIterator, pipelineName, businessDate])
+
   const cat = CATALOG_MAP[node.data.nodeType]
   const onChange = (patch: Record<string, unknown>) => onUpdateConfig(node.id, patch)
 
@@ -2311,8 +2461,32 @@ function PropertiesPanel({
         <LoadParquetForm config={node.data.config} onChange={onChange} />
       )}
       {node.data.nodeType === 'load_sql' && (
-        <LoadSQLForm config={node.data.config} onChange={onChange} />
+        <LoadSQLForm config={node.data.config} onChange={onChange} defaultDatabase={deriveSparkDatabaseName(businessDate)} />
       )}
+
+      <Divider />
+
+      <Paper variant="outlined" sx={{ p: 1.25, bgcolor: 'action.hover' }}>
+        <Typography variant="caption" sx={{ fontWeight: 700, fontSize: '0.64rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          Expected I/O (Pre-Run)
+        </Typography>
+        <Box sx={{ mt: 0.8 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem', fontWeight: 700 }}>Inputs</Typography>
+          {ioPreview.inputs.map((line, i) => (
+            <Typography key={`in-${i}`} variant="caption" sx={{ display: 'block', fontSize: '0.72rem', lineHeight: 1.35 }}>
+              - {line}
+            </Typography>
+          ))}
+        </Box>
+        <Box sx={{ mt: 0.8 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem', fontWeight: 700 }}>Outputs</Typography>
+          {ioPreview.outputs.map((line, i) => (
+            <Typography key={`out-${i}`} variant="caption" sx={{ display: 'block', fontSize: '0.72rem', lineHeight: 1.35 }}>
+              - {line}
+            </Typography>
+          ))}
+        </Box>
+      </Paper>
     </Box>
   )
 }
@@ -2619,8 +2793,107 @@ function SchemaPanel({
 
 let _nodeIdSeq = 1000
 
+function _newNodeId(): string {
+  return `node_${_nodeIdSeq++}`
+}
+
+function buildIteratorJdbcAggregateSparkTemplate(
+  position: { x: number; y: number },
+): { nodes: Node<PipelineNodeData>[]; edges: Edge[] } {
+  const iteratorId = _newNodeId()
+  const jdbcId = _newNodeId()
+  const aggregateId = _newNodeId()
+  const loadId = _newNodeId()
+
+  const nodeGap = 220
+  const y = position.y
+
+  const templateNodes: Node<PipelineNodeData>[] = [
+    {
+      id: iteratorId,
+      type: 'pipeline',
+      position: { x: position.x, y },
+      data: {
+        nodeType: 'iterator',
+        label: 'Iterator',
+        config: defaultConfig('iterator'),
+      },
+    },
+    {
+      id: jdbcId,
+      type: 'pipeline',
+      position: { x: position.x + nodeGap, y },
+      data: {
+        nodeType: 'jdbc_extract',
+        label: 'JDBC Extract',
+        config: {
+          ...defaultConfig('jdbc_extract'),
+          sql: "SELECT *\nFROM your_table\nWHERE business_date = '$business_date'\n  AND app_id = '$app_id'",
+          chunk_size: 50000,
+        },
+      },
+    },
+    {
+      id: aggregateId,
+      type: 'pipeline',
+      position: { x: position.x + nodeGap * 2, y },
+      data: {
+        nodeType: 'aggregate',
+        label: 'Aggregate',
+        config: {
+          ...defaultConfig('aggregate'),
+          group_by: ['app_id', 'business_date'],
+          aggregations: [{ column: 'amount', function: 'sum', alias: 'total_amount' }],
+        },
+      },
+    },
+    {
+      id: loadId,
+      type: 'pipeline',
+      position: { x: position.x + nodeGap * 3, y },
+      data: {
+        nodeType: 'load_sql',
+        label: 'SQL/Spark Table',
+        config: {
+          ...defaultConfig('load_sql'),
+          table_name: 'app_daily_aggregate',
+          mode: 'overwrite',
+        },
+      },
+    },
+  ]
+
+  const templateEdges: Edge[] = [
+    {
+      id: `edge_${iteratorId}_${jdbcId}`,
+      source: iteratorId,
+      target: jdbcId,
+      animated: true,
+      markerEnd: { type: MarkerType.ArrowClosed },
+    },
+    {
+      id: `edge_${jdbcId}_${aggregateId}`,
+      source: jdbcId,
+      target: aggregateId,
+      animated: true,
+      markerEnd: { type: MarkerType.ArrowClosed },
+    },
+    {
+      id: `edge_${aggregateId}_${loadId}`,
+      source: aggregateId,
+      target: loadId,
+      animated: true,
+      markerEnd: { type: MarkerType.ArrowClosed },
+    },
+  ]
+
+  return { nodes: templateNodes, edges: templateEdges }
+}
+
 export default function PipelineEditor() {
   const { id } = useParams<{ id: string }>()
+  const pipelineId = Number(id)
+  const hasExistingPipelineId = Number.isFinite(pipelineId) && pipelineId > 0
   const navigate = useNavigate()
   const theme = useTheme()
   const qc = useQueryClient()
@@ -2675,8 +2948,8 @@ export default function PipelineEditor() {
 
   const { data: pipeline, isLoading: pipelineLoading } = useQuery<Pipeline>({
     queryKey: ['pipeline', id],
-    queryFn: () => pipelinesApi.list().then(list => list.find(p => p.id === Number(id))!),
-    enabled: !!id,
+    queryFn: () => pipelinesApi.list().then(list => list.find(p => p.id === pipelineId)!),
+    enabled: hasExistingPipelineId,
   })
 
   const { data: allPipelines = [] } = useQuery<Pipeline[]>({
@@ -2706,8 +2979,8 @@ export default function PipelineEditor() {
 
   const { data: pipelineRuns = [], isLoading: runsLoading } = useQuery<RunSummary[]>({
     queryKey: ['pipeline-runs', id],
-    queryFn: () => pipelinesApi.getRuns(Number(id)),
-    enabled: !!id,
+    queryFn: () => pipelinesApi.getRuns(pipelineId),
+    enabled: hasExistingPipelineId,
     refetchInterval: (q) => {
       const runs = (q.state.data as RunSummary[] | undefined) ?? []
       return runs.some(r => r.status === 'running' || r.status === 'pending') ? 3000 : false
@@ -2719,6 +2992,69 @@ export default function PipelineEditor() {
     [pipelineRuns],
   )
 
+  const setupChecklist = useMemo(() => {
+    const iteratorNode = nodes.find(n => n.data.nodeType === 'iterator')
+    const jdbcNode = nodes.find(n => n.data.nodeType === 'jdbc_extract')
+    const aggregateNode = nodes.find(n => n.data.nodeType === 'aggregate')
+    const loadNode = nodes.find(n => ['load_sql', 'load_parquet'].includes(n.data.nodeType))
+
+    const items = [
+      {
+        key: 'iter-node',
+        label: 'Iterator node is on canvas',
+        ok: Boolean(iteratorNode),
+      },
+      {
+        key: 'iter-dict',
+        label: 'Iterator dictionary selected',
+        ok: Boolean(iteratorNode?.data.config?.dictionary_id),
+      },
+      {
+        key: 'jdbc-node',
+        label: 'JDBC Extract node is on canvas',
+        ok: Boolean(jdbcNode),
+      },
+      {
+        key: 'jdbc-conn',
+        label: 'JDBC connection selected',
+        ok: Boolean(jdbcNode?.data.config?.connection_id),
+      },
+      {
+        key: 'jdbc-sql',
+        label: 'JDBC SQL configured (inline or file)',
+        ok: Boolean((jdbcNode?.data.config?.sql ?? '').trim() || jdbcNode?.data.config?.sql_file_id),
+      },
+      {
+        key: 'agg-node',
+        label: 'Aggregate node exists',
+        ok: Boolean(aggregateNode),
+      },
+      {
+        key: 'load-node',
+        label: 'Load node exists (Spark table or Parquet file)',
+        ok: Boolean(loadNode),
+      },
+      {
+        key: 'load-spark-table',
+        label: 'Spark table name is set (for load-to-table runs)',
+        ok: loadNode?.data.nodeType !== 'load_sql' || Boolean((loadNode.data.config?.table_name ?? '').trim()),
+      },
+      {
+        key: 'biz-date',
+        label: 'Business date is set in execution context',
+        ok: Boolean(execContext?.business_date),
+      },
+    ]
+
+    const completeCount = items.filter(i => i.ok).length
+    return {
+      items,
+      completeCount,
+      total: items.length,
+      percent: Math.round((completeCount / Math.max(items.length, 1)) * 100),
+    }
+  }, [nodes, execContext?.business_date])
+
   const categoryOptions = useMemo(
     () => buildPipelineCategoryOptions(allPipelines.map(p => p.category)),
     [allPipelines],
@@ -2727,7 +3063,19 @@ export default function PipelineEditor() {
   // ── Load canvas state when pipeline arrives ──────────────────────────────
 
   useEffect(() => {
-    if (!pipeline) return
+    if (!hasExistingPipelineId || !pipeline) {
+      setPipelineName('')
+      setPipelineCategory(DEFAULT_PIPELINE_CATEGORY)
+      setPipelineStatus(DEFAULT_PIPELINE_STATUS)
+      setNodes([])
+      setEdges([])
+      setSelectedNode(null)
+      setActiveRunId(null)
+      setSqlPanel({ ...CLOSED_PANEL })
+      setViewport({ x: 0, y: 0, zoom: 1 })
+      setTimeout(() => rfRef.current?.setViewport({ x: 0, y: 0, zoom: 1 }), 50)
+      return
+    }
     setPipelineName(pipeline.name)
     setPipelineCategory((pipeline.category ?? '').trim() || DEFAULT_PIPELINE_CATEGORY)
     setPipelineStatus(pipeline.status ?? DEFAULT_PIPELINE_STATUS)
@@ -2745,7 +3093,8 @@ export default function PipelineEditor() {
       }
     }
     // else: empty canvas for new pipeline
-  }, [pipeline])
+    setSelectedNode(null)
+  }, [pipeline, hasExistingPipelineId])
 
   // ── Mutations ────────────────────────────────────────────────────────────
 
@@ -2757,9 +3106,12 @@ export default function PipelineEditor() {
   const [activeRunId, setActiveRunId] = useState<number | null>(null)
   const [warnNoBizDate, setWarnNoBizDate] = useState(false)
   const [executionPlanOpen, setExecutionPlanOpen] = useState(false)
+  const [runScope, setRunScope] = useState<'full' | 'extract' | 'load'>('full')
+  const [checklistVisible, setChecklistVisible] = useState(true)
+  const [checklistExpanded, setChecklistExpanded] = useState(false)
 
   const runMut = useMutation({
-    mutationFn: () => pipelinesApi.run(Number(id)),
+    mutationFn: (scope: 'full' | 'extract' | 'load') => pipelinesApi.run(Number(id), { run_scope: scope }),
     onSuccess: (run) => {
       setActiveRunId(run.id)
       qc.invalidateQueries({ queryKey: ['pipelines'] })
@@ -2768,18 +3120,27 @@ export default function PipelineEditor() {
     },
   })
 
-  function handleRunPipeline() {
+  function handleRunPipeline(scope: 'full' | 'extract' | 'load' = runScope) {
     if (!execContext?.business_date) {
       setWarnNoBizDate(true)
       return
     }
-    runMut.mutate()
+    runMut.mutate(scope)
+  }
+
+  function handleRunSelectedStep() {
+    if (!selectedNode) return
+    const sourceNodeTypes = new Set(['iterator', 'jdbc_extract', 'dw_extract', 's3_extract'])
+    const targetScope: 'extract' | 'load' = sourceNodeTypes.has(selectedNode.data.nodeType) ? 'extract' : 'load'
+    handleRunPipeline(targetScope)
   }
 
   const saveMut = useMutation({
     mutationFn: () => {
       const dwNode = nodes.find(n => n.data.nodeType === 'dw_extract')
-      const loadNode = nodes.find(n => ['load_parquet', 'load_sql'].includes(n.data.nodeType))
+      const loadNode =
+        nodes.find(n => n.data.nodeType === 'load_sql')
+        ?? nodes.find(n => n.data.nodeType === 'load_parquet')
 
       // Topological sort of canvas nodes → determine execution order
       const adj: Record<string, string[]> = {}
@@ -2821,6 +3182,13 @@ export default function PipelineEditor() {
       const load_config = loadNode ? {
         target: loadNode.data.nodeType === 'load_parquet' ? 'parquet' : 'spark_table',
         ...loadNode.data.config,
+        ...(loadNode.data.nodeType === 'load_sql'
+          ? {
+              namespace_db:
+                (loadNode.data.config.namespace_db ?? loadNode.data.config.database ?? '').trim()
+                || deriveSparkDatabaseName(execContext?.business_date),
+            }
+          : {}),
       } : undefined
 
       return pipelinesApi.update(Number(id), {
@@ -2863,9 +3231,8 @@ export default function PipelineEditor() {
 
   const onDrop = useCallback((event: React.DragEvent) => {
     event.preventDefault()
+    const templateId = event.dataTransfer.getData('application/pipeline-template')
     const nodeType = event.dataTransfer.getData('application/pipeline-node')
-    const cat = CATALOG_MAP[nodeType]
-    if (!cat) return
 
     const bounds = reactFlowWrapper.current?.getBoundingClientRect()
     if (!bounds) return
@@ -2875,8 +3242,18 @@ export default function PipelineEditor() {
       y: event.clientY - bounds.top  - 40,
     }
 
+    if (templateId === 'iterator-jdbc-aggregate-spark') {
+      const { nodes: templateNodes, edges: templateEdges } = buildIteratorJdbcAggregateSparkTemplate(position)
+      setNodes(nds => [...nds, ...templateNodes])
+      setEdges(eds => [...eds, ...templateEdges])
+      return
+    }
+
+    const cat = CATALOG_MAP[nodeType]
+    if (!cat) return
+
     const newNode: Node<PipelineNodeData> = {
-      id:   `node_${_nodeIdSeq++}`,
+      id: _newNodeId(),
       type: 'pipeline',
       position,
       data: {
@@ -3019,7 +3396,7 @@ export default function PipelineEditor() {
         output = `${cfg.database || 'default'}.${cfg.table_name || '(table)'}`
       } else if (terminalNode?.data.nodeType === 'load_s3') {
         const cfg = terminalNode.data.config ?? {}
-        output = `${cfg.target_db || 'default'}.${cfg.target_table || '?'}`
+        output = `${cfg.namespace_db || cfg.database || deriveSparkDatabaseName(execContext?.business_date)}.${cfg.table_name || '(table)'}`
       }
 
       return {
@@ -3156,7 +3533,7 @@ export default function PipelineEditor() {
       }
 
       if (current && visited.has(current.id)) {
-        laneWarnings.push('Cycle detected; lane traversal stops at the first repeated node.')
+        laneWarnings.push('This path loops back to an earlier step. The preview stops where the loop begins.')
       }
 
       return {
@@ -3282,15 +3659,35 @@ export default function PipelineEditor() {
         {saveMut.isSuccess && (
           <Typography variant="caption" color="success.main" sx={{ fontSize: '0.72rem' }}>Saved ✓</Typography>
         )}
+        <FormControl size="small" sx={{ minWidth: 148 }}>
+          <Select
+            value={runScope}
+            onChange={e => setRunScope(e.target.value as 'full' | 'extract' | 'load')}
+            sx={{ fontSize: '0.76rem', height: 32 }}
+          >
+            <MenuItem value="full">Run Full Pipeline</MenuItem>
+            <MenuItem value="extract">Run Extract Part</MenuItem>
+            <MenuItem value="load">Run Load Part</MenuItem>
+          </Select>
+        </FormControl>
         <Button
           size="small"
           variant="outlined"
           color="success"
           startIcon={<PlayArrow sx={{ fontSize: 15 }} />}
-          onClick={handleRunPipeline}
-          disabled={runMut.isPending}
+          onClick={() => handleRunPipeline(runScope)}
+          disabled={runMut.isPending || !hasExistingPipelineId}
         >
           Run
+        </Button>
+        <Button
+          size="small"
+          variant="outlined"
+          color="success"
+          onClick={handleRunSelectedStep}
+          disabled={runMut.isPending || !selectedNode || !hasExistingPipelineId}
+        >
+          Run Selected Step
         </Button>
         <Button
           size="small"
@@ -3306,16 +3703,77 @@ export default function PipelineEditor() {
           variant="contained"
           startIcon={<Save sx={{ fontSize: 15 }} />}
           onClick={() => saveMut.mutate()}
-          disabled={saveMut.isPending}
+          disabled={saveMut.isPending || !hasExistingPipelineId}
         >
           {saveMut.isPending ? <CircularProgress size={14} /> : 'Save'}
         </Button>
+        <Button
+          size="small"
+          variant={checklistVisible ? 'text' : 'outlined'}
+          onClick={() => {
+            setChecklistVisible(v => !v)
+            if (!checklistVisible) setChecklistExpanded(false)
+          }}
+          sx={{ minWidth: 84 }}
+        >
+          {checklistVisible ? 'Hide Checklist' : 'Show Checklist'}
+        </Button>
         <Tooltip title="Delete pipeline">
-          <IconButton size="small" color="error" onClick={() => setDeletePipelineConfirm(true)}>
+          <IconButton size="small" color="error" onClick={() => setDeletePipelineConfirm(true)} disabled={!hasExistingPipelineId}>
             <Delete sx={{ fontSize: 16 }} />
           </IconButton>
         </Tooltip>
       </Box>
+
+      {checklistVisible && <Box sx={{ px: 1, py: 0.55, borderBottom: `1px solid ${theme.palette.divider}`, bgcolor: alpha(theme.palette.info.main, 0.04) }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5 }}>
+          <Typography variant="caption" sx={{ fontWeight: 700, fontSize: '0.72rem' }}>
+            Pipeline Setup Checklist
+          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
+            <Chip
+              size="small"
+              color={setupChecklist.completeCount === setupChecklist.total ? 'success' : 'warning'}
+              label={`${setupChecklist.completeCount}/${setupChecklist.total}`}
+              sx={{ height: 18, fontSize: '0.62rem' }}
+            />
+            <Tooltip title={checklistExpanded ? 'Collapse checklist' : 'Expand checklist'}>
+              <IconButton size="small" onClick={() => setChecklistExpanded(v => !v)}>
+                {checklistExpanded ? <ExpandLess sx={{ fontSize: 16 }} /> : <ExpandMore sx={{ fontSize: 16 }} />}
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Close checklist">
+              <IconButton size="small" onClick={() => setChecklistVisible(false)}>
+                <Close sx={{ fontSize: 14 }} />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        </Box>
+        <LinearProgress
+          variant="determinate"
+          value={setupChecklist.percent}
+          color={setupChecklist.percent === 100 ? 'success' : 'info'}
+          sx={{ height: 5, borderRadius: 999, mb: checklistExpanded ? 0.6 : 0 }}
+        />
+        {checklistExpanded && (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+            {setupChecklist.items.filter(i => !i.ok).length === 0 ? (
+              <Chip size="small" color="success" icon={<CheckBox sx={{ fontSize: 14 }} />} label="All required setup fields are complete" sx={{ fontSize: '0.64rem' }} />
+            ) : (
+              setupChecklist.items.filter(i => !i.ok).map(item => (
+                <Chip
+                  key={item.key}
+                  size="small"
+                  color="warning"
+                  icon={<CheckBoxOutlineBlank sx={{ fontSize: 13 }} />}
+                  label={item.label}
+                  sx={{ fontSize: '0.62rem', maxWidth: '100%' }}
+                />
+              ))
+            )}
+          </Box>
+        )}
+      </Box>}
 
       {/* ── Layout row ──────────────────────────────────────────────── */}
       <Box
@@ -3350,6 +3808,7 @@ export default function PipelineEditor() {
           }}
         >
           {[
+            { label: 'Templates', items: PIPELINE_TEMPLATES },
             { label: 'Orchestration', items: CATALOG.filter(c => c.type === 'iterator') },
             { label: 'Sources',    items: CATALOG.filter(c => c.category === 'source' && c.type !== 'iterator') },
             { label: 'Transforms', items: CATALOG.filter(c => c.category === 'transform') },
@@ -3363,11 +3822,17 @@ export default function PipelineEditor() {
               >
                 {group.label}
               </Typography>
-              {group.items.map(item => (
+              {group.items.map((item: CatalogItem | TemplateItem) => (
                 <Box
-                  key={item.type}
+                  key={'type' in item ? item.type : item.id}
                   draggable
-                  onDragStart={e => e.dataTransfer.setData('application/pipeline-node', item.type)}
+                  onDragStart={e => {
+                    if ('type' in item) {
+                      e.dataTransfer.setData('application/pipeline-node', item.type)
+                    } else {
+                      e.dataTransfer.setData('application/pipeline-template', item.id)
+                    }
+                  }}
                   sx={{
                     display: 'flex', alignItems: 'center', gap: 1,
                     mx: 0.75, px: 1, py: 0.6, mb: 0.25, borderRadius: 1.25, cursor: 'grab',
@@ -3377,10 +3842,23 @@ export default function PipelineEditor() {
                     '&:active': { cursor: 'grabbing' },
                   }}
                 >
-                  <Box sx={{ color: item.color, fontSize: 14, display: 'flex', flexShrink: 0 }}>{item.icon}</Box>
-                  <Typography variant="caption" sx={{ color: item.color, fontWeight: 500, fontSize: '0.71rem', lineHeight: 1.3 }}>
-                    {item.label}
-                  </Typography>
+                  {'type' in item ? (
+                    <>
+                      <Box sx={{ color: item.color, fontSize: 14, display: 'flex', flexShrink: 0 }}>{item.icon}</Box>
+                      <Typography variant="caption" sx={{ color: item.color, fontWeight: 500, fontSize: '0.71rem', lineHeight: 1.3 }}>
+                        {item.label}
+                      </Typography>
+                    </>
+                  ) : (
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography variant="caption" sx={{ color: item.color, fontWeight: 700, fontSize: '0.68rem', lineHeight: 1.25, display: 'block' }}>
+                        {item.label}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.6rem', lineHeight: 1.25 }}>
+                        {item.description}
+                      </Typography>
+                    </Box>
+                  )}
                 </Box>
               ))}
             </Box>
@@ -3491,6 +3969,10 @@ export default function PipelineEditor() {
                     notebooks={notebooks}
                     onOpenSqlEditor={() => selectedNode && openSqlEditorForNode(selectedNode)}
                     onPreviewIterator={buildIteratorPreview}
+                    nodes={nodes}
+                    edges={edges}
+                    pipelineName={pipelineName}
+                    businessDate={execContext?.business_date}
                   />
                 )
                 : (

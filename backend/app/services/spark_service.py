@@ -389,12 +389,12 @@ class SparkService:
         def _merge():
             spark = _get_spark()
             base_path = settings.parquet_path / date / job_name / app_id
-            parquet_files = list(base_path.rglob("*.parquet"))
-            csv_files = list(base_path.rglob("*.csv"))
+            parquet_files = sorted(str(p) for p in base_path.rglob("*.parquet"))
+            csv_files = sorted(str(p) for p in base_path.rglob("*.csv"))
             if parquet_files:
-                df = spark.read.option("recursiveFileLookup", "true").parquet(str(base_path))
+                df = spark.read.parquet(*parquet_files)
             elif csv_files:
-                df = spark.read.option("header", "true").option("inferSchema", "true").csv(str(base_path))
+                df = spark.read.option("header", "true").option("inferSchema", "true").csv(csv_files)
             else:
                 raise FileNotFoundError(f"No segment files found under {base_path}")
 
@@ -448,12 +448,12 @@ class SparkService:
 
             frames = []
             for app_dir in app_dirs:
-                parquet_files = list(app_dir.rglob("*.parquet"))
-                csv_files = list(app_dir.rglob("*.csv"))
+                parquet_files = sorted(str(p) for p in app_dir.rglob("*.parquet"))
+                csv_files = sorted(str(p) for p in app_dir.rglob("*.csv"))
                 if parquet_files:
-                    df = spark.read.option("recursiveFileLookup", "true").parquet(str(app_dir))
+                    df = spark.read.parquet(*parquet_files)
                 elif csv_files:
-                    df = spark.read.option("header", "true").option("inferSchema", "true").csv(str(app_dir))
+                    df = spark.read.option("header", "true").option("inferSchema", "true").csv(csv_files)
                 else:
                     continue
                 df = df.withColumn("application_id", F.lit(app_dir.name))

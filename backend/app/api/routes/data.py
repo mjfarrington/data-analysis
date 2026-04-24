@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+import traceback
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -11,6 +12,34 @@ from app.services.spark_service import spark_service, reset_spark_session, _get_
 
 router = APIRouter(prefix="/data", tags=["Data"])
 logger = logging.getLogger(__name__)
+
+
+def _suppress_jvm_stacktrace(text: str) -> str:
+    """Remove noisy JVM stack-frame lines while keeping the root Spark error message."""
+    if not text:
+        return text
+    cleaned: list[str] = []
+    suppressed = False
+    inserted_marker = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        is_jvm_frame = (
+            stripped.startswith("at org.")
+            or stripped.startswith("at java.")
+            or stripped.startswith("at scala.")
+            or stripped.startswith("at sun.")
+            or (stripped.startswith("...") and stripped.endswith("more"))
+        )
+        if is_jvm_frame:
+            suppressed = True
+            if not inserted_marker:
+                cleaned.append("[JVM stack trace suppressed]")
+                inserted_marker = True
+            continue
+        cleaned.append(line)
+    if not suppressed:
+        return text
+    return "\n".join(cleaned).strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,7 +169,26 @@ async def execute_query(body: QueryRequest):
         result = await spark_service.execute_query(body.sql, body.limit, body.offset, database=body.database)
         return QueryResult(**result)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        exc_name = exc.__class__.__name__
+        spark_message = str(exc)
+        spark_message_clean = _suppress_jvm_stacktrace(spark_message)
+        msg_lower = spark_message.lower()
+        is_user_sql_error = any(
+            token in exc_name.lower() or token in msg_lower
+            for token in ("parse", "analysis", "syntax", "sqlstate", "mismatched input")
+        )
+        traceback_clean = _suppress_jvm_stacktrace(traceback.format_exc())
+        raise HTTPException(
+            status_code=400 if is_user_sql_error else 500,
+            detail={
+                "message": "Spark SQL execution failed",
+                "error_type": exc_name,
+                "spark_message": spark_message_clean,
+                "database": body.database,
+                "sql": body.sql,
+                "traceback": traceback_clean,
+            },
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

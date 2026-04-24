@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
-from typing import Optional, Any
+from typing import Optional, Any, Literal
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -166,6 +166,7 @@ class PipelineResponse(PipelineBase):
 class RunTrigger(BaseModel):
     extract_config: Optional[ExtractConfig] = None  # override pipeline extract config
     business_date: Optional[str] = None             # YYYY-MM-DD override for this run
+    run_scope: Literal["full", "extract", "load"] = "full"
 
 
 class RunSummary(BaseModel):

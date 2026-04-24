@@ -29,6 +29,7 @@ export function formatRunDate(str?: string): string {
 // ── Step tree ─────────────────────────────────────────────────────────────────
 
 interface StepNode { step: RunStep; children: StepNode[] }
+interface StepIoEntry { inputs?: string[]; outputs?: string[] }
 
 function buildStepTree(steps: RunStep[]): StepNode[] {
   const byId = new Map<number, StepNode>()
@@ -68,7 +69,15 @@ function StepDot({ status, color }: { status: string; color: string }) {
   return <Box sx={{ width: size, height: size, borderRadius: '50%', flexShrink: 0, bgcolor: bg, border: bg ? undefined : `1.5px solid ${alpha(color, 0.4)}` }} />
 }
 
-function StepTreeRow({ node, depth = 0 }: { node: StepNode; depth?: number }) {
+function StepTreeRow({
+  node,
+  depth = 0,
+  stepIoByType,
+}: {
+  node: StepNode
+  depth?: number
+  stepIoByType: Record<string, StepIoEntry>
+}) {
   const status = derivedStatus(node)
   const [open, setOpen] = useState(() => !TERMINAL.includes(status) && depth < 2)
   const theme = useTheme()
@@ -85,6 +94,13 @@ function StepTreeRow({ node, depth = 0 }: { node: StepNode; depth?: number }) {
   const color = STEP_COLORS[node.step.step_type] ?? '#6e7681'
   const hasChildren = node.children.length > 0
   const done = node.children.filter(c => ['completed', 'failed', 'cancelled'].includes(derivedStatus(c))).length
+  const io = stepIoByType[node.step.step_type] ?? {}
+  const ioInputs = (io.inputs && io.inputs.length > 0)
+    ? io.inputs
+    : [`${(node.step.records_in ?? 0).toLocaleString()} rows`]
+  const ioOutputs = (io.outputs && io.outputs.length > 0)
+    ? io.outputs
+    : [`${(node.step.records_out ?? 0).toLocaleString()} rows`]
 
   return (
     <>
@@ -139,8 +155,16 @@ function StepTreeRow({ node, depth = 0 }: { node: StepNode; depth?: number }) {
           <StatusChip status={status} />
         </Box>
       </Box>
+      <Box sx={{ pl: `${34 + depth * 20}px`, pr: 1.5, pb: 0.6, display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem' }}>
+          In: {ioInputs.join(' ; ')}
+        </Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem' }}>
+          Out: {ioOutputs.join(' ; ')}
+        </Typography>
+      </Box>
       {hasChildren && open && node.children.map(child => (
-        <StepTreeRow key={child.step.id} node={child} depth={depth + 1} />
+        <StepTreeRow key={child.step.id} node={child} depth={depth + 1} stepIoByType={stepIoByType} />
       ))}
     </>
   )
@@ -287,6 +311,7 @@ export default function RunDetailPanel({ runId, fillLogToBottom = false, bgcolor
   const isRunning = run.status === 'running' || run.status === 'pending'
   const hasSparkWarning = run.status === 'completed_with_warnings'
   const hasCanvas = !!(pipeline?.canvas_config as any)?.nodes?.length
+  const stepIoByType = (((run.run_metadata as any)?.step_io ?? {}) as Record<string, StepIoEntry>)
 
   return (
     <Box sx={{ p: 2, bgcolor: bgcolor ?? alpha(theme.palette.background.paper, 0.5) }}>
@@ -371,7 +396,7 @@ export default function RunDetailPanel({ runId, fillLogToBottom = false, bgcolor
           {stepView === 'steps' ? (
             <Box sx={{ border: `1px solid ${theme.palette.divider}`, borderRadius: 1, overflow: 'hidden' }}>
               {buildStepTree(run.steps).map(node => (
-                <StepTreeRow key={node.step.id} node={node} depth={0} />
+                <StepTreeRow key={node.step.id} node={node} depth={0} stepIoByType={stepIoByType} />
               ))}
             </Box>
           ) : pipeline ? (

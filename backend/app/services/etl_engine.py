@@ -11,7 +11,7 @@ import logging
 import traceback
 from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -833,6 +833,7 @@ async def execute_pipeline(
     transform_cfg: TransformConfig,
     load_cfg: LoadConfig,
     business_date: Optional[str] = None,
+    run_scope: Literal["full", "extract", "load"] = "full",
 ) -> None:
     """Execute one ETL run. Updates run + extract_job rows in DB."""
     run_id = run.id
@@ -854,6 +855,7 @@ async def execute_pipeline(
         await db.commit()
         await log("Pipeline started", step="init")
         await log(f"Source: {extract_cfg.source_type.upper()}", step="init")
+        await log(f"Run scope: {run_scope}", step="init")
 
         # ── Initialise per-node run tracking rows ────────────────────────────
         # Build the step list from the actual canvas pipeline:
@@ -929,9 +931,13 @@ async def execute_pipeline(
             await db.commit()
 
         source = extract_cfg.source_type
+        extract_enabled = run_scope in ("full", "extract")
+        spark_load_enabled = run_scope in ("full", "load")
 
         # ── S3 fast-path: Spark-native ingest, bypasses segment loop ─────────
         if source == "s3":
+            if not extract_enabled:
+                raise ValueError("Load-only mode is not supported for S3 source pipelines.")
             if not extract_cfg.s3_connection_id:
                 raise ValueError("S3 source requires s3_connection_id.")
             if not extract_cfg.s3_target_table:
@@ -998,6 +1004,7 @@ async def execute_pipeline(
             "namespace_db": load_cfg.namespace_db,
             "table_name": load_cfg.table_name,
             "mode": load_cfg.mode or "overwrite",
+            "run_scope": run_scope,
         }
         await db.commit()
 
@@ -1031,9 +1038,52 @@ async def execute_pipeline(
         total_loaded = 0
         total_segs = 0
         spark_table_failed = False
+        spark_load_dates: set[str] = set()
+        spark_input_dirs_by_date: dict[str, set[str]] = {}
+        step_io: dict[str, dict[str, list[str]]] = {}
+
+        def _set_step_io(step_type: str, inputs: Optional[list[str]] = None, outputs: Optional[list[str]] = None) -> None:
+            cur = step_io.get(step_type, {"inputs": [], "outputs": []})
+            if inputs is not None:
+                cur["inputs"] = inputs
+            if outputs is not None:
+                cur["outputs"] = outputs
+            step_io[step_type] = cur
+        if run_scope == "load":
+            if load_cfg.target != "spark_table":
+                raise ValueError("Load-only runs require load target 'spark_table'.")
+            if not load_cfg.namespace_db:
+                raise ValueError("Load-only runs require load_config.namespace_db.")
+            await _begin_step("load")
+            for date_str in dates:
+                base_dir = settings.parquet_path / date_str / job_name
+                _set_step_io(
+                    "load",
+                    inputs=[f"directories under {base_dir}"],
+                )
+                result = await spark_service.load_to_spark_table(
+                    date=date_str,
+                    job_name=job_name,
+                    namespace_db=load_cfg.namespace_db,
+                    table_name=load_cfg.table_name,
+                    mode=load_cfg.mode or "overwrite",
+                )
+                rows_loaded = int(result.get("rows_loaded") or result.get("row_count") or 0)
+                total_loaded += rows_loaded
+                run.records_loaded = total_loaded
+                _set_step_io(
+                    "load",
+                    outputs=[str(result.get("table")), f"{rows_loaded:,} rows merged"],
+                )
+                await log(
+                    f"Load-only date={date_str}: saved {rows_loaded:,} row(s) to {result.get('table')}",
+                    step="load",
+                    extra={"date": date_str, "rows_loaded": rows_loaded, "table": result.get("table")},
+                )
+            await _finish_step("load", RunStatus.COMPLETED, records_in=0, records_out=total_loaded)
 
         # ── JDBC / JSON / CSV / DW: read all → chunk by rows_per_segment ──────────
-        if True:  # single extraction path
+        if extract_enabled:  # single extraction path
             # Build app list from unified apps config; fallback to pipeline_id
             fallback_app_id = str(run.pipeline_id)
             app_list: list[tuple[Optional[str], Optional[str]]] = [
@@ -1182,6 +1232,7 @@ async def execute_pipeline(
                                         extract_cfg, date_str, job_name, app_id,
                                         settings.parquet_path,
                                     )
+                                    spark_input_dirs_by_date.setdefault(date_str, set()).add(str(_jdbc_output_dir))
                                     out_file = _jdbc_output_dir / f"part_{seg_idx:05d}.parquet"
                                     _jdbc_schema, output_path = await asyncio.to_thread(
                                         _write_chunk_pyarrow_sync,
@@ -1259,25 +1310,59 @@ async def execute_pipeline(
                         }
                         await db.commit()
 
-                    if load_cfg.target == "spark_table" and source != "jdbc":
-                        try:
-                            tbl = await spark_service.merge_and_register_table(
-                                app_id, date_str,
-                                job_name=job_name,
-                                table_name=load_cfg.table_name,
-                                namespace_db=load_cfg.namespace_db,
-                                mode=load_cfg.mode or "overwrite",
-                            )
-                            await log(f"  Saved catalog table: {tbl}", step="load")
-                        except Exception as exc:
-                            spark_table_failed = True
-                            spark_err_msg = f"Spark table registration failed (app={app_id}, date={date_str}): {exc}"
-                            run.error_message = spark_err_msg
-                            await log(f"  Spark table skipped: {exc}", level="WARN")
+                    if spark_load_enabled and load_cfg.target == "spark_table":
+                        spark_load_dates.add(date_str)
 
                 # Finish app step after all dates for this app are done
                 await _finish_step(_app_key, RunStatus.COMPLETED,
                                    records_in=0, records_out=_app_extracted)
+
+            if spark_load_enabled and load_cfg.target == "spark_table":
+                if not load_cfg.namespace_db:
+                    raise ValueError("Spark table load requires load_config.namespace_db.")
+                for date_str in sorted(spark_load_dates):
+                    try:
+                        src_dirs = sorted(spark_input_dirs_by_date.get(date_str, set()))
+                        _set_step_io(
+                            "load",
+                            inputs=src_dirs or [f"directories under {settings.parquet_path / date_str / job_name}"],
+                        )
+                        if any(xs.node_type == "aggregate" for xs in transform_cfg.transforms_pipeline):
+                            _set_step_io(
+                                "aggregate",
+                                inputs=src_dirs or [f"directories under {settings.parquet_path / date_str / job_name}"],
+                                outputs=["aggregated in-memory dataset"],
+                            )
+                        result = await spark_service.load_to_spark_table(
+                            date=date_str,
+                            job_name=job_name,
+                            namespace_db=load_cfg.namespace_db,
+                            table_name=load_cfg.table_name,
+                            mode=load_cfg.mode or "overwrite",
+                        )
+                        _set_step_io(
+                            "load",
+                            outputs=[
+                                str(result.get("table")),
+                                f"{int(result.get('rows_loaded') or 0):,} rows merged",
+                            ],
+                        )
+                        await log(
+                            f"  Saved catalog table: {result.get('table')} (merged {result.get('app_ids_merged')} app folder(s))",
+                            step="load",
+                        )
+                    except Exception as exc:
+                        spark_table_failed = True
+                        spark_err_msg = f"Spark table registration failed (date={date_str}): {exc}"
+                        run.error_message = spark_err_msg
+                        await log(f"  Spark table skipped: {exc}", level="WARN")
+
+        if step_io:
+            run.run_metadata = {
+                **(run.run_metadata or {}),
+                "step_io": step_io,
+            }
+            await db.commit()
 
         run.status = RunStatus.COMPLETED_WITH_WARNINGS if spark_table_failed else RunStatus.COMPLETED
         run.finished_at = datetime.now(timezone.utc)

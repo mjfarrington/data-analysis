@@ -22,6 +22,25 @@ const _treeState = {
   expandedDates: new Set<string>(),
 }
 
+const _viewState = {
+  leftSearch: '',
+  leftCollapsed: false,
+  rightCollapsed: false,
+  selectedItem: null as SelectedItem | null,
+  activeTab: 'preview' as ActiveTab,
+  previewPage: 0,
+  previewPageSize: 100,
+  sql: '',
+  queryDb: '',
+  queryPage: 0,
+  queryPageSize: 100,
+  queryResult: null as QueryResult | null,
+  queryError: null as QueryErrorInfo | null,
+  queryDuration: null as number | null,
+  schemaResult: null as QueryResult | null,
+  schemaError: '',
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface SelectedItem {
@@ -35,6 +54,16 @@ interface SelectedItem {
 
 type ActiveTab = 'preview' | 'schema' | 'query'
 
+interface QueryErrorInfo {
+  message: string
+  statusCode?: number
+  errorType?: string
+  sparkMessage?: string
+  sql?: string
+  database?: string
+  traceback?: string
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function fmtBytes(b: number): string {
@@ -46,6 +75,39 @@ function fmtBytes(b: number): string {
 
 function fmtMs(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`
+}
+
+function parseQueryError(err: unknown): QueryErrorInfo {
+  const fallbackMessage = err instanceof Error ? err.message : String(err)
+  const e = err as {
+    response?: {
+      status?: number
+      data?: {
+        detail?: unknown
+      }
+    }
+  }
+  const statusCode = e?.response?.status
+  const detail = e?.response?.data?.detail
+
+  if (detail && typeof detail === 'object') {
+    const d = detail as Record<string, unknown>
+    return {
+      message: String(d.message ?? fallbackMessage),
+      statusCode,
+      errorType: d.error_type ? String(d.error_type) : undefined,
+      sparkMessage: d.spark_message ? String(d.spark_message) : undefined,
+      sql: d.sql ? String(d.sql) : undefined,
+      database: d.database ? String(d.database) : undefined,
+      traceback: d.traceback ? String(d.traceback) : undefined,
+    }
+  }
+
+  if (typeof detail === 'string' && detail.trim()) {
+    return { message: detail, statusCode }
+  }
+
+  return { message: fallbackMessage, statusCode }
 }
 
 const PAGE_SIZES = [50, 100, 200, 500]
@@ -253,40 +315,40 @@ export default function DataExplorer() {
   const queryClient = useQueryClient()
 
   // Left panel state — initialised from module-level store so it survives navigation
-  const [leftSearch, setLeftSearch] = useState('')
+  const [leftSearch, setLeftSearch] = useState(() => _viewState.leftSearch)
   const [catalogOpen, setCatalogOpen] = useState(() => _treeState.catalogOpen)
   const [filesOpen, setFilesOpen] = useState(() => _treeState.filesOpen)
   const [expandedDbs, setExpandedDbs] = useState<Set<string>>(() => new Set(_treeState.expandedDbs))
   const [expandedDates, setExpandedDates] = useState<Set<string>>(() => new Set(_treeState.expandedDates))
-  const [leftCollapsed, setLeftCollapsed] = useState(false)
-  const [rightCollapsed, setRightCollapsed] = useState(false)
+  const [leftCollapsed, setLeftCollapsed] = useState(() => _viewState.leftCollapsed)
+  const [rightCollapsed, setRightCollapsed] = useState(() => _viewState.rightCollapsed)
 
   // Spark connection UI state
   const [sparkBusy, setSparkBusy] = useState(false)
   const [sparkStatus, setSparkStatus] = useState<'connected' | 'disconnected' | null>(null)
 
   // Selection + tabs
-  const [selectedItem, setSelectedItem] = useState<SelectedItem | null>(null)
-  const [activeTab, setActiveTab] = useState<ActiveTab>('preview')
+  const [selectedItem, setSelectedItem] = useState<SelectedItem | null>(() => _viewState.selectedItem)
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => _viewState.activeTab)
 
   // Preview state
-  const [previewPage, setPreviewPage] = useState(0)
-  const [previewPageSize, setPreviewPageSize] = useState(100)
+  const [previewPage, setPreviewPage] = useState(() => _viewState.previewPage)
+  const [previewPageSize, setPreviewPageSize] = useState(() => _viewState.previewPageSize)
 
   // Query tab state
-  const [sql, setSql] = useState('')
-  const [queryDb, setQueryDb] = useState('')
-  const [queryPage, setQueryPage] = useState(0)
-  const [queryPageSize, setQueryPageSize] = useState(100)
-  const [queryResult, setQueryResult] = useState<QueryResult | null>(null)
-  const [queryError, setQueryError] = useState('')
-  const [queryDuration, setQueryDuration] = useState<number | null>(null)
+  const [sql, setSql] = useState(() => _viewState.sql)
+  const [queryDb, setQueryDb] = useState(() => _viewState.queryDb)
+  const [queryPage, setQueryPage] = useState(() => _viewState.queryPage)
+  const [queryPageSize, setQueryPageSize] = useState(() => _viewState.queryPageSize)
+  const [queryResult, setQueryResult] = useState<QueryResult | null>(() => _viewState.queryResult)
+  const [queryError, setQueryError] = useState<QueryErrorInfo | null>(() => _viewState.queryError)
+  const [queryDuration, setQueryDuration] = useState<number | null>(() => _viewState.queryDuration)
   const [queryRunning, setQueryRunning] = useState(false)
 
   // Schema state
-  const [schemaResult, setSchemaResult] = useState<QueryResult | null>(null)
+  const [schemaResult, setSchemaResult] = useState<QueryResult | null>(() => _viewState.schemaResult)
   const [schemaLoading, setSchemaLoading] = useState(false)
-  const [schemaError, setSchemaError] = useState('')
+  const [schemaError, setSchemaError] = useState(() => _viewState.schemaError)
 
   // ── Remote data ─────────────────────────────────────────────────────────────
 
@@ -430,7 +492,7 @@ export default function DataExplorer() {
     if (db !== undefined) setQueryDb(db)
     if (switchTab) setActiveTab('query')
     setQueryRunning(true)
-    setQueryError('')
+    setQueryError(null)
     setQueryResult(null)
     setQueryPage(0)
     setQueryDuration(null)
@@ -439,7 +501,7 @@ export default function DataExplorer() {
       setQueryResult(result)
       setQueryDuration(result.duration_ms ?? null)
     } catch (err) {
-      setQueryError(err instanceof Error ? err.message : String(err))
+      setQueryError(parseQueryError(err))
     } finally {
       setQueryRunning(false)
     }
@@ -448,7 +510,7 @@ export default function DataExplorer() {
   async function runCurrentQuery() {
     if (!sql.trim()) return
     setQueryRunning(true)
-    setQueryError('')
+    setQueryError(null)
     setQueryResult(null)
     setQueryPage(0)
     setQueryDuration(null)
@@ -457,7 +519,7 @@ export default function DataExplorer() {
       setQueryResult(result)
       setQueryDuration(result.duration_ms ?? null)
     } catch (err) {
-      setQueryError(err instanceof Error ? err.message : String(err))
+      setQueryError(parseQueryError(err))
     } finally {
       setQueryRunning(false)
     }
@@ -472,7 +534,7 @@ export default function DataExplorer() {
       setQueryResult(result)
       setQueryDuration(result.duration_ms ?? null)
     } catch (err) {
-      setQueryError(err instanceof Error ? err.message : String(err))
+      setQueryError(parseQueryError(err))
     } finally {
       setQueryRunning(false)
     }
@@ -488,6 +550,42 @@ export default function DataExplorer() {
     _treeState.expandedDbs = new Set(expandedDbs)
     _treeState.expandedDates = new Set(expandedDates)
   }, [catalogOpen, filesOpen, expandedDbs, expandedDates])
+
+  useEffect(() => {
+    _viewState.leftSearch = leftSearch
+    _viewState.leftCollapsed = leftCollapsed
+    _viewState.rightCollapsed = rightCollapsed
+    _viewState.selectedItem = selectedItem
+    _viewState.activeTab = activeTab
+    _viewState.previewPage = previewPage
+    _viewState.previewPageSize = previewPageSize
+    _viewState.sql = sql
+    _viewState.queryDb = queryDb
+    _viewState.queryPage = queryPage
+    _viewState.queryPageSize = queryPageSize
+    _viewState.queryResult = queryResult
+    _viewState.queryError = queryError
+    _viewState.queryDuration = queryDuration
+    _viewState.schemaResult = schemaResult
+    _viewState.schemaError = schemaError
+  }, [
+    leftSearch,
+    leftCollapsed,
+    rightCollapsed,
+    selectedItem,
+    activeTab,
+    previewPage,
+    previewPageSize,
+    sql,
+    queryDb,
+    queryPage,
+    queryPageSize,
+    queryResult,
+    queryError,
+    queryDuration,
+    schemaResult,
+    schemaError,
+  ])
 
   useEffect(() => {
     const onToggleLeft = () => setLeftCollapsed(v => !v)
@@ -1111,7 +1209,46 @@ export default function DataExplorer() {
               {/* Results */}
               <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                 {queryError && (
-                  <Alert severity="error" sx={{ m: 1.5, flexShrink: 0 }}>{queryError}</Alert>
+                  <Alert severity="error" sx={{ m: 1.5, flexShrink: 0 }}>
+                    <Typography sx={{ fontWeight: 700, mb: 0.5 }}>
+                      {queryError.statusCode ? `SQL execution failed (${queryError.statusCode})` : 'SQL execution failed'}
+                    </Typography>
+                    <Typography sx={{ mb: 0.5 }}>{queryError.message}</Typography>
+                    {queryError.errorType && (
+                      <Typography sx={{ fontFamily: 'monospace', fontSize: '0.75rem', mb: 0.5 }}>
+                        Error type: {queryError.errorType}
+                      </Typography>
+                    )}
+                    {queryError.database && (
+                      <Typography sx={{ fontFamily: 'monospace', fontSize: '0.75rem', mb: 0.5 }}>
+                        Database: {queryError.database}
+                      </Typography>
+                    )}
+                    {queryError.sparkMessage && (
+                      <Box sx={{ mt: 0.5 }}>
+                        <Typography variant="caption" sx={{ fontWeight: 700 }}>Spark message</Typography>
+                        <Box component="pre" sx={{ m: 0, mt: 0.25, p: 1, borderRadius: 1, overflowX: 'auto', bgcolor: 'rgba(0,0,0,0.08)', fontFamily: 'monospace', fontSize: '0.74rem', whiteSpace: 'pre-wrap' }}>
+                          {queryError.sparkMessage}
+                        </Box>
+                      </Box>
+                    )}
+                    {queryError.sql && (
+                      <Box sx={{ mt: 0.75 }}>
+                        <Typography variant="caption" sx={{ fontWeight: 700 }}>SQL</Typography>
+                        <Box component="pre" sx={{ m: 0, mt: 0.25, p: 1, borderRadius: 1, overflowX: 'auto', bgcolor: 'rgba(0,0,0,0.08)', fontFamily: 'monospace', fontSize: '0.74rem', whiteSpace: 'pre-wrap' }}>
+                          {queryError.sql}
+                        </Box>
+                      </Box>
+                    )}
+                    {queryError.traceback && (
+                      <Box sx={{ mt: 0.75 }}>
+                        <Typography variant="caption" sx={{ fontWeight: 700 }}>Traceback</Typography>
+                        <Box component="pre" sx={{ m: 0, mt: 0.25, p: 1, borderRadius: 1, maxHeight: 240, overflow: 'auto', bgcolor: 'rgba(0,0,0,0.08)', fontFamily: 'monospace', fontSize: '0.72rem', whiteSpace: 'pre-wrap' }}>
+                          {queryError.traceback}
+                        </Box>
+                      </Box>
+                    )}
+                  </Alert>
                 )}
                 {queryRunning && (
                   <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flex: 1 }}>
