@@ -178,6 +178,20 @@ async def _apply_canvas_to_extract_cfg(
             date_fmt = cfg.get("date_format")
             if date_fmt:
                 updates["jdbc_date_var_format"] = date_fmt
+            limit = cfg.get("limit")
+            if limit is not None:
+                try:
+                    updates["jdbc_row_limit"] = int(limit)
+                except (TypeError, ValueError):
+                    pass
+
+        elif node_type == "load_parquet":
+            if cfg.get("output_dir"):
+                updates["parquet_output_dir"] = str(cfg["output_dir"]).strip()
+            elif cfg.get("path_template"):
+                updates["parquet_path_template"] = str(cfg["path_template"]).strip()
+            if cfg.get("mode"):
+                updates["parquet_write_mode"] = str(cfg["mode"])
 
         elif node_type == "s3_extract":
             updates["source_type"] = "s3"

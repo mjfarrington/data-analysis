@@ -74,6 +74,15 @@ class ExtractConfig(BaseModel):
     # Output path: <DATE>/<job_name>/<app_id>/
     job_name: Optional[str] = None
 
+    # JDBC row limit (applied as SQL LIMIT when non-null)
+    jdbc_row_limit: Optional[int] = None
+
+    # Parquet output config (populated from the load_parquet canvas node at run time).
+    # When set these override the default spark_service output path for JDBC sources.
+    parquet_output_dir: Optional[str] = None      # fixed subdir relative to PARQUET_DIR
+    parquet_path_template: Optional[str] = None   # template: {business_date}/{pipeline_name}/{app_id}
+    parquet_write_mode: str = "overwrite"
+
 
 class TransformStep(BaseModel):
     """One step in a canvas-derived transform pipeline."""

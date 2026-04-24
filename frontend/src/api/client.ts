@@ -67,6 +67,7 @@ export interface ExtractJob {
 
 export interface RunDetail extends RunSummary {
   pipeline_id: number
+  run_metadata?: Record<string, unknown>
   logs: RunLog[]
   steps: RunStep[]
   extract_jobs: ExtractJob[]

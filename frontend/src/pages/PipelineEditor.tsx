@@ -126,6 +126,7 @@ function defaultConfig(type: string): Record<string, any> {
         sql: '',
         sql_file_id: null,
         params: [],   // [{key, value}] static params shared across all runs
+        limit: null,
         chunk_size: 50000,
         output_subdir: '',
         date_format: 'YYYY-MM-DD',
@@ -189,6 +190,7 @@ function nodeSummary(type: string, config: Record<string, any>, meta?: { connNam
       return [
         meta?.connName ? `🔌 ${meta.connName}` : '🔌 No connection',
         config.sql || config.sql_file_id ? '📝 SQL configured' : '📝 No SQL',
+        Number(config.limit) > 0 ? `🔢 Limit ${Number(config.limit).toLocaleString()} rows` : '🔢 No row limit',
         `📦 ${config.chunk_size?.toLocaleString() ?? '50,000'} rows/chunk`,
       ]
     case 's3_extract':
@@ -700,12 +702,18 @@ function SqlBottomPanel({
   )
 }
 
-function JdbcExtractForm({
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared JDBC config fields — reused by JdbcExtractForm and DWExtractForm
+// ─────────────────────────────────────────────────────────────────────────────
+
+function JdbcSharedConfig({
   config,
   onChange,
   connections,
   sqlFiles,
   dictionaries,
+  connectionType,
+  connectionLabel = 'Connection',
   onOpenSqlEditor,
 }: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -715,32 +723,25 @@ function JdbcExtractForm({
   connections: Connection[]
   sqlFiles: SqlFile[]
   dictionaries: Dictionary[]
-  onOpenSqlEditor: () => void
+  connectionType: string
+  connectionLabel?: string
+  onOpenSqlEditor?: () => void
 }) {
-  const [extracting, setExtracting] = useState(false)
-  const [extractResult, setExtractResult] = useState<{ total_rows: number; file_count: number; output_dir: string } | null>(null)
-  const [extractError, setExtractError] = useState<string | null>(null)
   const [sqlMode, setSqlMode] = useState<'inline' | 'file'>(config.sql_file_id ? 'file' : 'inline')
-  const [showVars, setShowVars] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; latency_ms: number; message: string } | null>(null)
   const [testing, setTesting] = useState(false)
 
   const params: SqlParam[] = config.params ?? []
   const selectedSql = sqlFiles.find(f => f.id === config.sql_file_id)
+  const filteredConnections = connections.filter(c => c.conn_type === connectionType)
 
-  // Build params dict for API calls
-  const buildParamsDict = (): Record<string, string> => {
-    const d: Record<string, string> = {}
-    for (const p of params) {
-      if (p.key && p.value) d[p.key] = p.value
-    }
-    return d
+  const addParam = (key = '', value = '') => onChange({ params: [...params, { key, value }] })
+  const updateParam = (i: number, field: 'key' | 'value', val: string) => {
+    const next = params.map((p, j) => j === i ? { ...p, [field]: val } : p)
+    onChange({ params: next })
   }
-
-  const getSql = (): string => {
-    if (sqlMode === 'file') return selectedSql?.content ?? ''
-    return config.sql ?? ''
-  }
+  const removeParam = (i: number) => onChange({ params: params.filter((_, j) => j !== i) })
 
   const handleTest = async () => {
     if (!config.connection_id) return
@@ -752,54 +753,32 @@ function JdbcExtractForm({
     finally { setTesting(false) }
   }
 
-  const handleExtract = async () => {
-    if (!config.connection_id) return
-    const sql = getSql()
-    if (!sql.trim()) return
-    setExtracting(true); setExtractError(null); setExtractResult(null)
-    try {
-      const r = await connectionsApi.extract(
-        config.connection_id,
-        sql,
-        buildParamsDict(),
-        config.chunk_size ?? 50000,
-        config.output_subdir || undefined,
-      )
-      setExtractResult(r)
-    } catch (e) { setExtractError(String(e)) }
-    finally { setExtracting(false) }
-  }
-
-  const addParam = (key = '', value = '') => {
-    onChange({ params: [...params, { key, value }] })
-  }
-
-  const updateParam = (i: number, field: 'key' | 'value', val: string) => {
-    const next = params.map((p, j) => j === i ? { ...p, [field]: val } : p)
-    onChange({ params: next })
-  }
-
-  const removeParam = (i: number) => {
-    onChange({ params: params.filter((_, j) => j !== i) })
-  }
+  const hasInlineSql = !!onOpenSqlEditor  // inline SQL only available when bottom panel is wired up
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.75 }}>
       {/* Connection picker */}
       <Box sx={{ display: 'flex', gap: 0.75, alignItems: 'flex-end' }}>
         <FormControl size="small" fullWidth>
-          <InputLabel>JDBC Connection</InputLabel>
+          <InputLabel>{connectionLabel}</InputLabel>
           <Select
-            label="JDBC Connection"
+            label={connectionLabel}
             value={config.connection_id ?? ''}
             onChange={e => onChange({ connection_id: e.target.value || null })}
           >
             <MenuItem value=""><em>None</em></MenuItem>
-            {connections.filter(c => c.conn_type === 'jdbc').map(c => (
+            {filteredConnections.length === 0 && (
+              <MenuItem disabled><em>No {connectionType} connections</em></MenuItem>
+            )}
+            {filteredConnections.map(c => (
               <MenuItem key={c.id} value={c.id}>
                 <Box>
                   <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{c.name}</Typography>
-                  {c.host && <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>{c.host}:{c.port}/{c.database}</Typography>}
+                  {c.host && (
+                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
+                      {c.host}{c.port ? `:${c.port}` : ''}{c.database ? `/${c.database}` : ''}
+                    </Typography>
+                  )}
                 </Box>
               </MenuItem>
             ))}
@@ -807,12 +786,7 @@ function JdbcExtractForm({
         </FormControl>
         <Tooltip title="Test connection">
           <span>
-            <IconButton
-              size="small"
-              onClick={handleTest}
-              disabled={!config.connection_id || testing}
-              sx={{ mb: 0.25 }}
-            >
+            <IconButton size="small" onClick={handleTest} disabled={!config.connection_id || testing} sx={{ mb: 0.25 }}>
               {testing ? <CircularProgress size={14} /> : <PlayArrow sx={{ fontSize: 16 }} />}
             </IconButton>
           </span>
@@ -826,21 +800,24 @@ function JdbcExtractForm({
 
       <Divider />
 
-      {/* SQL mode toggle */}
-      <Box>
-        <ToggleButtonGroup
-          value={sqlMode}
-          exclusive
-          onChange={(_, v) => { if (v) { setSqlMode(v); onOpenSqlEditor() } }}
-          size="small"
-          fullWidth
-        >
-          <ToggleButton value="inline" sx={{ fontSize: '0.72rem' }}>Inline SQL</ToggleButton>
-          <ToggleButton value="file" sx={{ fontSize: '0.72rem' }}>SQL File</ToggleButton>
-        </ToggleButtonGroup>
-      </Box>
+      {/* SQL mode toggle (only when inline SQL is available) */}
+      {hasInlineSql && (
+        <Box>
+          <ToggleButtonGroup
+            value={sqlMode}
+            exclusive
+            onChange={(_, v) => { if (v) { setSqlMode(v); onOpenSqlEditor?.() } }}
+            size="small"
+            fullWidth
+          >
+            <ToggleButton value="inline" sx={{ fontSize: '0.72rem' }}>Inline SQL</ToggleButton>
+            <ToggleButton value="file" sx={{ fontSize: '0.72rem' }}>SQL File</ToggleButton>
+          </ToggleButtonGroup>
+        </Box>
+      )}
 
-      {sqlMode === 'inline' ? (
+      {/* Inline SQL area */}
+      {hasInlineSql && sqlMode === 'inline' ? (
         <Box
           onClick={onOpenSqlEditor}
           sx={{
@@ -861,13 +838,17 @@ function JdbcExtractForm({
           )}
         </Box>
       ) : (
+        /* SQL file picker */
         <>
           <FormControl size="small" fullWidth>
             <InputLabel>SQL File</InputLabel>
             <Select
               label="SQL File"
               value={config.sql_file_id ?? ''}
-              onChange={e => { onChange({ sql_file_id: e.target.value || null, sql: '' }); onOpenSqlEditor() }}
+              onChange={e => {
+                onChange({ sql_file_id: e.target.value || null, sql: '' })
+                if (hasInlineSql) onOpenSqlEditor?.()
+              }}
             >
               <MenuItem value=""><em>None</em></MenuItem>
               {sqlFiles.filter(f => f.file_type === 'extract').map(f => (
@@ -879,12 +860,13 @@ function JdbcExtractForm({
           </FormControl>
           {selectedSql && (
             <Box
-              onClick={onOpenSqlEditor}
+              onClick={hasInlineSql ? onOpenSqlEditor : undefined}
               sx={{
                 bgcolor: 'action.hover', borderRadius: 1, p: 1, fontFamily: 'monospace',
                 fontSize: '0.64rem', whiteSpace: 'pre', overflow: 'hidden', maxHeight: 56,
                 border: '1px solid', borderColor: 'divider', color: 'text.secondary',
-                cursor: 'pointer', '&:hover': { borderColor: 'primary.main' },
+                cursor: hasInlineSql ? 'pointer' : 'default',
+                ...(hasInlineSql ? { '&:hover': { borderColor: 'primary.main' } } : {}),
                 textOverflow: 'ellipsis',
               }}
             >
@@ -913,89 +895,157 @@ function JdbcExtractForm({
           ))}
         </Box>
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-          Click a variable to add it as a parameter below. In SQL, quote string values: <code>WHERE d = &apos;$business_date&apos;</code>
+          Click a variable to add it as a parameter below. In SQL: <code>WHERE d = &apos;$business_date&apos;</code>
         </Typography>
       </Box>
 
       <Divider />
 
-      {/* Advanced Settings (collapsed by default) */}
+      {/* Parameters (collapsed) */}
       <Box>
         <Box
           sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer', py: 0.5 }}
-          onClick={() => setShowVars(v => !v)}
+          onClick={() => setShowAdvanced(v => !v)}
         >
-          {showVars ? <ExpandLess sx={{ fontSize: 14, color: 'text.secondary' }} /> : <ExpandMore sx={{ fontSize: 14, color: 'text.secondary' }} />}
+          {showAdvanced ? <ExpandLess sx={{ fontSize: 14, color: 'text.secondary' }} /> : <ExpandMore sx={{ fontSize: 14, color: 'text.secondary' }} />}
           <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.72rem', fontWeight: 600 }}>
-            Advanced Settings
+            SQL Parameters
           </Typography>
           {params.length > 0 && (
             <Chip label={`${params.length} param${params.length > 1 ? 's' : ''}`} size="small"
               sx={{ fontSize: '0.58rem', height: 16, ml: 0.5 }} />
           )}
         </Box>
-        <Collapse in={showVars}>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pt: 0.5 }}>
-
-            {/* Parameters */}
-            <Box>
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.75 }}>
-                <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.6rem', fontWeight: 700 }}>
-                  Injected Parameters
-                </Typography>
-                <Tooltip title="Add parameter">
-                  <IconButton size="small" onClick={() => addParam()}><Add sx={{ fontSize: 14 }} /></IconButton>
-                </Tooltip>
-              </Box>
-              {params.length === 0 && (
-                <Typography variant="caption" color="text.disabled">No parameters. Add one or click a variable above.</Typography>
-              )}
-              {params.map((p, i) => (
-                <Box key={i} sx={{ display: 'flex', gap: 0.75, mb: 0.75, alignItems: 'center' }}>
-                  <TextField
-                    size="small"
-                    label="$param"
-                    value={p.key}
-                    onChange={e => updateParam(i, 'key', e.target.value)}
-                    sx={{ flex: 1 }}
-                    slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.72rem' } } }}
-                  />
-                  <TextField
-                    size="small"
-                    label="value"
-                    value={p.value}
-                    onChange={e => updateParam(i, 'value', e.target.value)}
-                    sx={{ flex: 1.5 }}
-                    placeholder="2026-04-18 or APP001"
-                    slotProps={{ htmlInput: { style: { fontSize: '0.72rem' } } }}
-                  />
-                  <IconButton size="small" onClick={() => removeParam(i)}><Close sx={{ fontSize: 13 }} /></IconButton>
-                </Box>
-              ))}
-              {dictionaries.length > 0 && (
-                <Box sx={{ mt: 0.5 }}>
-                  <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem' }}>
-                    Use dict entries: add <code>app_id</code> / <code>app_name</code> with values from your Dictionaries page.
-                  </Typography>
-                </Box>
-              )}
+        <Collapse in={showAdvanced}>
+          <Box sx={{ pt: 0.5 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.75 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.6rem', fontWeight: 700 }}>
+                Injected Parameters
+              </Typography>
+              <Tooltip title="Add parameter">
+                <IconButton size="small" onClick={() => addParam()}><Add sx={{ fontSize: 14 }} /></IconButton>
+              </Tooltip>
             </Box>
-
-            <Divider />
-
-            <TextField
-              label="Chunk Size"
-              size="small"
-              type="number"
-              fullWidth
-              value={config.chunk_size ?? 50000}
-              onChange={e => onChange({ chunk_size: parseInt(e.target.value) || 50000 })}
-              helperText="Rows per parquet file written by the downstream output node"
-            />
-
+            {params.length === 0 && (
+              <Typography variant="caption" color="text.disabled">No parameters. Add one or click a variable above.</Typography>
+            )}
+            {params.map((p, i) => (
+              <Box key={i} sx={{ display: 'flex', gap: 0.75, mb: 0.75, alignItems: 'center' }}>
+                <TextField
+                  size="small" label="$param" value={p.key}
+                  onChange={e => updateParam(i, 'key', e.target.value)}
+                  sx={{ flex: 1 }}
+                  slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.72rem' } } }}
+                />
+                <TextField
+                  size="small" label="value" value={p.value}
+                  onChange={e => updateParam(i, 'value', e.target.value)}
+                  sx={{ flex: 1.5 }} placeholder="2026-04-18 or APP001"
+                  slotProps={{ htmlInput: { style: { fontSize: '0.72rem' } } }}
+                />
+                <IconButton size="small" onClick={() => removeParam(i)}><Close sx={{ fontSize: 13 }} /></IconButton>
+              </Box>
+            ))}
+            {dictionaries.length > 0 && (
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem' }}>
+                Use dict entries: add <code>app_id</code> / <code>app_name</code> from Dictionaries.
+              </Typography>
+            )}
           </Box>
         </Collapse>
       </Box>
+    </Box>
+  )
+}
+
+function JdbcExtractForm({
+  config,
+  onChange,
+  connections,
+  sqlFiles,
+  dictionaries,
+  onOpenSqlEditor,
+}: {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  config: Record<string, any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onChange: (patch: Record<string, any>) => void
+  connections: Connection[]
+  sqlFiles: SqlFile[]
+  dictionaries: Dictionary[]
+  onOpenSqlEditor: () => void
+}) {
+  const [extracting, setExtracting] = useState(false)
+  const [extractResult, setExtractResult] = useState<{ total_rows: number; file_count: number; output_dir: string } | null>(null)
+  const [extractError, setExtractError] = useState<string | null>(null)
+
+  const params: SqlParam[] = config.params ?? []
+  const selectedSql = sqlFiles.find(f => f.id === config.sql_file_id)
+
+  const buildParamsDict = (): Record<string, string> => {
+    const d: Record<string, string> = {}
+    for (const p of params) { if (p.key && p.value) d[p.key] = p.value }
+    return d
+  }
+
+  const getSql = (): string => config.sql_file_id ? (selectedSql?.content ?? '') : (config.sql ?? '')
+
+  const handleExtract = async () => {
+    if (!config.connection_id) return
+    const sql = getSql()
+    if (!sql.trim()) return
+    setExtracting(true); setExtractError(null); setExtractResult(null)
+    try {
+      const r = await connectionsApi.extract(
+        config.connection_id, sql, buildParamsDict(),
+        config.chunk_size ?? 50000, config.output_subdir || undefined,
+      )
+      setExtractResult(r)
+    } catch (e) { setExtractError(String(e)) }
+    finally { setExtracting(false) }
+  }
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.75 }}>
+
+      <JdbcSharedConfig
+        config={config}
+        onChange={onChange}
+        connections={connections}
+        sqlFiles={sqlFiles}
+        dictionaries={dictionaries}
+        connectionType="jdbc"
+        connectionLabel="JDBC Connection"
+        onOpenSqlEditor={onOpenSqlEditor}
+      />
+
+      <Divider />
+
+      {/* Row Limit + Chunk Size */}
+      <TextField
+        label="Row Limit"
+        size="small"
+        type="number"
+        fullWidth
+        value={config.limit ?? ''}
+        onChange={e => {
+          const raw = e.target.value
+          if (raw === '') { onChange({ limit: null }); return }
+          const parsed = parseInt(raw, 10)
+          onChange({ limit: Number.isFinite(parsed) && parsed > 0 ? parsed : null })
+        }}
+        helperText="Optional max rows per JDBC query (leave blank for no limit)"
+      />
+
+      <TextField
+        label="Chunk Size"
+        size="small"
+        type="number"
+        fullWidth
+        value={config.chunk_size ?? 50000}
+        onChange={e => onChange({ chunk_size: parseInt(e.target.value) || 50000 })}
+        helperText="Rows per parquet file written by the downstream output node"
+      />
 
       <Divider />
 
@@ -1011,6 +1061,17 @@ function JdbcExtractForm({
       >
         Preview SQL
       </Button>
+
+      {/* Extract feedback */}
+      {extractError && (
+        <Alert severity="error" sx={{ fontSize: '0.72rem' }}>{extractError}</Alert>
+      )}
+      {extractResult && (
+        <Alert severity="success" sx={{ fontSize: '0.72rem' }}>
+          Extracted {extractResult.total_rows.toLocaleString()} rows → {extractResult.file_count} file(s) in {extractResult.output_dir}
+        </Alert>
+      )}
+      {extracting && <CircularProgress size={18} sx={{ alignSelf: 'center' }} />}
 
     </Box>
   )
@@ -1171,7 +1232,7 @@ function S3ExtractForm({
 }
 
 function DWExtractForm({
-  config, onChange, connections, sqlFiles,
+  config, onChange, connections, sqlFiles, dictionaries, onOpenSqlEditor,
 }: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   config: Record<string, any>
@@ -1179,98 +1240,22 @@ function DWExtractForm({
   onChange: (patch: Record<string, any>) => void
   connections: Connection[]
   sqlFiles: SqlFile[]
+  dictionaries: Dictionary[]
+  onOpenSqlEditor?: () => void
 }) {
-  const [showVars, setShowVars] = useState(false)
-
-  const selectedSql = sqlFiles.find(f => f.id === config.sql_file_id)
-
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.75 }}>
-      {/* Connection */}
-      <FormControl size="small" fullWidth>
-        <InputLabel>Connection</InputLabel>
-        <Select
-          label="Connection"
-          value={config.connection_id ?? ''}
-          onChange={e => onChange({ connection_id: e.target.value || null })}
-        >
-          <MenuItem value=""><em>None</em></MenuItem>
-          {connections.filter(c => c.conn_type === 'datawarehouse').map(c => (
-            <MenuItem key={c.id} value={c.id}>
-              <Box>
-                <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{c.name}</Typography>
-                {c.host && <Typography variant="caption" color="text.secondary">{c.host}</Typography>}
-              </Box>
-            </MenuItem>
-          ))}
-        </Select>
-      </FormControl>
 
-      {/* SQL File */}
-      <FormControl size="small" fullWidth>
-        <InputLabel>SQL File</InputLabel>
-        <Select
-          label="SQL File"
-          value={config.sql_file_id ?? ''}
-          onChange={e => onChange({ sql_file_id: e.target.value || null })}
-        >
-          <MenuItem value=""><em>None</em></MenuItem>
-          {sqlFiles.filter(f => f.file_type === 'extract').map(f => (
-            <MenuItem key={f.id} value={f.id}>
-              <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{f.name}</Typography>
-            </MenuItem>
-          ))}
-        </Select>
-      </FormControl>
-
-      {/* SQL preview */}
-      {selectedSql && (
-        <Box>
-          <Box
-            sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer', mb: 0.5 }}
-            onClick={() => setShowVars(v => !v)}
-          >
-            <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>SQL Preview</Typography>
-            {showVars ? <ExpandLess sx={{ fontSize: 14 }} /> : <ExpandMore sx={{ fontSize: 14 }} />}
-          </Box>
-          <Collapse in={showVars}>
-            <Box
-              sx={{
-                bgcolor: 'action.hover', borderRadius: 1, p: 1, fontFamily: 'monospace',
-                fontSize: '0.64rem', whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto',
-                border: '1px solid', borderColor: 'divider', color: 'text.secondary',
-              }}
-            >
-              {selectedSql.content}
-            </Box>
-          </Collapse>
-        </Box>
-      )}
-
-      {/* Available injection variables */}
-      <Box>
-        <Box
-          sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer', mb: 0.5 }}
-          onClick={() => setShowVars(v => !v)}
-        >
-          <Info sx={{ fontSize: 13, color: 'text.secondary' }} />
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-            Available SQL Variables
-          </Typography>
-        </Box>
-        <Collapse in={showVars}>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-            {['$business_date', '$business_date_from', '$business_date_to', '$business_date_range', '$app_id', '$app_name'].map(v => (
-              <Chip
-                key={v}
-                label={v}
-                size="small"
-                sx={{ fontFamily: 'monospace', fontSize: '0.62rem', height: 18 }}
-              />
-            ))}
-          </Box>
-        </Collapse>
-      </Box>
+      <JdbcSharedConfig
+        config={config}
+        onChange={onChange}
+        connections={connections}
+        sqlFiles={sqlFiles}
+        dictionaries={dictionaries}
+        connectionType="datawarehouse"
+        connectionLabel="DataWarehouse Connection"
+        onOpenSqlEditor={onOpenSqlEditor}
+      />
 
       <Divider />
 
@@ -1654,6 +1639,195 @@ interface IteratorPreviewModel {
   steps: IteratorPreviewStep[]
   branches: IteratorPreviewBranch[]
   warnings: string[]
+}
+
+interface ExecutionPlanForkPreview {
+  iteratorNodeId: string
+  iteratorLabel: string
+  dictName?: string
+  keyParam: string
+  valueParam: string
+  totalBranches: number
+  branches: IteratorPreviewBranch[]
+  warnings: string[]
+}
+
+interface ExecutionPlanLane {
+  id: string
+  label: string
+  steps: IteratorPreviewStep[]
+  iteratorPreviews: ExecutionPlanForkPreview[]
+  warnings: string[]
+}
+
+interface ExecutionPlanModel {
+  pipelineLabel: string
+  totalNodes: number
+  totalEdges: number
+  lanes: ExecutionPlanLane[]
+  warnings: string[]
+}
+
+function ExecutionPlanDialog({
+  open,
+  onClose,
+  plan,
+}: {
+  open: boolean
+  onClose: () => void
+  plan: ExecutionPlanModel
+}) {
+  const theme = useTheme()
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
+      <DialogTitle>Execution Plan</DialogTitle>
+      <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+        <Alert severity="info" sx={{ py: 0.5 }}>
+          End-to-end preview of planned execution flow. No run will be started.
+        </Alert>
+
+        {plan.warnings.map((warning, i) => (
+          <Alert key={i} severity="warning" sx={{ py: 0.5 }}>
+            {warning}
+          </Alert>
+        ))}
+
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+          <Chip label={`Pipeline: ${plan.pipelineLabel || 'Untitled pipeline'}`} size="small" />
+          <Chip label={`${plan.totalNodes} node${plan.totalNodes !== 1 ? 's' : ''}`} size="small" />
+          <Chip label={`${plan.totalEdges} edge${plan.totalEdges !== 1 ? 's' : ''}`} size="small" />
+          <Chip label={`${plan.lanes.length} execution path${plan.lanes.length !== 1 ? 's' : ''}`} size="small" color="secondary" />
+        </Box>
+
+        {plan.lanes.length === 0 ? (
+          <Typography variant="caption" color="text.secondary">
+            No nodes in the canvas. Add nodes to build an execution plan.
+          </Typography>
+        ) : (
+          plan.lanes.map(lane => (
+            <Paper key={lane.id} variant="outlined" sx={{ p: 1.25 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                {lane.label}
+              </Typography>
+
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mt: 1 }}>
+                {lane.steps.map((step, index) => (
+                  <Box key={step.id} sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                    {index > 0 && <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled' }}>→</Typography>}
+                    <Box
+                      sx={{
+                        px: 1,
+                        py: 0.75,
+                        borderRadius: 1,
+                        border: `1px solid ${alpha(step.color, 0.35)}`,
+                        bgcolor: alpha(step.color, 0.1),
+                        minWidth: 110,
+                      }}
+                    >
+                      <Typography sx={{ fontSize: '0.62rem', color: step.color, fontWeight: 700, textTransform: 'uppercase' }}>
+                        {CATALOG_MAP[step.type]?.label ?? step.type}
+                      </Typography>
+                      <Typography sx={{ fontSize: '0.74rem', fontWeight: 600 }} noWrap>
+                        {step.label}
+                      </Typography>
+                    </Box>
+                  </Box>
+                ))}
+              </Box>
+
+              {lane.warnings.map((warning, i) => (
+                <Alert key={i} severity="warning" sx={{ mt: 1, py: 0.4 }}>
+                  {warning}
+                </Alert>
+              ))}
+
+              {lane.iteratorPreviews.map(iter => {
+                const visibleBranches = iter.branches.slice(0, 8)
+                const hiddenCount = Math.max(0, iter.totalBranches - visibleBranches.length)
+                return (
+                  <Box key={iter.iteratorNodeId} sx={{ mt: 1.25 }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                      Fork Preview · {iter.iteratorLabel}
+                    </Typography>
+
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.6, mt: 0.5 }}>
+                      <Chip label={`Dictionary: ${iter.dictName ?? '—'}`} size="small" />
+                      <Chip label={`${iter.totalBranches} fork${iter.totalBranches !== 1 ? 's' : ''}`} size="small" color="secondary" />
+                      <Chip label={`$${iter.keyParam} / $${iter.valueParam}`} size="small" sx={{ fontFamily: 'monospace' }} />
+                    </Box>
+
+                    {iter.warnings.map((warning, i) => (
+                      <Alert key={i} severity="warning" sx={{ mt: 0.8, py: 0.35 }}>
+                        {warning}
+                      </Alert>
+                    ))}
+
+                    <Box sx={{ mt: 0.8, display: 'flex', flexDirection: 'column', gap: 0.8 }}>
+                      {visibleBranches.map((branch, index) => (
+                        <Box
+                          key={`${iter.iteratorNodeId}-${branch.key}-${index}`}
+                          sx={{
+                            display: 'grid',
+                            gridTemplateColumns: '24px 1fr',
+                            gap: 1,
+                            alignItems: 'stretch',
+                          }}
+                        >
+                          <Box sx={{ position: 'relative', display: 'flex', justifyContent: 'center' }}>
+                            <Box
+                              sx={{
+                                position: 'absolute',
+                                top: 0,
+                                bottom: index === visibleBranches.length - 1 && hiddenCount === 0 ? '50%' : 0,
+                                width: 2,
+                                bgcolor: theme.palette.divider,
+                              }}
+                            />
+                            <Box
+                              sx={{
+                                width: 10,
+                                height: 10,
+                                borderRadius: '50%',
+                                bgcolor: ORCHESTRATION_COLOR,
+                                mt: 1.5,
+                                zIndex: 1,
+                              }}
+                            />
+                          </Box>
+                          <Paper variant="outlined" sx={{ p: 1 }}>
+                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                              {branch.params.map(param => (
+                                <Chip
+                                  key={`${branch.key}-${param.key}`}
+                                  label={`$${param.key} = ${param.value}`}
+                                  size="small"
+                                  sx={{ fontFamily: 'monospace', fontSize: '0.64rem' }}
+                                />
+                              ))}
+                            </Box>
+                          </Paper>
+                        </Box>
+                      ))}
+                    </Box>
+
+                    {hiddenCount > 0 && (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.8 }}>
+                        +{hiddenCount} more fork{hiddenCount !== 1 ? 's' : ''}
+                      </Typography>
+                    )}
+                  </Box>
+                )
+              })}
+            </Paper>
+          ))
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} autoFocus>Close</Button>
+      </DialogActions>
+    </Dialog>
+  )
 }
 
 function IteratorPreviewDialog({
@@ -2074,7 +2248,7 @@ function PropertiesPanel({
           onPreview={() => onPreviewIterator(node.id)} />
       )}
       {node.data.nodeType === 'dw_extract' && (
-        <DWExtractForm config={node.data.config} onChange={onChange} connections={connections} sqlFiles={sqlFiles} />
+        <DWExtractForm config={node.data.config} onChange={onChange} connections={connections} sqlFiles={sqlFiles} dictionaries={dictionaries} onOpenSqlEditor={onOpenSqlEditor} />
       )}
       {node.data.nodeType === 'jdbc_extract' && (
         <JdbcExtractForm config={node.data.config} onChange={onChange} connections={connections} sqlFiles={sqlFiles} dictionaries={dictionaries} onOpenSqlEditor={onOpenSqlEditor} />
@@ -2582,6 +2756,7 @@ export default function PipelineEditor() {
 
   const [activeRunId, setActiveRunId] = useState<number | null>(null)
   const [warnNoBizDate, setWarnNoBizDate] = useState(false)
+  const [executionPlanOpen, setExecutionPlanOpen] = useState(false)
 
   const runMut = useMutation({
     mutationFn: () => pipelinesApi.run(Number(id)),
@@ -2870,6 +3045,163 @@ export default function PipelineEditor() {
     }
   }
 
+  function buildExecutionPlanModel(): ExecutionPlanModel {
+    const warnings: string[] = []
+    const nodeById = new Map(nodes.map(n => [n.id, n]))
+    const outgoing = new Map<string, Edge[]>()
+    const inDegree = new Map<string, number>()
+
+    for (const node of nodes) {
+      outgoing.set(node.id, [])
+      inDegree.set(node.id, 0)
+    }
+
+    for (const edge of edges) {
+      const list = outgoing.get(edge.source)
+      if (list) list.push(edge)
+      inDegree.set(edge.target, (inDegree.get(edge.target) ?? 0) + 1)
+    }
+
+    const roots = nodes
+      .filter(n => (inDegree.get(n.id) ?? 0) === 0)
+      .sort((a, b) => (a.position.y - b.position.y) || (a.position.x - b.position.x))
+
+    const rootNodes = roots.length > 0 ? roots : nodes.slice(0, 1)
+    if (roots.length === 0 && nodes.length > 0) {
+      warnings.push('No explicit root node detected. Plan starts from the first node in the canvas.')
+    }
+
+    const seenOverall = new Set<string>()
+
+    const buildIteratorForkPreview = (iterNode: Node<PipelineNodeData>): ExecutionPlanForkPreview => {
+      const iterCfg = iterNode.data.config ?? {}
+      const dict = dictionaries.find(d => d.id === Number(iterCfg.dictionary_id))
+      const selectedKeys: string[] = iterCfg.selected_keys ?? []
+      const keyParam = iterCfg.key_param ?? 'app_id'
+      const valueParam = iterCfg.value_param ?? 'app_name'
+      const iterWarnings: string[] = []
+
+      if (!dict) {
+        iterWarnings.push('Dictionary is not selected.')
+      }
+
+      const activeEntries = (dict?.entries ?? []).filter(
+        e => selectedKeys.length === 0 || selectedKeys.includes(e.key)
+      )
+
+      if (dict && activeEntries.length === 0) {
+        iterWarnings.push('No iterator entries selected.')
+      }
+
+      const branches: IteratorPreviewBranch[] = activeEntries.map(entry => ({
+        key: entry.key,
+        value: entry.value,
+        params: [
+          { key: keyParam, value: entry.key },
+          { key: valueParam, value: entry.value },
+        ],
+      }))
+
+      return {
+        iteratorNodeId: iterNode.id,
+        iteratorLabel: iterNode.data.label,
+        dictName: dict?.name,
+        keyParam,
+        valueParam,
+        totalBranches: branches.length,
+        branches,
+        warnings: iterWarnings,
+      }
+    }
+
+    const lanes: ExecutionPlanLane[] = rootNodes.map(root => {
+      const laneWarnings: string[] = []
+      const steps: IteratorPreviewStep[] = []
+      const iteratorPreviews: ExecutionPlanForkPreview[] = []
+      const visited = new Set<string>()
+
+      let current: Node<PipelineNodeData> | undefined = root
+      while (current && !visited.has(current.id)) {
+        visited.add(current.id)
+        seenOverall.add(current.id)
+
+        const cat = CATALOG_MAP[current.data.nodeType]
+        steps.push({
+          id: current.id,
+          label: current.data.label || cat?.label || current.data.nodeType,
+          type: current.data.nodeType,
+          color: cat?.color ?? '#666',
+        })
+
+        if (current.data.nodeType === 'iterator') {
+          iteratorPreviews.push(buildIteratorForkPreview(current))
+        }
+
+        const nextEdges = outgoing.get(current.id) ?? []
+        if (nextEdges.length === 0) break
+
+        if (nextEdges.length > 1) {
+          laneWarnings.push(
+            `Node "${current.data.label || current.id}" has ${nextEdges.length} outgoing paths. Plan follows the first path for lane rendering.`
+          )
+        }
+
+        const nextNode = nodeById.get(nextEdges[0].target)
+        if (!nextNode) {
+          laneWarnings.push(`Missing target node for edge from "${current.data.label || current.id}".`)
+          break
+        }
+
+        current = nextNode
+      }
+
+      if (current && visited.has(current.id)) {
+        laneWarnings.push('Cycle detected; lane traversal stops at the first repeated node.')
+      }
+
+      return {
+        id: root.id,
+        label: `Path from ${root.data.label || root.id}`,
+        steps,
+        iteratorPreviews,
+        warnings: laneWarnings,
+      }
+    })
+
+    const unreachable = nodes.filter(n => !seenOverall.has(n.id))
+    if (unreachable.length > 0) {
+      warnings.push(`${unreachable.length} node${unreachable.length !== 1 ? 's are' : ' is'} not included in root-based paths.`)
+      for (const node of unreachable) {
+        const cat = CATALOG_MAP[node.data.nodeType]
+        lanes.push({
+          id: `isolated-${node.id}`,
+          label: `Unattached node ${node.data.label || node.id}`,
+          steps: [{
+            id: node.id,
+            label: node.data.label || cat?.label || node.data.nodeType,
+            type: node.data.nodeType,
+            color: cat?.color ?? '#666',
+          }],
+          iteratorPreviews: node.data.nodeType === 'iterator' ? [buildIteratorForkPreview(node)] : [],
+          warnings: ['This node is not reachable from any detected root path.'],
+        })
+      }
+    }
+
+    return {
+      pipelineLabel: pipelineName,
+      totalNodes: nodes.length,
+      totalEdges: edges.length,
+      lanes,
+      warnings,
+    }
+  }
+
+  const executionPlan = useMemo(
+    () => buildExecutionPlanModel(),
+    [nodes, edges, dictionaries, pipelineName],
+  )
+
   function handleSchemaApply(newNodes: Node<PipelineNodeData>[], newEdges: Edge[]) {
     setNodes(newNodes)
     setEdges(newEdges)
@@ -2959,6 +3291,15 @@ export default function PipelineEditor() {
           disabled={runMut.isPending}
         >
           Run
+        </Button>
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<AccountTree sx={{ fontSize: 15 }} />}
+          onClick={() => setExecutionPlanOpen(true)}
+          disabled={nodes.length === 0}
+        >
+          Execution Plan
         </Button>
         <Button
           size="small"
@@ -3319,6 +3660,12 @@ export default function PipelineEditor() {
         })()}
         onClose={() => setSqlPanel(p => ({ ...p, open: false }))}
         onHeightChange={h => setSqlPanel(p => ({ ...p, height: h }))}
+      />
+
+      <ExecutionPlanDialog
+        open={executionPlanOpen}
+        onClose={() => setExecutionPlanOpen(false)}
+        plan={executionPlan}
       />
 
       <Dialog open={editMetaOpen} onClose={closeMetaEditor} maxWidth="sm" fullWidth>

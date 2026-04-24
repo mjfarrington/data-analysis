@@ -2,8 +2,9 @@ import { useState, useEffect, useRef } from 'react'
 import {
   Box, Typography, Button, CircularProgress, Alert,
   alpha, useTheme, ToggleButtonGroup, ToggleButton,
+  Chip, Collapse, Paper,
 } from '@mui/material'
-import { Cancel, AccountTree, FormatListBulleted, ExpandMore, ChevronRight } from '@mui/icons-material'
+import { Cancel, AccountTree, FormatListBulleted, ExpandMore, ChevronRight, Schema } from '@mui/icons-material'
 import { Refresh } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { runsApi, pipelinesApi, RunDetail, RunStep } from '../api/client'
@@ -146,6 +147,77 @@ function StepTreeRow({ node, depth = 0 }: { node: StepNode; depth?: number }) {
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
+
+// ── JDBC Schema panel ──────────────────────────────────────────────────────────
+
+interface SchemaField { name: string; type: string; nullable: boolean }
+
+function JdbcSchemaPanel({ fields, schemaPath }: { fields: SchemaField[]; schemaPath?: string }) {
+  const theme = useTheme()
+  const [open, setOpen] = useState(false)
+
+  return (
+    <Box sx={{ mb: 2 }}>
+      <Box
+        onClick={() => setOpen(o => !o)}
+        sx={{
+          display: 'flex', alignItems: 'center', gap: 1, cursor: 'pointer',
+          py: 0.75, px: 1.25,
+          border: `1px solid ${theme.palette.divider}`,
+          borderRadius: open ? '4px 4px 0 0' : 1,
+          bgcolor: alpha(theme.palette.primary.main, 0.05),
+          '&:hover': { bgcolor: alpha(theme.palette.primary.main, 0.1) },
+        }}
+      >
+        <Schema sx={{ fontSize: 15, color: 'primary.main' }} />
+        <Typography variant="caption" sx={{ fontWeight: 700, flex: 1, color: 'primary.main' }}>
+          JDBC Schema ({fields.length} field{fields.length !== 1 ? 's' : ''})
+        </Typography>
+        {schemaPath && (
+          <Typography variant="caption" color="text.disabled" sx={{ fontFamily: 'monospace', fontSize: '0.62rem' }} noWrap>
+            schema.json
+          </Typography>
+        )}
+        {open ? <ExpandMore sx={{ fontSize: 14, color: 'text.secondary' }} /> : <ChevronRight sx={{ fontSize: 14, color: 'text.secondary' }} />}
+      </Box>
+      <Collapse in={open}>
+        <Paper
+          variant="outlined"
+          sx={{ borderTop: 0, borderRadius: '0 0 4px 4px', overflow: 'hidden' }}
+        >
+          <Box sx={{ display: 'flex', px: 1.25, py: 0.5, bgcolor: alpha(theme.palette.background.default, 0.6), borderBottom: `1px solid ${theme.palette.divider}` }}>
+            <Typography variant="caption" color="text.secondary" sx={{ flex: 2, fontWeight: 700, fontSize: '0.62rem', textTransform: 'uppercase' }}>Field</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ flex: 2, fontWeight: 700, fontSize: '0.62rem', textTransform: 'uppercase' }}>Type</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ flex: 1, fontWeight: 700, fontSize: '0.62rem', textTransform: 'uppercase' }}>Nullable</Typography>
+          </Box>
+          {fields.map((f, i) => (
+            <Box
+              key={f.name}
+              sx={{
+                display: 'flex', alignItems: 'center', px: 1.25, py: 0.4,
+                borderBottom: i < fields.length - 1 ? `1px solid ${alpha(theme.palette.divider, 0.4)}` : 'none',
+                bgcolor: i % 2 === 0 ? 'transparent' : alpha(theme.palette.background.default, 0.3),
+              }}
+            >
+              <Typography sx={{ flex: 2, fontFamily: 'monospace', fontSize: '0.72rem', fontWeight: 600 }}>{f.name}</Typography>
+              <Box sx={{ flex: 2 }}>
+                <Chip
+                  label={f.type}
+                  size="small"
+                  sx={{ fontFamily: 'monospace', fontSize: '0.62rem', height: 18,
+                    bgcolor: alpha(theme.palette.primary.main, 0.12), color: 'primary.main' }}
+                />
+              </Box>
+              <Typography sx={{ flex: 1, fontSize: '0.68rem', color: f.nullable ? 'text.disabled' : 'success.main' }}>
+                {f.nullable ? 'yes' : 'no'}
+              </Typography>
+            </Box>
+          ))}
+        </Paper>
+      </Collapse>
+    </Box>
+  )
+}
 
 interface Props {
   runId: number
@@ -321,6 +393,14 @@ export default function RunDetailPanel({ runId, fillLogToBottom = false, bgcolor
       {/* ── Error ── */}
       {run.error_message && !hasSparkWarning && (
         <Alert severity="error" sx={{ mb: 2 }}>{run.error_message}</Alert>
+      )}
+
+      {/* ── JDBC Schema ── */}
+      {Array.isArray((run.run_metadata as any)?.jdbc_schema) && (run.run_metadata as any).jdbc_schema.length > 0 && (
+        <JdbcSchemaPanel
+          fields={(run.run_metadata as any).jdbc_schema as SchemaField[]}
+          schemaPath={(run.run_metadata as any).jdbc_schema_path as string | undefined}
+        />
       )}
 
       {/* ── Logs ── */}

@@ -130,6 +130,54 @@ def _preview_sql_sync(
     }
 
 
+def schema_to_dict(schema: Any) -> list[dict]:
+    """Convert a pyarrow Schema to a JSON-serialisable list of field descriptors."""
+    return [
+        {"name": field.name, "type": str(field.type), "nullable": field.nullable}
+        for field in schema
+    ]
+
+
+def _write_chunk_pyarrow_sync(
+    records: list[dict],
+    output_path: Path,
+    schema: Any = None,
+) -> tuple[Any, str]:
+    """Write a list of records to parquet using pyarrow with optional schema enforcement.
+
+    On the first call pass schema=None — the schema is inferred from the data and returned.
+    On subsequent calls pass the schema from the first call to cast all chunks to the same
+    column types, enforcing a strict, consistent schema across all output files.
+
+    Returns (pa.Schema, file_path_str).
+    """
+    import pandas as pd  # type: ignore
+    import pyarrow as pa  # type: ignore
+    import pyarrow.parquet as pq  # type: ignore
+
+    df = pd.DataFrame(records) if records else pd.DataFrame()
+    table = pa.Table.from_pandas(df, preserve_index=False)
+
+    if schema is None:
+        # Infer schema from this first chunk
+        schema = table.schema
+    else:
+        # Cast to the reference schema for strict enforcement
+        try:
+            table = table.cast(schema)
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError) as exc:
+            logger.warning(
+                "Chunk schema cast skipped (%s) — writing with inferred schema",
+                exc,
+            )
+            schema = table.schema  # allow inferred schema if cast impossible
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, str(output_path))
+    logger.info("Wrote %s (%d rows, pyarrow)", output_path.name, len(df))
+    return schema, str(output_path)
+
+
 def _extract_to_parquet_sync(
     url: str,
     sql: str,
@@ -138,21 +186,25 @@ def _extract_to_parquet_sync(
     chunk_size: int = 50_000,
     job_name: str = "extract",
 ) -> dict:
-    """Stream SQL results into chunked parquet files. Returns stats."""
-    import pandas as pd
-    from sqlalchemy import create_engine, text
+    """Stream SQL results into chunked parquet files using strict pyarrow schema. Returns stats."""
+    import json
+    import pyarrow as pa  # type: ignore
 
     resolved_sql = inject_parameters(sql, params)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    engine = create_engine(url, future=True)
+    engine_url = url  # already a SQLAlchemy URL string
+    from sqlalchemy import create_engine, text  # type: ignore
+    import pandas as pd  # type: ignore
+
+    engine = create_engine(engine_url, future=True)
     total_rows = 0
     file_count = 0
     files_written: list[str] = []
+    inferred_schema: Any = None
 
     try:
         with engine.connect() as conn:
-            # Stream with pandas chunked reader
             chunk_iter = pd.read_sql(
                 text(resolved_sql),
                 conn,
@@ -162,19 +214,33 @@ def _extract_to_parquet_sync(
                 if chunk.empty:
                     continue
                 fname = output_dir / f"part_{file_count:05d}.parquet"
-                chunk.to_parquet(fname, index=False, engine="pyarrow")
+                inferred_schema, path = _write_chunk_pyarrow_sync(
+                    chunk.to_dict(orient="records"),
+                    fname,
+                    inferred_schema,
+                )
                 total_rows += len(chunk)
                 file_count += 1
-                files_written.append(str(fname))
-                logger.info("Wrote %s (%d rows)", fname.name, len(chunk))
+                files_written.append(path)
     finally:
         engine.dispose()
+
+    schema_list: list[dict] = []
+    if inferred_schema is not None:
+        schema_list = schema_to_dict(inferred_schema)
+        schema_path = output_dir / "schema.json"
+        schema_path.write_text(
+            __import__("json").dumps(schema_list, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("Schema written to %s (%d fields)", schema_path, len(schema_list))
 
     return {
         "total_rows": total_rows,
         "file_count": file_count,
         "files": files_written,
         "output_dir": str(output_dir),
+        "schema": schema_list,
     }
 
 

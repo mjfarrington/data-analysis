@@ -6,6 +6,7 @@ Runs asynchronously and emits log events via an asyncio queue.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import traceback
 from datetime import date as _date, datetime, timedelta, timezone
@@ -404,8 +405,10 @@ def _read_jdbc_sync(
     sql: str,
     date_column: Optional[str],
     date_str: Optional[str],
+    row_limit: Optional[int] = None,
 ) -> list[dict]:
     """Synchronous JDBC read via SQLAlchemy + pandas (runs in thread pool)."""
+    import re
     import pandas as pd
     from sqlalchemy import create_engine, text
 
@@ -419,9 +422,14 @@ def _read_jdbc_sync(
             f"SELECT * FROM ({stripped}) AS _etl_src "
             f"WHERE {date_column} = :biz_date"
         )
-        # Normalise to ISO (YYYY-MM-DD) for broadest DB compatibility
         d_norm = date_str.replace("-", "").replace("/", "")
         params["biz_date"] = f"{d_norm[:4]}-{d_norm[4:6]}-{d_norm[6:8]}" if len(d_norm) == 8 else date_str
+
+    if row_limit and row_limit > 0:
+        stripped = query.rstrip().rstrip(";")
+        has_limit = bool(re.search(r'\bLIMIT\s+\d+', stripped, re.IGNORECASE))
+        if not has_limit:
+            query = f"{stripped} LIMIT {row_limit}"
 
     with engine.connect() as conn:
         df = pd.read_sql(text(query), conn, params=params)
@@ -478,8 +486,9 @@ async def _extract_jdbc(
 ) -> list[dict]:
     jdbc_url = await _resolve_jdbc_url(cfg, db)
     sql = await _resolve_sql(cfg, db, business_date=business_date, app_id=app_id)
+    limit_info = f" LIMIT {cfg.jdbc_row_limit}" if cfg.jdbc_row_limit else ""
     await log_fn(
-        f"  JDBC: {jdbc_url!r} — SQL {len(sql)} chars"
+        f"  JDBC: {jdbc_url!r} — SQL {len(sql)} chars{limit_info}"
         + (f" filtered on {cfg.jdbc_date_column}={date_str!r}" if cfg.jdbc_date_column and date_str else "")
         + (f" app_id={app_id!r}" if app_id else ""),
         step="extract",
@@ -490,6 +499,7 @@ async def _extract_jdbc(
         sql,
         cfg.jdbc_date_column,
         date_str,
+        cfg.jdbc_row_limit,
     )
 
 
@@ -730,6 +740,36 @@ async def _extract_file(cfg: ExtractConfig, log_fn) -> list[dict]:
         cfg.csv_has_header,
         cfg.json_lines,
     )
+
+
+def _resolve_parquet_output_dir(
+    extract_cfg: ExtractConfig,
+    date_str: str,
+    job_name: str,
+    app_id: str,
+    parquet_root: Path,
+) -> Path:
+    """Compute the parquet output directory for a JDBC extract chunk.
+
+    Priority:
+      1. parquet_output_dir (fixed subdir relative to parquet_root)
+      2. parquet_path_template (supports {business_date}, {pipeline_name}, {app_id})
+      3. Default: parquet_root / date_str / job_name / app_id
+    """
+    if extract_cfg.parquet_output_dir:
+        base = parquet_root / extract_cfg.parquet_output_dir / date_str / job_name / app_id
+    elif extract_cfg.parquet_path_template:
+        tpl = (
+            extract_cfg.parquet_path_template
+            .replace("{business_date}", date_str)
+            .replace("{pipeline_name}", job_name.lower())
+            .replace("{app_id}", app_id)
+        )
+        base = parquet_root / tpl
+    else:
+        base = parquet_root / date_str / job_name / app_id
+    base.mkdir(parents=True, exist_ok=True)
+    return base
 
 
 def _chunk_records(records: list[dict], chunk_size: int) -> list[list[dict]]:
@@ -1073,6 +1113,10 @@ async def execute_pipeline(
                         await log("  No records — skipping load", level="WARN", step="load")
                         continue
 
+                    # JDBC pyarrow schema tracking: inferred from first chunk, enforced on rest
+                    _jdbc_schema: Optional[Any] = None
+                    _jdbc_output_dir: Optional[Path] = None
+
                     _seg_delay = _dw_segment_delay
                     for seg_idx, chunk in enumerate(chunks):
                         _ckey = f"chunk_{app_id}_{seg_idx + 1}"
@@ -1127,9 +1171,41 @@ async def execute_pipeline(
                             output_path = ""
                             if transformed:
                                 await _begin_step("load")
-                                output_path = await _load_segment(
-                                    transformed, app_id, date_str, seg_idx, load_cfg, log, job_name=job_name
-                                )
+                                if source == "jdbc":
+                                    # JDBC: write using pyarrow with strict schema enforcement,
+                                    # output path from the load_parquet canvas node config.
+                                    from app.services.jdbc_service import (
+                                        _write_chunk_pyarrow_sync,
+                                        schema_to_dict,
+                                    )
+                                    _jdbc_output_dir = _resolve_parquet_output_dir(
+                                        extract_cfg, date_str, job_name, app_id,
+                                        settings.parquet_path,
+                                    )
+                                    out_file = _jdbc_output_dir / f"part_{seg_idx:05d}.parquet"
+                                    _jdbc_schema, output_path = await asyncio.to_thread(
+                                        _write_chunk_pyarrow_sync,
+                                        transformed,
+                                        out_file,
+                                        _jdbc_schema,
+                                    )
+                                    if seg_idx == 0:
+                                        # Log schema after the first chunk
+                                        schema_fields = schema_to_dict(_jdbc_schema)
+                                        field_preview = ", ".join(
+                                            f"{f['name']}:{f['type']}" for f in schema_fields[:6]
+                                        )
+                                        if len(schema_fields) > 6:
+                                            field_preview += f" … +{len(schema_fields) - 6} more"
+                                        await log(
+                                            f"  Schema inferred: {len(schema_fields)} field(s) — {field_preview}",
+                                            step="extract",
+                                            extra={"schema": schema_fields},
+                                        )
+                                else:
+                                    output_path = await _load_segment(
+                                        transformed, app_id, date_str, seg_idx, load_cfg, log, job_name=job_name
+                                    )
                             total_loaded += len(transformed)
                             run.records_loaded = total_loaded
                             total_segs += 1
@@ -1137,7 +1213,7 @@ async def execute_pipeline(
                             job.status = RunStatus.COMPLETED
                             job.records_count = len(transformed)
                             job.output_path = output_path
-                            job.output_format = load_cfg.target
+                            job.output_format = "parquet" if source == "jdbc" else load_cfg.target
                             job.finished_at = datetime.now(timezone.utc)
                             await log(
                                 f"  seg={seg_idx + 1}/{n_segs}: "
@@ -1163,7 +1239,27 @@ async def execute_pipeline(
                             ))
                         await db.commit()
 
-                    if load_cfg.target == "spark_table":
+                    # After all chunks for this date: persist schema.json and store in run metadata
+                    if source == "jdbc" and _jdbc_schema is not None and _jdbc_output_dir is not None:
+                        from app.services.jdbc_service import schema_to_dict
+                        schema_list = schema_to_dict(_jdbc_schema)
+                        schema_path = _jdbc_output_dir / "schema.json"
+                        schema_path.write_text(
+                            json.dumps(schema_list, indent=2), encoding="utf-8"
+                        )
+                        await log(
+                            f"  Schema persisted: {schema_path.relative_to(settings.parquet_path)}",
+                            step="extract",
+                            extra={"schema_path": str(schema_path)},
+                        )
+                        run.run_metadata = {
+                            **(run.run_metadata or {}),
+                            "jdbc_schema": schema_list,
+                            "jdbc_schema_path": str(schema_path),
+                        }
+                        await db.commit()
+
+                    if load_cfg.target == "spark_table" and source != "jdbc":
                         try:
                             tbl = await spark_service.merge_and_register_table(
                                 app_id, date_str,
