@@ -183,7 +183,7 @@ def _extract_to_parquet_sync(
     sql: str,
     params: dict[str, str],
     output_dir: Path,
-    chunk_size: int = 50_000,
+    chunk_size: int = 100_000,
     job_name: str = "extract",
 ) -> dict:
     """Stream SQL results into chunked parquet files using strict pyarrow schema. Returns stats."""
@@ -273,7 +273,7 @@ async def extract_to_parquet(
     sql: str,
     params: dict[str, str],
     output_dir: Path,
-    chunk_size: int = 50_000,
+    chunk_size: int = 100_000,
     job_name: str = "extract",
 ) -> dict:
     url = build_sqlalchemy_url(conn)

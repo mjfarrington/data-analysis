@@ -31,13 +31,13 @@ import {
   EditNote, Info, Dataset as DatasetIcon, Visibility,
   Loop as LoopIcon, CheckBox, CheckBoxOutlineBlank,
   ZoomIn, ZoomOut, CenterFocusStrong, LibraryBooks,
-  CloudDownload as S3Icon, FirstPage, LastPage,
+  CloudDownload as S3Icon, FirstPage, LastPage, Loop,
 } from '@mui/icons-material'
 import { Checkbox, ListItemIcon } from '@mui/material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  pipelinesApi, connectionsApi, sqlFilesApi, dictionariesApi, transformApi, contextApi,
-  Pipeline, Connection, SqlFile, Dictionary, PreviewResult, NotebookFile, RunSummary,
+  pipelinesApi, connectionsApi, sqlFilesApi, dictionariesApi, transformApi, contextApi, dataApi,
+  runsApi, Pipeline, Connection, SqlFile, Dictionary, PreviewResult, NotebookFile, RunSummary, RunDetail,
 } from '../api/client'
 import { useThemeStore, LineRenderStyle } from '../store/theme'
 import StatusChip from '../components/StatusChip'
@@ -57,6 +57,18 @@ const CONNECTION_LINE_TYPE_BY_STYLE: Record<LineRenderStyle, ConnectionLineType>
   angled: ConnectionLineType.Step,
   straight: ConnectionLineType.Straight,
   smooth: ConnectionLineType.SmoothStep,
+}
+
+function toRunStepType(nodeType: string): string {
+  if (['dw_extract', 'jdbc_extract', 's3_extract', 'iterator', 'csv_extract'].includes(nodeType)) return 'extract'
+  if (['load_parquet', 'load_sql', 'load_s3'].includes(nodeType)) return 'load'
+  return nodeType
+}
+
+function extractNodeIdFromStepLabel(label?: string): string | null {
+  if (!label) return null
+  const m = label.match(/\[([^\]]+)\]\s*$/)
+  return m?.[1]?.trim() || null
 }
 
 function normalizePipelineCategory(category?: string): string {
@@ -82,8 +94,8 @@ function deriveSparkDatabaseName(businessDate?: string): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const EXTRACT_COLOR = '#58a6ff'
-const TRANSFORM_COLOR = '#e3b341'
-const LOAD_COLOR = '#3fb950'
+const TRANSFORM_COLOR = '#c0c7d1'
+const LOAD_COLOR = '#ec407a'
 const ORCHESTRATION_COLOR = '#8b5cf6'
 
 interface CatalogItem {
@@ -108,7 +120,7 @@ const CATALOG: CatalogItem[] = [
   { type: 'notebook_transform', label: 'Notebook',      color: TRANSFORM_COLOR,  category: 'transform', icon: <LibraryBooks fontSize="inherit" /> },
   { type: 'aggregate',     label: 'Aggregate',          color: TRANSFORM_COLOR,  category: 'transform', icon: <Functions fontSize="inherit" /> },
   { type: 'load_parquet',  label: 'Parquet File',       color: LOAD_COLOR,       category: 'load',      icon: <FolderOpen fontSize="inherit" /> , dualHandle: true },
-  { type: 'load_sql',      label: 'SQL/Spark Table',    color: LOAD_COLOR,       category: 'load',      icon: <TableChart fontSize="inherit" /> },
+  { type: 'load_sql',      label: 'SQL/Spark Table',    color: LOAD_COLOR,       category: 'load',      icon: <TableChart fontSize="inherit" />, dualHandle: true },
   { type: 'load_s3',      label: 'S3 Bucket',    color: LOAD_COLOR,       category: 'load',      icon: <TableChart fontSize="inherit" /> },
 ]
 
@@ -165,7 +177,7 @@ function defaultConfig(type: string): Record<string, any> {
         sql_file_id: null,
         params: [],   // [{key, value}] static params shared across all runs
         limit: null,
-        chunk_size: 50000,
+        chunk_size: 100000,
         output_subdir: '',
         date_format: 'YYYY-MM-DD',
       }
@@ -190,7 +202,11 @@ function defaultConfig(type: string): Record<string, any> {
     case 'lookup':
       return { dict_id: null, match_column: '', output_column: '', default_value: '' }
     case 'sql_transform':
-      return { sql_file_id: null }
+      return {
+        sql_file_id: null,
+        source_database_mode: 'auto',
+        source_database: '',
+      }
     case 'notebook_transform':
       return { notebook_file_id: null }
     case 'aggregate':
@@ -231,7 +247,7 @@ function nodeSummary(type: string, config: Record<string, any>, meta?: { connNam
         meta?.connName ? `🔌 ${meta.connName}` : '🔌 No connection',
         config.sql || config.sql_file_id ? '📝 SQL configured' : '📝 No SQL',
         Number(config.limit) > 0 ? `🔢 Limit ${Number(config.limit).toLocaleString()} rows` : '🔢 No row limit',
-        `📦 ${config.chunk_size?.toLocaleString() ?? '50,000'} rows/chunk`,
+        `📦 ${config.chunk_size?.toLocaleString() ?? '100,000'} rows/chunk`,
       ]
     case 's3_extract':
       return [
@@ -368,6 +384,8 @@ interface PipelineNodeData {
   sqlFileName?: string
   dictName?: string
   notebookName?: string
+  runStatus?: string
+  runStepId?: number
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -393,6 +411,15 @@ function PipelineNode({ id, data, selected }: { id: string; data: PipelineNodeDa
     dictName:     liveDictName,
     notebookName: liveNotebookName ?? data.notebookName,
   })
+  const runStatusColor = data.runStatus === 'completed'
+    ? '#3fb950'
+    : data.runStatus === 'failed'
+      ? '#f85149'
+      : data.runStatus === 'running' || data.runStatus === 'pending'
+        ? '#58a6ff'
+        : data.runStatus === 'skipped' || data.runStatus === 'cancelled'
+          ? '#6e7681'
+          : undefined
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -406,15 +433,18 @@ function PipelineNode({ id, data, selected }: { id: string; data: PipelineNodeDa
         minWidth: 150, maxWidth: 170,
         borderRadius: 1.5,
         border: `2px solid`,
-        borderColor: selected ? cat.color : alpha(cat.color, 0.45),
+        borderColor: selected ? cat.color : (runStatusColor ?? alpha(cat.color, 0.45)),
         bgcolor: 'background.paper',
         overflow: 'visible',
-        boxShadow: selected ? `0 0 16px ${alpha(cat.color, 0.4)}` : `0 1px 4px rgba(0,0,0,0.3)`,
+        boxShadow: selected
+          ? `0 0 16px ${alpha(cat.color, 0.4)}`
+          : runStatusColor
+            ? `0 0 0 1px ${alpha(runStatusColor, 0.35)}, 0 1px 5px rgba(0,0,0,0.3)`
+            : `0 1px 4px rgba(0,0,0,0.3)`,
         transition: 'all 0.15s',
         position: 'relative',
       }}
     >
-
 
       {/* Target handle: transform nodes always, source nodes with dualHandle */}
       {(!isSource || hasDualHandle) && (
@@ -423,6 +453,51 @@ function PipelineNode({ id, data, selected }: { id: string; data: PipelineNodeDa
           position={Position.Left}
           style={{ background: cat.color, width: 10, height: 10, border: '2px solid #fff' }}
         />
+      )}
+
+      {/* Status badge — absolutely positioned below node, outside layout flow so node never resizes */}
+      {data.runStatus && (
+        <Box
+          sx={{
+            position: 'absolute',
+            bottom: -20,
+            left: 0,
+            right: 0,
+            display: 'flex',
+            justifyContent: 'center',
+            pointerEvents: 'none',
+            zIndex: 10,
+          }}
+        >
+          <Box
+            sx={{
+              px: 0.6,
+              py: 0.15,
+              borderRadius: 0.75,
+              bgcolor: 'background.paper',
+              border: `1px solid ${runStatusColor ?? '#6e7681'}`,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.4,
+              boxShadow: `0 1px 3px rgba(0,0,0,0.3)`,
+            }}
+          >
+            {(data.runStatus === 'running' || data.runStatus === 'pending') && (
+              <CircularProgress size={7} thickness={7} sx={{ color: runStatusColor ?? '#58a6ff' }} />
+            )}
+            <Typography
+              noWrap
+              sx={{
+                fontSize: '0.58rem',
+                color: runStatusColor ?? '#6e7681',
+                fontWeight: 700,
+                lineHeight: 1,
+              }}
+            >
+              {data.runStatus}
+            </Typography>
+          </Box>
+        </Box>
       )}
 
       {/* Header */}
@@ -468,6 +543,13 @@ function PipelineNode({ id, data, selected }: { id: string; data: PipelineNodeDa
             {line}
           </Typography>
         ))}
+        {/* Node ID — always visible for run status correlation */}
+        <Typography
+          noWrap
+          sx={{ fontSize: '0.55rem', fontFamily: 'monospace', color: 'text.disabled', mt: 0.3, lineHeight: 1 }}
+        >
+          {id}
+        </Typography>
         {/* Iterator entry key chips */}
         {data.nodeType === 'iterator' && (() => {
           const dict = dictionaries.find(d => d.id === Number(data.config.dictionary_id))
@@ -495,7 +577,7 @@ function PipelineNode({ id, data, selected }: { id: string; data: PipelineNodeDa
         })()}
       </Box>
 
-      {!isSink && (
+      {(!isSink || hasDualHandle) && (
         <Handle
           type="source"
           position={Position.Right}
@@ -586,16 +668,18 @@ const BUILTIN_PARAMS = [
 ]
 
 // Global params automatically resolved — never need to be added per-job
-function getGlobalParams(): { key: string; value: string }[] {
-  const d = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const yyyymmdd = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`
-  const isoDate  = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+function getGlobalParams(businessDate?: string): { key: string; value: string }[] {
+  const raw = (businessDate ?? '').trim()
+  if (!raw) return []
+  const compact = raw.replace(/[-/]/g, '')
+  const iso = compact.length === 8
+    ? `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`
+    : raw
   return [
-    { key: 'business_date',       value: yyyymmdd },
-    { key: 'business_date_from',  value: isoDate },
-    { key: 'business_date_to',    value: isoDate },
-    { key: 'business_date_range', value: `${isoDate} / ${isoDate}` },
+    { key: 'business_date',       value: compact || raw },
+    { key: 'business_date_from',  value: iso },
+    { key: 'business_date_to',    value: iso },
+    { key: 'business_date_range', value: `${iso} / ${iso}` },
   ]
 }
 
@@ -628,24 +712,27 @@ interface SqlPanelState {
   params: { key: string; value: string }[]
   onSqlChange: (sql: string) => void
   iteratorInfo?: string   // shown as info banner when previewing with sample entry
+  readOnly?: boolean
 }
 
 const CLOSED_PANEL: SqlPanelState = {
   open: false, height: 320, connectionId: null, sql: '', params: [],
   onSqlChange: () => {},
+  readOnly: false,
 }
 
 function SqlBottomPanel({
-  panel, onClose, onHeightChange,
+  panel, onClose, onHeightChange, businessDate,
 }: {
   panel: SqlPanelState
   onClose: () => void
   onHeightChange: (h: number) => void
+  businessDate?: string
 }) {
   const theme = useTheme()
   const dragging = useRef(false)
 
-  const globalParams = getGlobalParams()
+  const globalParams = getGlobalParams(businessDate)
   // Globals are auto-injected; explicit node params take precedence
   const allParams = [...globalParams, ...panel.params]
   const resolved = injectParams(panel.sql, allParams)
@@ -698,7 +785,9 @@ function SqlBottomPanel({
       {/* Header */}
       <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, pb: 0.5, flexShrink: 0, gap: 1 }}>
         <Code sx={{ fontSize: 15, color: 'primary.main' }} />
-        <Typography variant="caption" sx={{ flex: 1, fontSize: '0.75rem', fontWeight: 700 }}>SQL Editor</Typography>
+        <Typography variant="caption" sx={{ flex: 1, fontSize: '0.75rem', fontWeight: 700 }}>
+          {panel.readOnly ? 'SQL Preview' : 'SQL Editor'}
+        </Typography>
         <IconButton size="small" onClick={onClose}><Close sx={{ fontSize: 15 }} /></IconButton>
       </Box>
 
@@ -709,7 +798,10 @@ function SqlBottomPanel({
           <Typography variant="caption" color="text.secondary" sx={{ mb: 0.25, fontSize: '0.65rem' }}>SQL</Typography>
           <textarea
             value={panel.sql}
-            onChange={e => panel.onSqlChange(e.target.value)}
+            onChange={e => {
+              if (!panel.readOnly) panel.onSqlChange(e.target.value)
+            }}
+            readOnly={panel.readOnly}
             spellCheck={false}
             style={{
               flex: 1, width: '100%', resize: 'none',
@@ -719,6 +811,7 @@ function SqlBottomPanel({
               borderRadius: 4,
               background: theme.palette.mode === 'dark' ? '#1e1e2e' : '#f6f8fa',
               color: theme.palette.text.primary,
+              cursor: panel.readOnly ? 'default' : 'text',
               outline: 'none', lineHeight: 1.5,
             }}
           />
@@ -1063,11 +1156,12 @@ function JdbcExtractForm({
     if (!config.connection_id) return
     const sql = getSql()
     if (!sql.trim()) return
+    const queryName = (selectedSql?.name ?? 'query').replace(/\.[^/.]+$/, '') || 'query'
     setExtracting(true); setExtractError(null); setExtractResult(null)
     try {
       const r = await connectionsApi.extract(
         config.connection_id, sql, buildParamsDict(),
-        config.chunk_size ?? 50000, config.output_subdir || undefined,
+        config.chunk_size ?? 100000, config.output_subdir || undefined, queryName,
       )
       setExtractResult(r)
     } catch (e) { setExtractError(String(e)) }
@@ -1111,8 +1205,8 @@ function JdbcExtractForm({
         size="small"
         type="number"
         fullWidth
-        value={config.chunk_size ?? 50000}
-        onChange={e => onChange({ chunk_size: parseInt(e.target.value) || 50000 })}
+        value={config.chunk_size ?? 100000}
+        onChange={e => onChange({ chunk_size: parseInt(e.target.value) || 100000 })}
         helperText="Rows per parquet file written by the downstream output node"
       />
 
@@ -2652,12 +2746,13 @@ function IteratorForm({ config, onChange, dictionaries, onPreview }: {
 }
 
 function PropertiesPanel({
-  node, onUpdateConfig, connections, sqlFiles, dictionaries, notebooks, onOpenSqlEditor, onPreviewIterator, nodes, edges, pipelineName, businessDate,
+  node, onUpdateConfig, connections, sqlFiles, transformSqlFiles, dictionaries, notebooks, onOpenSqlEditor, onPreviewIterator, nodes, edges, pipelineName, businessDate,
 }: {
   node: Node<PipelineNodeData>
   onUpdateConfig: (nodeId: string, patch: Record<string, unknown>) => void
   connections: Connection[]
   sqlFiles: SqlFile[]
+  transformSqlFiles: SqlFile[]
   notebooks: NotebookFile[]
   onOpenSqlEditor: () => void
   onPreviewIterator: (nodeId: string) => IteratorPreviewModel
@@ -2667,6 +2762,11 @@ function PropertiesPanel({
   pipelineName: string
   businessDate?: string
 }) {
+  const { data: sparkDatabases = [] } = useQuery({
+    queryKey: ['catalog-databases'],
+    queryFn: dataApi.listDatabases,
+    staleTime: 60_000,
+  })
   const nodeById = useMemo(
     () => new Map(nodes.map(n => [n.id, n])),
     [nodes],
@@ -2690,6 +2790,22 @@ function PropertiesPanel({
       const current = nodeById.get(currentId)
       if (!current) continue
       if (current.data.nodeType === 'iterator') return current
+      const parents = edges.filter(e => e.target === currentId).map(e => e.source)
+      queue.push(...parents)
+    }
+    return null
+  }, [incomingNodeIds, nodeById, edges])
+
+  const findUpstreamExtract = useCallback((): Node<PipelineNodeData> | null => {
+    const visited = new Set<string>()
+    const queue = [...incomingNodeIds]
+    while (queue.length > 0) {
+      const currentId = queue.shift()!
+      if (visited.has(currentId)) continue
+      visited.add(currentId)
+      const current = nodeById.get(currentId)
+      if (!current) continue
+      if (current.data.nodeType === 'jdbc_extract' || current.data.nodeType === 'dw_extract') return current
       const parents = edges.filter(e => e.target === currentId).map(e => e.source)
       queue.push(...parents)
     }
@@ -2738,22 +2854,40 @@ function PropertiesPanel({
 
     if (node.data.nodeType === 'jdbc_extract' || node.data.nodeType === 'dw_extract') {
       const sqlConfigured = Boolean((node.data.config?.sql ?? '').trim() || node.data.config?.sql_file_id)
+      const outputSubdir = String(node.data.config?.output_subdir ?? '').trim()
+      const selectedSqlFile = sqlFiles.find(f => f.id === Number(node.data.config?.sql_file_id))
+      const rawQueryName = (selectedSqlFile?.name ?? 'query').replace(/\.[^/.]+$/, '') || 'query'
+      const safeQueryName = rawQueryName.replace(/[^a-zA-Z0-9_-]/g, '_') || 'query'
+      const outputRoot = outputSubdir
+        ? `data/parquet/${outputSubdir.replace(/[^a-zA-Z0-9_\-/]/g, '_')}`
+        : `data/parquet/${safeQueryName}`
       inputs.push(sqlConfigured ? 'SQL: configured' : 'SQL: not configured')
       const limit = Number(node.data.config?.limit)
       outputs.push(Number.isFinite(limit) && limit > 0
         ? `Rows: up to ${limit.toLocaleString()} per run`
         : 'Rows: all matching rows')
-      outputs.push(`Chunk size: ${(Number(node.data.config?.chunk_size) || 50000).toLocaleString()} rows`)
+      outputs.push(`Parquet output: ${outputRoot}/part_00000.parquet`)
+      outputs.push('Output format: parquet')
+      outputs.push(`Chunk size: ${(Number(node.data.config?.chunk_size) || 100000).toLocaleString()} rows`)
     }
 
     if (node.data.nodeType === 'aggregate' || node.data.nodeType === 'load_sql') {
       const iteratorNode = findUpstreamIterator()
+      const extractNode = findUpstreamExtract()
       const dict = iteratorNode ? dictionaries.find(d => d.id === Number(iteratorNode.data.config?.dictionary_id)) : undefined
       const selectedKeys: string[] = iteratorNode?.data.config?.selected_keys ?? []
       const entryFilters: IteratorEntryFilter[] = (iteratorNode?.data.config?.entry_filters ?? [])
         .filter((f: { column?: string; value?: string }) => f?.column && f?.value)
       const activeKeys = getIteratorActiveEntries(dict, selectedKeys, entryFilters).map(e => e.key)
-      const basePath = `data/pipeline/parquet/{business_date}/${pipelineName || 'pipeline'}`
+      const extractSqlId = Number(extractNode?.data.config?.sql_file_id)
+      const extractSqlFile = Number.isFinite(extractSqlId) && extractSqlId > 0
+        ? sqlFiles.find(f => f.id === extractSqlId)
+        : null
+      const sourceName = (extractSqlFile?.name ?? pipelineName ?? 'pipeline')
+        .replace(/\.[^/.]+$/, '')
+        .replace(/[^a-zA-Z0-9_\-]/g, '_')
+        .toUpperCase()
+      const basePath = `data/pipeline/parquet/{business_date}/${sourceName || 'PIPELINE'}`
       inputs.push(`Source root: ${basePath}`)
       if (activeKeys.length > 0) {
         const previewKeys = activeKeys.slice(0, 6)
@@ -2795,11 +2929,32 @@ function PropertiesPanel({
     }
 
     return { inputs, outputs }
-  }, [node, incomingNodeIds, outgoingNodeIds, nodeById, dictionaries, findUpstreamIterator, pipelineName, businessDate])
+  }, [node, incomingNodeIds, outgoingNodeIds, nodeById, dictionaries, findUpstreamIterator, findUpstreamExtract, sqlFiles, pipelineName, businessDate])
 
   const cat = CATALOG_MAP[node.data.nodeType]
   const onChange = (patch: Record<string, unknown>) => onUpdateConfig(node.id, patch)
-
+  const defaultSparkDatabase = useMemo(() => deriveSparkDatabaseName(businessDate), [businessDate])
+  const sparkDatabaseOptions = useMemo(() => {
+    const all = Array.from(new Set([defaultSparkDatabase, ...sparkDatabases.filter(Boolean)]))
+    return all.sort((a, b) => {
+      if (a === defaultSparkDatabase) return -1
+      if (b === defaultSparkDatabase) return 1
+      return a.localeCompare(b)
+    })
+  }, [sparkDatabases, defaultSparkDatabase])
+  const sqlTransformSourceMode = useMemo<'auto' | 'manual'>(() => {
+    const rawMode = String(node.data.config?.source_database_mode ?? '').trim().toLowerCase()
+    if (rawMode === 'manual') return 'manual'
+    if (rawMode === 'auto') return 'auto'
+    const configured = String(node.data.config?.source_database ?? '').trim()
+    if (/^data_\d{8}$/.test(configured)) return 'auto'
+    return configured ? 'manual' : 'auto'
+  }, [node])
+  const sqlTransformSourceDbValue = useMemo(() => {
+    if (sqlTransformSourceMode !== 'manual') return '__AUTO__'
+    const configured = String(node.data.config?.source_database ?? '').trim()
+    return configured || '__AUTO__'
+  }, [node, sqlTransformSourceMode])
   return (
     <Box sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       {/* Node header */}
@@ -2856,15 +3011,52 @@ function PropertiesPanel({
       {node.data.nodeType === 'sql_transform' && (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
           <Alert severity="info" sx={{ fontSize: '0.72rem', py: 0.5 }}>
-            SQL Transform requires Spark and is not yet supported in pipeline execution.
+            SQL Transform can run in Spark SQL source mode (no extract node) when you provide a source database, a SQL file, and a target Spark table load node.
           </Alert>
+          <TextField
+            select
+            label="Source Database (Spark)"
+            size="small"
+            fullWidth
+            value={sqlTransformSourceDbValue}
+            onChange={e => {
+              const next = e.target.value
+              if (next === '__AUTO__') {
+                onChange({ source_database_mode: 'auto', source_database: '' })
+              } else {
+                onChange({ source_database_mode: 'manual', source_database: next })
+              }
+            }}
+            helperText={`Auto resolves to data_<business_date> at run time — currently ${defaultSparkDatabase}`}
+          >
+            <MenuItem value="__AUTO__">
+              <Typography sx={{ fontSize: '0.78rem', fontWeight: 600 }}>
+                Auto (dynamic by business date)
+              </Typography>
+            </MenuItem>
+            {sparkDatabaseOptions.map(db => (
+              <MenuItem key={db} value={db}>
+                <Typography sx={{ fontSize: '0.78rem' }}>{db}</Typography>
+              </MenuItem>
+            ))}
+          </TextField>
           <FormControl size="small" fullWidth>
             <InputLabel>SQL File</InputLabel>
             <Select label="SQL File" value={node.data.config.sql_file_id ?? ''} onChange={e => onChange({ sql_file_id: e.target.value || null })}>
               <MenuItem value=""><em>None</em></MenuItem>
-              {sqlFiles.map(f => <MenuItem key={f.id} value={f.id}><Typography sx={{ fontSize: '0.78rem' }}>{f.name}</Typography></MenuItem>)}
+              {transformSqlFiles.map(f => <MenuItem key={f.id} value={f.id}><Typography sx={{ fontSize: '0.78rem' }}>{f.name}</Typography></MenuItem>)}
             </Select>
           </FormControl>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<Visibility sx={{ fontSize: 14 }} />}
+            onClick={onOpenSqlEditor}
+            disabled={!node.data.config.sql_file_id}
+            sx={{ fontSize: '0.72rem' }}
+          >
+            Open SQL Preview Panel
+          </Button>
         </Box>
       )}
       {node.data.nodeType === 'notebook_transform' && (
@@ -3229,6 +3421,17 @@ function _newNodeId(): string {
   return `node_${_nodeIdSeq++}`
 }
 
+function _syncNodeIdSeq(existingNodes: Array<{ id: string }>) {
+  let maxId = _nodeIdSeq - 1
+  for (const node of existingNodes) {
+    const match = /^node_(\d+)$/.exec(node.id)
+    if (!match) continue
+    const num = Number(match[1])
+    if (Number.isFinite(num) && num > maxId) maxId = num
+  }
+  _nodeIdSeq = Math.max(_nodeIdSeq, maxId + 1)
+}
+
 function buildIteratorJdbcAggregateSparkTemplate(
   position: { x: number; y: number },
 ): { nodes: Node<PipelineNodeData>[]; edges: Edge[] } {
@@ -3261,7 +3464,7 @@ function buildIteratorJdbcAggregateSparkTemplate(
         config: {
           ...defaultConfig('jdbc_extract'),
           sql: "SELECT *\nFROM your_table\nWHERE business_date = '$business_date'\n  AND app_id = '$app_id'",
-          chunk_size: 50000,
+          chunk_size: 100000,
         },
       },
     },
@@ -3320,6 +3523,85 @@ function buildIteratorJdbcAggregateSparkTemplate(
   ]
 
   return { nodes: templateNodes, edges: templateEdges }
+}
+
+// ── Compact run-controls dropdown ──────────────────────────────────────────
+interface RunMenuButtonProps {
+  runScope: 'full' | 'extract' | 'load'
+  disabled: boolean
+  hasFailedRun: boolean
+  stepDisabled: boolean
+  nodesEmpty: boolean
+  onRun: () => void
+  onRunStep: () => void
+  onResume: () => void
+  onSkip: () => void
+  onExecutionPlan: () => void
+}
+function RunMenuButton({ disabled, hasFailedRun, stepDisabled, nodesEmpty, onRun, onRunStep, onResume, onSkip, onExecutionPlan }: RunMenuButtonProps) {
+  const [anchor, setAnchor] = useState<null | HTMLElement>(null)
+  return (
+    <>
+      <Box sx={{ display: 'flex' }}>
+        <Button
+          size="small"
+          variant="outlined"
+          color="success"
+          startIcon={<PlayArrow sx={{ fontSize: 15 }} />}
+          onClick={onRun}
+          disabled={disabled}
+          sx={{ borderRadius: '4px 0 0 4px', borderRight: 'none' }}
+        >
+          Run
+        </Button>
+        <Button
+          size="small"
+          variant="outlined"
+          color="success"
+          onClick={e => setAnchor(e.currentTarget)}
+          disabled={disabled && !hasFailedRun}
+          sx={{ borderRadius: '0 4px 4px 0', minWidth: 0, px: 0.5 }}
+        >
+          <ExpandMore sx={{ fontSize: 16 }} />
+        </Button>
+      </Box>
+      <Menu anchorEl={anchor} open={Boolean(anchor)} onClose={() => setAnchor(null)}>
+        <MenuItem
+          dense
+          disabled={disabled || stepDisabled}
+          onClick={() => { setAnchor(null); onRunStep() }}
+        >
+          <ListItemIcon><PlayArrow fontSize="small" /></ListItemIcon>
+          Run selected step
+        </MenuItem>
+        <MenuItem
+          dense
+          disabled={!hasFailedRun || disabled}
+          onClick={() => { setAnchor(null); onResume() }}
+        >
+          <ListItemIcon><Loop fontSize="small" /></ListItemIcon>
+          Resume from failure
+        </MenuItem>
+        <MenuItem
+          dense
+          disabled={!hasFailedRun || disabled}
+          onClick={() => { setAnchor(null); onSkip() }}
+        >
+          <ListItemIcon><LastPage fontSize="small" /></ListItemIcon>
+          Skip failed step
+        </MenuItem>
+        <Divider />
+        <MenuItem
+          dense
+          disabled={nodesEmpty}
+          onClick={() => { setAnchor(null); onExecutionPlan() }}
+        >
+          <ListItemIcon><AccountTree fontSize="small" /></ListItemIcon>
+          Execution plan
+        </MenuItem>
+      </Menu>
+    </>
+  )
 }
 
 export default function PipelineEditor() {
@@ -3400,6 +3682,11 @@ export default function PipelineEditor() {
     queryFn: () => sqlFilesApi.list('extract'),
   })
 
+  const { data: transformSqlFiles = [] } = useQuery({
+    queryKey: ['sql-files', 'transform'],
+    queryFn: () => sqlFilesApi.list('transform'),
+  })
+
   const { data: dictionaries = [] } = useQuery({
     queryKey: ['dictionaries'],
     queryFn: dictionariesApi.list,
@@ -3424,60 +3711,131 @@ export default function PipelineEditor() {
     () => [...pipelineRuns].sort((a, b) => b.id - a.id).slice(0, 20),
     [pipelineRuns],
   )
+  const liveRun = useMemo(
+    () => recentRuns.find(r => r.status === 'running' || r.status === 'pending') ?? null,
+    [recentRuns],
+  )
+  const latestFailedRun = useMemo(
+    () => recentRuns.find(r => r.status === 'failed') ?? null,
+    [recentRuns],
+  )
 
   const setupChecklist = useMemo(() => {
     const iteratorNode = nodes.find(n => n.data.nodeType === 'iterator')
     const jdbcNode = nodes.find(n => n.data.nodeType === 'jdbc_extract')
+    const dwNode = nodes.find(n => n.data.nodeType === 'dw_extract')
+    const s3Node = nodes.find(n => n.data.nodeType === 's3_extract')
+    const csvNode = nodes.find(n => n.data.nodeType === 'csv_extract' || n.data.nodeType === 'json_extract')
     const aggregateNode = nodes.find(n => n.data.nodeType === 'aggregate')
     const loadNode = nodes.find(n => ['load_sql', 'load_parquet'].includes(n.data.nodeType))
+    const sqlTransformNodes = nodes.filter(n => n.data.nodeType === 'sql_transform')
+    const hasSourceNode = Boolean(jdbcNode || dwNode || s3Node || csvNode)
 
-    const items = [
-      {
-        key: 'iter-node',
-        label: 'Iterator node is on canvas',
-        ok: Boolean(iteratorNode),
-      },
-      {
+    const sourceTypes = new Set(['jdbc_extract', 'dw_extract', 's3_extract', 'csv_extract', 'json_extract'])
+    const loadTypes = new Set(['load_sql', 'load_parquet'])
+    const outEdges = new Map<string, string[]>()
+    for (const n of nodes) outEdges.set(n.id, [])
+    for (const e of edges) {
+      const arr = outEdges.get(e.source)
+      if (arr) arr.push(e.target)
+    }
+
+    const sourceNodes = nodes.filter(n => sourceTypes.has(n.data.nodeType))
+    const loadNodeIds = new Set(nodes.filter(n => loadTypes.has(n.data.nodeType)).map(n => n.id))
+    const reachesAnyLoad = (startId: string): boolean => {
+      const stack = [startId]
+      const seen = new Set<string>()
+      while (stack.length > 0) {
+        const cur = stack.pop()!
+        if (seen.has(cur)) continue
+        seen.add(cur)
+        if (cur !== startId && loadNodeIds.has(cur)) return true
+        for (const nxt of outEdges.get(cur) ?? []) stack.push(nxt)
+      }
+      return false
+    }
+    const disconnectedSourceCount = sourceNodes.filter(n => !reachesAnyLoad(n.id)).length
+
+    const items: { key: string; label: string; ok: boolean }[] = []
+
+    if (iteratorNode) {
+      items.push({
         key: 'iter-dict',
         label: 'Iterator dictionary selected',
-        ok: Boolean(iteratorNode?.data.config?.dictionary_id),
-      },
-      {
-        key: 'jdbc-node',
-        label: 'JDBC Extract node is on canvas',
-        ok: Boolean(jdbcNode),
-      },
-      {
+        ok: Boolean(iteratorNode.data.config?.dictionary_id),
+      })
+    }
+
+    if (jdbcNode) {
+      items.push({
         key: 'jdbc-conn',
         label: 'JDBC connection selected',
-        ok: Boolean(jdbcNode?.data.config?.connection_id),
-      },
-      {
+        ok: Boolean(jdbcNode.data.config?.connection_id),
+      })
+      items.push({
         key: 'jdbc-sql',
         label: 'JDBC SQL configured (inline or file)',
-        ok: Boolean((jdbcNode?.data.config?.sql ?? '').trim() || jdbcNode?.data.config?.sql_file_id),
-      },
-      {
-        key: 'agg-node',
-        label: 'Aggregate node exists',
-        ok: Boolean(aggregateNode),
-      },
-      {
-        key: 'load-node',
-        label: 'Load node exists (Spark table or Parquet file)',
-        ok: Boolean(loadNode),
-      },
-      {
-        key: 'load-spark-table',
-        label: 'Spark table name is set (for load-to-table runs)',
-        ok: loadNode?.data.nodeType !== 'load_sql' || Boolean((loadNode.data.config?.table_name ?? '').trim()),
-      },
-      {
-        key: 'biz-date',
-        label: 'Business date is set in execution context',
-        ok: Boolean(execContext?.business_date),
-      },
-    ]
+        ok: Boolean((jdbcNode.data.config?.sql ?? '').trim() || jdbcNode.data.config?.sql_file_id),
+      })
+    }
+
+    if (aggregateNode) {
+      items.push({
+        key: 'agg-present',
+        label: 'Aggregate node is configured',
+        ok: true,
+      })
+    }
+
+    if (sqlTransformNodes.length > 0) {
+      items.push({
+        key: 'sql-transform-files',
+        label: 'SQL Transform file selected',
+        ok: sqlTransformNodes.every(n => Boolean(n.data.config?.sql_file_id)),
+      })
+      if (!hasSourceNode) {
+        items.push({
+          key: 'sql-transform-source-db',
+          label: 'SQL Transform source database is set',
+          ok: sqlTransformNodes.every(n => {
+            const mode = String(n.data.config?.source_database_mode ?? '').trim().toLowerCase()
+            if (mode === 'auto') return true
+            const configured = String(n.data.config?.source_database ?? '').trim()
+            if (!mode && /^data_\d{8}$/.test(configured)) return true
+            return Boolean(configured)
+          }),
+        })
+      }
+    }
+
+    if (loadNode) {
+      items.push({
+        key: 'load-present',
+        label: 'Load node is configured',
+        ok: true,
+      })
+      if (loadNode.data.nodeType === 'load_sql') {
+        items.push({
+          key: 'load-spark-table',
+          label: 'Spark table name is set',
+          ok: Boolean((loadNode.data.config?.table_name ?? '').trim()),
+        })
+      }
+    }
+
+    if (sourceNodes.length > 0) {
+      items.push({
+        key: 'source-connected',
+        label: 'Every source node is connected to a downstream load path',
+        ok: disconnectedSourceCount === 0,
+      })
+    }
+
+    items.push({
+      key: 'biz-date',
+      label: 'Business date is set in execution context',
+      ok: Boolean(execContext?.business_date),
+    })
 
     const completeCount = items.filter(i => i.ok).length
     return {
@@ -3486,7 +3844,7 @@ export default function PipelineEditor() {
       total: items.length,
       percent: Math.round((completeCount / Math.max(items.length, 1)) * 100),
     }
-  }, [nodes, execContext?.business_date])
+  }, [nodes, edges, execContext?.business_date])
 
   const categoryOptions = useMemo(
     () => buildPipelineCategoryOptions(allPipelines.map(p => p.category)),
@@ -3515,7 +3873,9 @@ export default function PipelineEditor() {
 
     const cc = pipeline.canvas_config as { nodes?: unknown[]; edges?: unknown[]; viewport?: Viewport } | undefined
     if (cc?.nodes && cc.nodes.length > 0) {
-      setNodes(cc.nodes as Node<PipelineNodeData>[])
+      const loadedNodes = cc.nodes as Node<PipelineNodeData>[]
+      _syncNodeIdSeq(loadedNodes)
+      setNodes(loadedNodes)
       setEdges((cc.edges ?? []) as Edge[])
       if (cc.viewport) {
         const savedVp = cc.viewport
@@ -3536,7 +3896,11 @@ export default function PipelineEditor() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['pipelines'] }); navigate('/pipelines') },
   })
 
+  // activeRunId: controls the run log panel (user-driven)
+  // canvasRunId: controls the node status overlays on the diagram (auto-tracked)
   const [activeRunId, setActiveRunId] = useState<number | null>(null)
+  const [canvasRunId, setCanvasRunId] = useState<number | null>(null)
+  const [showCanvasRunStatus, setShowCanvasRunStatus] = useState(true)
   const [warnNoBizDate, setWarnNoBizDate] = useState(false)
   const [executionPlanOpen, setExecutionPlanOpen] = useState(false)
   const [runScope, setRunScope] = useState<'full' | 'extract' | 'load'>('full')
@@ -3550,6 +3914,151 @@ export default function PipelineEditor() {
     const nextEdgeType = EDGE_TYPE_BY_STYLE[lineRenderStyle]
     setEdges(eds => eds.map(edge => ({ ...edge, type: nextEdgeType })))
   }, [lineRenderStyle, setEdges])
+
+  // Canvas status query — uses canvasRunId, completely independent of log panel
+  const { data: activeRunDetail } = useQuery<RunDetail>({
+    queryKey: ['run-detail-canvas', canvasRunId],
+    queryFn: () => runsApi.get(Number(canvasRunId)),
+    enabled: canvasRunId != null && showCanvasRunStatus,
+    refetchInterval: q => {
+      const status = (q.state.data as RunDetail | undefined)?.status
+      return status && ['completed', 'failed', 'cancelled', 'completed_with_warnings'].includes(status) ? false : 1200
+    },
+  })
+
+  // Auto-track the live run for canvas status (never touches log panel)
+  useEffect(() => {
+    if (!showCanvasRunStatus) return
+    if (liveRun && canvasRunId !== liveRun.id) {
+      setCanvasRunId(liveRun.id)
+      return
+    }
+    if (canvasRunId == null && recentRuns.length > 0) {
+      setCanvasRunId(recentRuns[0].id)
+    }
+  }, [showCanvasRunStatus, liveRun, canvasRunId, recentRuns])
+
+  useEffect(() => {
+    if (canvasRunId == null) return
+    qc.invalidateQueries({ queryKey: ['run-detail-canvas', canvasRunId] })
+  }, [pipelineRuns, canvasRunId, qc])
+
+  const canvasNodeRunMap = useMemo(() => {
+    const out: Record<string, { status: string; stepId?: number }> = {}
+    if (!activeRunDetail || !showCanvasRunStatus || canvasRunId == null) return out
+
+    const runLive = ['running', 'pending'].includes(activeRunDetail.status)
+    if (runLive) {
+      for (const n of nodes) out[n.id] = { status: 'pending' }
+    }
+
+    const steps = activeRunDetail.steps ?? []
+    const byStepId = new Map<number, (typeof steps)[number]>()
+    for (const s of steps) byStepId.set(s.id, s)
+
+    // Track which step IDs have been consumed so they're never double-assigned
+    const consumedStepIds = new Set<number>()
+
+    // Priority 1: explicit node_step_map from run metadata (most reliable)
+    const mapRaw = ((activeRunDetail.run_metadata as Record<string, unknown> | undefined)?.node_step_map ?? {}) as Record<string, number>
+    for (const [nodeId, sid] of Object.entries(mapRaw)) {
+      const step = byStepId.get(Number(sid))
+      if (step) {
+        out[nodeId] = { status: step.status, stepId: step.id }
+        consumedStepIds.add(step.id)
+      }
+    }
+
+    // Priority 2: node ID embedded in step label "[node_XXX]"
+    for (const s of steps) {
+      if (consumedStepIds.has(s.id)) continue
+      const nid = extractNodeIdFromStepLabel(s.step_label)
+      if (nid && !out[nid]) {
+        out[nid] = { status: s.status, stepId: s.id }
+        consumedStepIds.add(s.id)
+      }
+    }
+
+    // For terminal runs, only trust explicit mappings. This avoids assigning
+    // stale "completed" statuses to newly added nodes after a run has finished.
+    if (!runLive && Object.keys(out).length > 0) {
+      return out
+    }
+
+    // Priority 2 explicit mappings are now in `out` and `consumedStepIds`.
+    // Always continue to priority 3 to fill any canvas nodes not yet matched
+    // (e.g. load_sql when only the sql_transform step had a bracket label).
+
+    // Priority 3: topological fallback — match remaining nodes to remaining steps by type+order
+    const topologicalIds = (() => {
+      const inDeg: Record<string, number> = {}
+      const adj: Record<string, string[]> = {}
+      for (const n of nodes) {
+        inDeg[n.id] = 0
+        adj[n.id] = []
+      }
+      for (const e of edges) {
+        if (adj[e.source]) adj[e.source].push(e.target)
+        inDeg[e.target] = (inDeg[e.target] ?? 0) + 1
+      }
+      const q = nodes.filter(n => (inDeg[n.id] ?? 0) === 0).map(n => n.id)
+      const ordered: string[] = []
+      let i = 0
+      while (i < q.length) {
+        const cur = q[i++]
+        ordered.push(cur)
+        for (const nxt of adj[cur] ?? []) {
+          inDeg[nxt] -= 1
+          if (inDeg[nxt] === 0) q.push(nxt)
+        }
+      }
+      for (const n of nodes) if (!ordered.includes(n.id)) ordered.push(n.id)
+      return ordered
+    })()
+
+    // Only unconsumed steps, grouped by type in step_order
+    const stepsByType: Record<string, (typeof steps)> = {}
+    for (const s of steps
+      .filter(s => !['app', 'chunk'].includes(s.step_type) && !consumedStepIds.has(s.id))
+      .sort((a, b) => a.step_order - b.step_order)) {
+      if (!stepsByType[s.step_type]) stepsByType[s.step_type] = []
+      stepsByType[s.step_type].push(s)
+    }
+
+    const idxByType: Record<string, number> = {}
+    for (const nodeId of topologicalIds) {
+      if (out[nodeId]) continue
+      const node = nodes.find(n => n.id === nodeId)
+      if (!node) continue
+      const st = toRunStepType(node.data.nodeType)
+      const arr = stepsByType[st] ?? []
+      const idx = idxByType[st] ?? 0
+      const step = arr[idx]
+      if (step) {
+        out[nodeId] = { status: step.status, stepId: step.id }
+        consumedStepIds.add(step.id)
+        idxByType[st] = idx + 1
+      }
+    }
+
+    return out
+  }, [activeRunDetail, showCanvasRunStatus, canvasRunId, nodes, edges])
+
+  const canvasNodesWithStatus = useMemo(() => {
+    if (!showCanvasRunStatus) return nodes
+    return nodes.map(n => {
+      const m = canvasNodeRunMap[n.id]
+      if (!m) return n
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          runStatus: m.status,
+          runStepId: m.stepId,
+        },
+      }
+    })
+  }, [nodes, canvasNodeRunMap, showCanvasRunStatus])
 
   function buildPipelineRequestPayload(name: string, category: string, status: Pipeline['status']) {
     const dwNode = nodes.find(n => n.data.nodeType === 'dw_extract')
@@ -3634,12 +4143,48 @@ export default function PipelineEditor() {
     },
   })
 
+  const resumeMut = useMutation({
+    mutationFn: () => pipelinesApi.run(Number(id), { run_scope: 'full', resume_from_failed: true }),
+    onSuccess: (run) => {
+      setActiveRunId(run.id)
+      qc.invalidateQueries({ queryKey: ['pipelines'] })
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+      qc.invalidateQueries({ queryKey: ['pipeline-runs', id] })
+    },
+  })
+
+  const skipMut = useMutation({
+    mutationFn: () => pipelinesApi.run(Number(id), { run_scope: 'full', skip_failed_step: true }),
+    onSuccess: (run) => {
+      setActiveRunId(run.id)
+      qc.invalidateQueries({ queryKey: ['pipelines'] })
+      qc.invalidateQueries({ queryKey: ['all-runs'] })
+      qc.invalidateQueries({ queryKey: ['pipeline-runs', id] })
+    },
+  })
+
   function handleRunPipeline(scope: 'full' | 'extract' | 'load' = runScope) {
     if (!execContext?.business_date) {
       setWarnNoBizDate(true)
       return
     }
     runMut.mutate(scope)
+  }
+
+  function handleResumeFromFailure() {
+    if (!execContext?.business_date) {
+      setWarnNoBizDate(true)
+      return
+    }
+    resumeMut.mutate()
+  }
+
+  function handleSkipFailedStep() {
+    if (!execContext?.business_date) {
+      setWarnNoBizDate(true)
+      return
+    }
+    skipMut.mutate()
   }
 
   function handleRunSelectedStep() {
@@ -3766,6 +4311,30 @@ export default function PipelineEditor() {
 
   function openSqlEditorForNode(node: Node<PipelineNodeData>) {
     const cfg = node.data.config ?? {}
+
+    if (node.data.nodeType === 'sql_transform') {
+      const sqlFileId = Number(cfg.sql_file_id)
+      const sqlFile = transformSqlFiles.find(f => f.id === sqlFileId)
+      const rawMode = String(cfg.source_database_mode ?? '').trim().toLowerCase()
+      const configuredDb = String(cfg.source_database ?? '').trim()
+      const autoMode = rawMode === 'auto' || (!rawMode && /^data_\d{8}$/.test(configuredDb)) || !configuredDb
+      const sourceDb = autoMode ? deriveSparkDatabaseName(execContext?.business_date) : configuredDb
+
+      setSqlPanel(p => ({
+        open: true,
+        height: p.open ? p.height : 320,
+        connectionId: null,
+        sql: sqlFile?.content ?? '',
+        params: [],
+        onSqlChange: () => {},
+        readOnly: true,
+        iteratorInfo: sqlFile
+          ? `Previewing SQL Transform file "${sqlFile.name}" against Spark DB "${sourceDb}"${autoMode ? ' (auto from business date)' : ''}.`
+          : 'Select a SQL file to preview SQL Transform output.',
+      }))
+      return
+    }
+
     const params: { key: string; value: string }[] = cfg.params ?? []
     const sqlMode = cfg.sql_file_id ? 'file' : 'inline'
     const sqlFiles_: SqlFile[] = sqlFiles ?? []
@@ -3779,6 +4348,8 @@ export default function PipelineEditor() {
       sql,
       params,
       onSqlChange: (s: string) => updateNodeConfig(node.id, { sql: s, sql_file_id: null }),
+      readOnly: false,
+      iteratorInfo: undefined,
     }))
   }
 
@@ -4123,6 +4694,7 @@ export default function PipelineEditor() {
   )
 
   function handleSchemaApply(newNodes: Node<PipelineNodeData>[], newEdges: Edge[]) {
+    _syncNodeIdSeq(newNodes)
     setNodes(newNodes)
     setEdges(newEdges)
   }
@@ -4253,45 +4825,45 @@ export default function PipelineEditor() {
         {saveMut.isSuccess && (
           <Typography variant="caption" color="success.main" sx={{ fontSize: '0.72rem' }}>Saved ✓</Typography>
         )}
-        <FormControl size="small" sx={{ minWidth: 148 }}>
+
+        {/* ── Run controls ── */}
+        <FormControl size="small" sx={{ minWidth: 130 }}>
           <Select
             value={runScope}
             onChange={e => setRunScope(e.target.value as 'full' | 'extract' | 'load')}
-            sx={{ fontSize: '0.76rem', height: 32 }}
+            sx={{ fontSize: '0.76rem', height: 30 }}
           >
-            <MenuItem value="full">Run Full Pipeline</MenuItem>
-            <MenuItem value="extract">Run Extract</MenuItem>
-            <MenuItem value="load">Run Load</MenuItem>
+            <MenuItem value="full">Full Pipeline</MenuItem>
+            <MenuItem value="extract">Extract only</MenuItem>
+            <MenuItem value="load">Load only</MenuItem>
           </Select>
         </FormControl>
-        <Button
-          size="small"
-          variant="outlined"
-          color="success"
-          startIcon={<PlayArrow sx={{ fontSize: 15 }} />}
-          onClick={() => handleRunPipeline(runScope)}
-          disabled={runMut.isPending || !hasExistingPipelineId}
-        >
-          Run
-        </Button>
-        <Button
-          size="small"
-          variant="outlined"
-          color="success"
-          onClick={handleRunSelectedStep}
-          disabled={runMut.isPending || !selectedNode || !hasExistingPipelineId}
-        >
-          Run Selected Step
-        </Button>
-        <Button
-          size="small"
-          variant="outlined"
-          startIcon={<AccountTree sx={{ fontSize: 15 }} />}
-          onClick={() => setExecutionPlanOpen(true)}
-          disabled={nodes.length === 0}
-        >
-          Execution Plan
-        </Button>
+
+        {/* Run + overflow dropdown */}
+        <RunMenuButton
+          runScope={runScope}
+          disabled={(runMut.isPending || resumeMut.isPending || skipMut.isPending) || !hasExistingPipelineId}
+          hasFailedRun={!!latestFailedRun}
+          onRun={() => handleRunPipeline(runScope)}
+          onRunStep={handleRunSelectedStep}
+          stepDisabled={!selectedNode}
+          onResume={handleResumeFromFailure}
+          onSkip={handleSkipFailedStep}
+          onExecutionPlan={() => setExecutionPlanOpen(true)}
+          nodesEmpty={nodes.length === 0}
+        />
+
+        {/* Canvas status toggle */}
+        <Tooltip title={showCanvasRunStatus ? 'Hide node status' : 'Show node status'}>
+          <IconButton
+            size="small"
+            color={showCanvasRunStatus ? 'primary' : 'default'}
+            onClick={() => setShowCanvasRunStatus(v => !v)}
+          >
+            <Visibility sx={{ fontSize: 17 }} />
+          </IconButton>
+        </Tooltip>
+        {/* Save */}
         <Button
           size="small"
           variant="contained"
@@ -4301,6 +4873,8 @@ export default function PipelineEditor() {
         >
           {saveMut.isPending ? <CircularProgress size={14} /> : 'Save'}
         </Button>
+
+        {/* Delete */}
         <Tooltip title="Delete pipeline">
           <IconButton size="small" color="error" onClick={() => setDeletePipelineConfirm(true)} disabled={!hasExistingPipelineId}>
             <Delete sx={{ fontSize: 16 }} />
@@ -4404,7 +4978,7 @@ export default function PipelineEditor() {
           <ConnectionsContext.Provider value={connections}>
           <NotebooksContext.Provider value={notebooks}>
           <ReactFlow
-            nodes={nodes}
+            nodes={canvasNodesWithStatus}
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
@@ -4504,6 +5078,7 @@ export default function PipelineEditor() {
                     onUpdateConfig={updateNodeConfig}
                     connections={connections}
                     sqlFiles={sqlFiles}
+                    transformSqlFiles={transformSqlFiles}
                     dictionaries={dictionaries}
                     notebooks={notebooks}
                     onOpenSqlEditor={() => selectedNode && openSqlEditorForNode(selectedNode)}
@@ -4638,6 +5213,7 @@ export default function PipelineEditor() {
 
       {/* SQL Bottom Panel */}
       <SqlBottomPanel
+        businessDate={execContext?.business_date}
         panel={(() => {
           const base = { ...sqlPanel }
           if (selectedNode?.data?.nodeType !== 'jdbc_extract') return base
@@ -4771,6 +5347,7 @@ export default function PipelineEditor() {
           <Button onClick={() => setWarnNoBizDate(false)} autoFocus>OK</Button>
         </DialogActions>
       </Dialog>
+
     </Box>
   )
 }

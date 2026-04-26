@@ -20,13 +20,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.etl import Connection, Dictionary
+from app.models.etl import Connection, Dictionary, ExecutionContext
 from app.schemas.etl import ConnectionCreate, ConnectionResponse, ConnectionUpdate
 from sqlalchemy.orm import selectinload
 from app.services.crypto import encrypt_password
 from app.services import jdbc_service
 
 router = APIRouter(prefix="/connections", tags=["connections"])
+
+
+def _with_context_date_params(params: dict[str, str], business_date: Optional[str]) -> dict[str, str]:
+    merged = {**(params or {})}
+    if not business_date:
+        return merged
+    compact = str(business_date).replace('-', '').replace('/', '').strip()
+    if len(compact) == 8:
+        iso = f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+    else:
+        iso = str(business_date)
+    merged.setdefault('business_date', compact if compact else str(business_date))
+    merged.setdefault('business_date_from', iso)
+    merged.setdefault('business_date_to', iso)
+    merged.setdefault('business_date_range', f"{iso} / {iso}")
+    return merged
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,7 +213,9 @@ async def preview_sql(
         raise HTTPException(status_code=400, detail="Only SELECT / WITH statements are allowed for preview")
 
     try:
-        result = await jdbc_service.preview_sql(conn, body.sql, body.params, body.limit)
+        ctx = await db.get(ExecutionContext, 1)
+        params = _with_context_date_params(body.params, ctx.business_date if ctx else None)
+        result = await jdbc_service.preview_sql(conn, body.sql, params, body.limit)
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -210,8 +228,9 @@ async def preview_sql(
 class ExtractRequest(BaseModel):
     sql: str
     params: dict[str, str] = {}
-    chunk_size: int = 50_000
+    chunk_size: int = 100_000
     output_subdir: Optional[str] = None   # relative to PARQUET_DIR; auto-derived if omitted
+    query_name: Optional[str] = None
 
 
 class ExtractResponse(BaseModel):
@@ -242,15 +261,19 @@ async def extract_to_parquet(
         safe = re.sub(r"[^a-zA-Z0-9_\-/]", "_", body.output_subdir)
         output_dir = Path(settings.PARQUET_DIR) / safe
     else:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", conn.name)
-        output_dir = Path(settings.PARQUET_DIR) / f"{safe_name}_{ts}"
+        # Default path: data/parquet/{QUERY_NAME}/part_XXXXX.parquet
+        raw_query_name = (body.query_name or "query").strip()
+        query_stem = Path(raw_query_name).stem or "query"
+        safe_query_name = re.sub(r"[^a-zA-Z0-9_-]", "_", query_stem)
+        output_dir = Path(settings.PARQUET_DIR) / (safe_query_name or "query")
 
     try:
+        ctx = await db.get(ExecutionContext, 1)
+        params = _with_context_date_params(body.params, ctx.business_date if ctx else None)
         result = await jdbc_service.extract_to_parquet(
             conn,
             body.sql,
-            body.params,
+            params,
             output_dir,
             body.chunk_size,
             conn.name,
@@ -282,7 +305,7 @@ class ForeachExtractRequest(BaseModel):
     # Output path template — supports {key_param}, {value_param}, and any static_param key
     # e.g. "{business_date}/{pipeline_name}/{app_id}"
     output_path_template: str = "{app_id}"
-    chunk_size: int = 50_000
+    chunk_size: int = 100_000
     # Optional allowlist of entry keys to iterate over (empty / null = all entries)
     selected_keys: list[str] | None = None
 
@@ -388,7 +411,7 @@ async def test_dw_connection(
 
 class DWExtractRequest(BaseModel):
     sql:            str
-    chunk_size:     int = 50_000
+    chunk_size:     int = 100_000
     output_subdir:  Optional[str] = None
     output_format:  str = "parquet"   # "parquet" | "csv"
 

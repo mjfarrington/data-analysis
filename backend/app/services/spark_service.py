@@ -103,22 +103,28 @@ def _ensure_namespace_db(spark: Any, db_name: str) -> None:
 
 
 def _view_name(date_str: str, job_name: str, app_id: str) -> str:
-    """Convert date + job_name + app_id to a SQL-safe view name.
+    """Convert date + dataset path tokens to a SQL-safe view name.
 
     Must match the formula in DataExplorer.tsx handlePreviewFile:
       parts = name.split('/')  // ['2026-04-17', 'TEST_GRPC', '1']
       (parts[0] + '__' + parts.slice(1).join('/')).replace(/[^0-9a-zA-Z_]/g, '_').toLowerCase()
-    e.g. '2026_04_17__test_grpc_1'
+    e.g. '2026_04_17__my_pipeline_extract_positions_app_1'
     """
     import re
     return re.sub(r"[^0-9a-zA-Z_]", "_", f"{date_str}__{job_name}/{app_id}").lower()
+
+
+def _safe_path_token(value: Optional[str], fallback: str) -> str:
+    import re
+    token = re.sub(r"[^A-Za-z0-9]+", "_", (value or "").strip()).strip("_")
+    return token.upper() if token else fallback
 
 
 def _register_file_views(spark: Any, suppress: set | None = None) -> None:
     """Scan the parquet data directory and create temp views for any dataset
     not yet visible in the catalog.  A lightweight no-op when nothing new.
 
-    Directory structure: <date>/<job_name>/<app_id>/
+    Directory structure: <date>/<pipeline>/<extract_label>/<app_id?>/
     Also drops any temp views that no longer correspond to a file on disk
     (e.g. old-format views from a previous code version).
     """
@@ -133,19 +139,34 @@ def _register_file_views(spark: Any, suppress: set | None = None) -> None:
         existing = set()
         existing_temp = set()
 
-    # Build the set of valid view names from current disk state
+    # Build dataset roots and valid view names from current disk state.
+    # Dataset key format: "<date>|<pipeline>/<extract_label>[/<app_id>]"
+    dataset_roots: dict[str, Path] = {}
     valid_views: set[str] = set()
     for date_dir in sorted(base.iterdir()):
         if not date_dir.is_dir():
             continue
-        for job_dir in sorted(date_dir.iterdir()):
-            if not job_dir.is_dir():
+        for pipeline_dir in sorted(date_dir.iterdir()):
+            if not pipeline_dir.is_dir():
                 continue
-            for app_dir in sorted(job_dir.iterdir()):
-                if not app_dir.is_dir():
+            for extract_dir in sorted(pipeline_dir.iterdir()):
+                if not extract_dir.is_dir():
                     continue
-                if list(app_dir.glob("*.parquet")) or list(app_dir.glob("*.csv")):
-                    valid_views.add(_view_name(date_dir.name, job_dir.name, app_dir.name))
+                extract_files = list(extract_dir.glob("*.parquet")) + list(extract_dir.glob("*.csv"))
+                if extract_files:
+                    key = f"{date_dir.name}|{pipeline_dir.name}/{extract_dir.name}"
+                    dataset_roots[key] = extract_dir
+                    valid_views.add(_view_name(date_dir.name, f"{pipeline_dir.name}/{extract_dir.name}", ""))
+
+                for app_dir in sorted(extract_dir.iterdir()):
+                    if not app_dir.is_dir():
+                        continue
+                    app_files = list(app_dir.glob("*.parquet")) + list(app_dir.glob("*.csv"))
+                    if not app_files:
+                        continue
+                    key = f"{date_dir.name}|{pipeline_dir.name}/{extract_dir.name}/{app_dir.name}"
+                    dataset_roots[key] = app_dir
+                    valid_views.add(_view_name(date_dir.name, f"{pipeline_dir.name}/{extract_dir.name}", app_dir.name))
 
     # Drop stale temp views (e.g. from old naming scheme or deleted data)
     for stale in existing_temp - valid_views - (suppress or set()):
@@ -156,33 +177,31 @@ def _register_file_views(spark: Any, suppress: set | None = None) -> None:
             logger.warning("Could not drop stale view %s: %s", stale, exc)
         existing.discard(stale)
 
-    for date_dir in sorted(base.iterdir()):
-        if not date_dir.is_dir():
+    for key, root in dataset_roots.items():
+        date_part, rel_part = key.split("|", 1)
+        rel_tokens = [p for p in rel_part.split("/") if p]
+        if len(rel_tokens) < 2:
             continue
-        for job_dir in sorted(date_dir.iterdir()):
-            if not job_dir.is_dir():
+        view_job = f"{rel_tokens[0]}/{rel_tokens[1]}"
+        view_app = rel_tokens[2] if len(rel_tokens) >= 3 else ""
+        view = _view_name(date_part, view_job, view_app)
+        if view in existing:
+            continue
+        if suppress and view in suppress:
+            continue
+        try:
+            parquet_files = list(root.glob("*.parquet"))
+            csv_files = list(root.glob("*.csv"))
+            if parquet_files:
+                df = spark.read.option("recursiveFileLookup", "true").parquet(str(root))
+            elif csv_files:
+                df = spark.read.option("header", "true").option("inferSchema", "true").csv(str(root))
+            else:
                 continue
-            for app_dir in sorted(job_dir.iterdir()):
-                if not app_dir.is_dir():
-                    continue
-                parquet_files = list(app_dir.glob("*.parquet"))
-                csv_files = list(app_dir.glob("*.csv"))
-                if not parquet_files and not csv_files:
-                    continue
-                view = _view_name(date_dir.name, job_dir.name, app_dir.name)
-                if view in existing:
-                    continue
-                if suppress and view in suppress:
-                    continue
-                try:
-                    if parquet_files:
-                        df = spark.read.option("recursiveFileLookup", "true").parquet(str(app_dir))
-                    else:
-                        df = spark.read.option("header", "true").option("inferSchema", "true").csv(str(app_dir))
-                    df.createOrReplaceTempView(view)
-                    logger.debug("Registered temp view: %s → %s", view, app_dir)
-                except Exception as exc:
-                    logger.warning("Could not register view %s: %s", view, exc)
+            df.createOrReplaceTempView(view)
+            logger.debug("Registered temp view: %s → %s", view, root)
+        except Exception as exc:
+            logger.warning("Could not register view %s: %s", view, exc)
 
 
 class SparkService:
@@ -298,28 +317,42 @@ class SparkService:
     # ─────────────────────────────────────────────────────────────────────
     # Data persistence
     # ─────────────────────────────────────────────────────────────────────
-    def _parquet_path(self, date: str, job_name: str, app_id: str) -> Path:
-        """Return the parquet directory: <parquet_root>/<date>/<job_name>/<app_id>/"""
-        p = settings.parquet_path / date / job_name / app_id
+    def _parquet_path(
+        self,
+        date: str,
+        pipeline_name: str,
+        extract_label: str,
+        app_id: Optional[str],
+    ) -> Path:
+        """Return the parquet directory: <parquet_root>/<date>/<pipeline>/<extract_label>/<app_id?>/"""
+        pipe = _safe_path_token(pipeline_name, "PIPELINE")
+        extract = _safe_path_token(extract_label, "EXTRACT")
+        p = settings.parquet_path / date / pipe / extract
+        app = (app_id or "").strip()
+        if app:
+            p = p / _safe_path_token(app, app)
         p.mkdir(parents=True, exist_ok=True)
         return p
 
     async def save_records_parquet(
         self,
         records: list[dict],
-        app_id: str,
+        app_id: Optional[str],
         date: str,
         segment: int,
         mode: str = "overwrite",
         job_name: str = "PIPELINE",
+        pipeline_name: Optional[str] = None,
+        extract_label: Optional[str] = None,
     ) -> str:
         """Persist a list of Record dicts to parquet using pandas.
 
-        Output path: <parquet_root>/<date>/<job_name>/<app_id>/segment_NNNN.parquet
+        Output path: <parquet_root>/<date>/<pipeline>/<extract_label>/<app_id?>/segment_NNNN.parquet
         """
-        if app_id.lower() in _RESERVED_APP_IDS:
+        app_value = (app_id or "").strip()
+        if app_value and app_value.lower() in _RESERVED_APP_IDS:
             raise ValueError(
-                f"app_id {app_id!r} is reserved and cannot be used as an extract destination. "
+                f"app_id {app_value!r} is reserved and cannot be used as an extract destination. "
                 "Set a meaningful application_id in the pipeline extract config."
             )
         if not records:
@@ -327,7 +360,12 @@ class SparkService:
 
         def _write() -> str:
             import pandas as pd  # type: ignore
-            dest = self._parquet_path(date, job_name, app_id)
+            dest = self._parquet_path(
+                date,
+                pipeline_name or job_name,
+                extract_label or job_name,
+                app_value or None,
+            )
             path = str(dest / f"segment_{segment:04d}.parquet")
             pd.DataFrame(records).to_parquet(path, index=False)
             return path
@@ -337,24 +375,32 @@ class SparkService:
     async def save_records_csv(
         self,
         records: list[dict],
-        app_id: str,
+        app_id: Optional[str],
         date: str,
         segment: int,
         job_name: str = "PIPELINE",
+        pipeline_name: Optional[str] = None,
+        extract_label: Optional[str] = None,
     ) -> str:
         """Persist records to CSV.
 
-        Output path: <parquet_root>/<date>/<job_name>/<app_id>/segment_NNNN.csv
+        Output path: <parquet_root>/<date>/<pipeline>/<extract_label>/<app_id?>/segment_NNNN.csv
         """
-        if app_id.lower() in _RESERVED_APP_IDS:
+        app_value = (app_id or "").strip()
+        if app_value and app_value.lower() in _RESERVED_APP_IDS:
             raise ValueError(
-                f"app_id {app_id!r} is reserved and cannot be used as an extract destination. "
+                f"app_id {app_value!r} is reserved and cannot be used as an extract destination. "
                 "Set a meaningful application_id in the pipeline extract config."
             )
         import pandas as pd  # type: ignore
 
         def _write() -> str:
-            dest = self._parquet_path(date, job_name, app_id)
+            dest = self._parquet_path(
+                date,
+                pipeline_name or job_name,
+                extract_label or job_name,
+                app_value or None,
+            )
             path = str(dest / f"segment_{segment:04d}.csv")
             pd.DataFrame(records).to_csv(path, index=False)
             return path
@@ -369,10 +415,12 @@ class SparkService:
         table_name: Optional[str] = None,
         namespace_db: Optional[str] = None,
         mode: str = "overwrite",
+        pipeline_name: Optional[str] = None,
+        extract_label: Optional[str] = None,
     ) -> str:
         """Merge all segment files for one app_id into a persistent Spark catalog table.
 
-        Reads from: <parquet_root>/<date>/<job_name>/<app_id>/
+        Reads from: <parquet_root>/<date>/<pipeline>/<extract_label>/<app_id>/
         """
         if app_id.lower() in _RESERVED_APP_IDS:
             raise ValueError(
@@ -388,7 +436,12 @@ class SparkService:
 
         def _merge():
             spark = _get_spark()
-            base_path = settings.parquet_path / date / job_name / app_id
+            base_path = self._parquet_path(
+                date,
+                pipeline_name or job_name,
+                extract_label or job_name,
+                app_id,
+            )
             parquet_files = sorted(str(p) for p in base_path.rglob("*.parquet"))
             csv_files = sorted(str(p) for p in base_path.rglob("*.csv"))
             if parquet_files:
@@ -425,28 +478,43 @@ class SparkService:
         namespace_db: str,
         table_name: Optional[str] = None,
         mode: str = "overwrite",
+        pipeline_name: Optional[str] = None,
+        extract_label: Optional[str] = None,
     ) -> dict:
-        """Consolidate all app_id sub-directories under <date>/<job_name>/ into one
+        """Consolidate all app_id sub-directories under <date>/<pipeline>/<extract_label>/ into one
         Spark catalog table, adding an *application_id* column to each shard.
 
         Returns a dict with the table name and row count.
         """
-        base_dir = settings.parquet_path / date / job_name
+        pipeline_token = _safe_path_token(pipeline_name or job_name, "PIPELINE")
+        extract_token = _safe_path_token(extract_label or job_name, "EXTRACT")
+        base_dir = settings.parquet_path / date / pipeline_token / extract_token
         if not base_dir.exists():
             raise FileNotFoundError(
-                f"No output directory found for date={date!r} job={job_name!r} "
+                f"No output directory found for date={date!r} pipeline={pipeline_token!r} extract={extract_token!r} "
                 f"(expected {base_dir})"
             )
 
         app_dirs = [d for d in sorted(base_dir.iterdir()) if d.is_dir()]
-        if not app_dirs:
-            raise FileNotFoundError(f"No app_id directories found under {base_dir}")
+        root_parquet = sorted(str(p) for p in base_dir.glob("*.parquet"))
+        root_csv = sorted(str(p) for p in base_dir.glob("*.csv"))
+        if not app_dirs and not root_parquet and not root_csv:
+            raise FileNotFoundError(f"No app_id directories or segment files found under {base_dir}")
 
         def _load():
             spark = _get_spark()
             from pyspark.sql import functions as F  # type: ignore
 
             frames = []
+            if root_parquet:
+                root_df = spark.read.parquet(*root_parquet)
+                root_df = root_df.withColumn("application_id", F.lit(None).cast("string"))
+                frames.append(root_df)
+            elif root_csv:
+                root_df = spark.read.option("header", "true").option("inferSchema", "true").csv(root_csv)
+                root_df = root_df.withColumn("application_id", F.lit(None).cast("string"))
+                frames.append(root_df)
+
             for app_dir in app_dirs:
                 parquet_files = sorted(str(p) for p in app_dir.rglob("*.parquet"))
                 csv_files = sorted(str(p) for p in app_dir.rglob("*.csv"))
@@ -471,7 +539,7 @@ class SparkService:
             tbl = f"`{namespace_db}`.`{tbl_name}`"
             combined.write.mode(mode).saveAsTable(tbl)
             count = combined.count()
-            logger.info("Loaded %d rows into %s from %d app_id(s)", count, tbl, len(frames))
+            logger.info("Loaded %d rows into %s from %d source folder(s)", count, tbl, len(frames))
             return tbl, count, len(frames)
 
         tbl, count, n_apps = await asyncio.to_thread(_load)
@@ -485,6 +553,8 @@ class SparkService:
             "app_ids_merged": n_apps,
             "job_name": job_name,
             "date": date,
+            "pipeline_name": pipeline_token,
+            "extract_label": extract_token,
         }
 
     # ─────────────────────────────────────────────────────────────────────
@@ -744,7 +814,7 @@ class SparkService:
     async def run_sql_transform(
         self,
         source_db: Optional[str],
-        source_table: str,
+        source_table: Optional[str],
         sql: str,
         target_db: Optional[str],
         target_table: str,
@@ -767,12 +837,29 @@ class SparkService:
             except Exception:
                 views_before = set()
 
-            # Load source into a temp view called 'source'
+            # Optional source alias support for transform-job mode.
+            # In pipeline SQL-only mode we run the query directly against
+            # fully-qualified tables in source_db without a fixed 'source' view.
             if source_db:
-                src_df = spark.table(f"`{source_db}`.`{source_table}`")
-            else:
-                src_df = spark.table(f"`{source_table}`")
-            src_df.createOrReplaceTempView("source")
+                db_rows = spark.sql("SHOW DATABASES").collect()
+                available_dbs: list[str] = []
+                for r in db_rows:
+                    # Spark versions differ in column name (namespace/databaseName)
+                    val = getattr(r, "namespace", None) or getattr(r, "databaseName", None)
+                    if val:
+                        available_dbs.append(str(val))
+                if source_db not in available_dbs:
+                    raise ValueError(
+                        f"Source database '{source_db}' was not found in Spark catalog. "
+                        f"Available: {', '.join(sorted(available_dbs))}"
+                    )
+                spark.sql(f"USE `{source_db}`")
+            if source_table:
+                if source_db:
+                    src_df = spark.table(f"`{source_db}`.`{source_table}`")
+                else:
+                    src_df = spark.table(f"`{source_table}`")
+                src_df.createOrReplaceTempView("source")
 
             try:
                 t0 = _time.perf_counter()
@@ -791,7 +878,7 @@ class SparkService:
                 result_df.write.mode(mode).saveAsTable(tbl)
 
                 duration = _time.perf_counter() - t0
-                logger.info("SQL transform: %s → %s (%d rows, %.2fs)", source_table, tbl, row_count, duration)
+                logger.info("SQL transform: %s → %s (%d rows, %.2fs)", source_table or "<query>", tbl, row_count, duration)
                 return {"row_count": row_count, "duration_s": round(duration, 2)}
             finally:
                 # Drop any temp views created during this run (including 'source')

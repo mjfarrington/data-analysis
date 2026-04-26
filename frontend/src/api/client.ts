@@ -20,6 +20,8 @@ export interface RunTriggerRequest {
   business_date?: string
   run_scope?: 'full' | 'extract' | 'load'
   extract_config?: Record<string, unknown>
+  resume_from_failed?: boolean
+  skip_failed_step?: boolean
 }
 
 export interface Pipeline {
@@ -528,8 +530,15 @@ export const connectionsApi = {
     api.post<PreviewResult>(`/connections/${id}/preview-sql`, { sql, params, limit })
       .then(r => r.data)
       .catch(err => { throw new Error(err.response?.data?.detail ?? err.message) }),
-  extract: (id: number, sql: string, params: Record<string, string>, chunk_size = 50_000, output_subdir?: string) =>
-    api.post<ExtractResult>(`/connections/${id}/extract`, { sql, params, chunk_size, output_subdir }).then(r => r.data),
+  extract: (
+    id: number,
+    sql: string,
+    params: Record<string, string>,
+    chunk_size = 100_000,
+    output_subdir?: string,
+    query_name?: string,
+  ) =>
+    api.post<ExtractResult>(`/connections/${id}/extract`, { sql, params, chunk_size, output_subdir, query_name }).then(r => r.data),
   foreachExtract: (id: number, body: {
     sql: string
     dictionary_id: number

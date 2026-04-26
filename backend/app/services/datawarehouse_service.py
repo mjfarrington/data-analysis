@@ -230,7 +230,7 @@ def extract_chunked_sync(
     config:      DWConnectionConfig,
     sql:         str,
     output_dir:  Path,
-    chunk_size:  int = 50_000,
+    chunk_size:  int = 100_000,
     fmt:         OutputFormat = OutputFormat.PARQUET,
 ) -> Generator[dict, None, None]:
     """
@@ -357,7 +357,7 @@ async def extract_stream_async(
     config:      DWConnectionConfig,
     sql:         str,
     output_dir:  Path,
-    chunk_size:  int = 50_000,
+    chunk_size:  int = 100_000,
     fmt:         OutputFormat = OutputFormat.PARQUET,
 ):
     """

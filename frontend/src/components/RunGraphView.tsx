@@ -15,16 +15,16 @@ const NODE_COLOR: Record<string, string> = {
   dw_extract: '#58a6ff', jdbc_extract: '#58a6ff', s3_extract: '#3fb950',
   iterator: '#58a6ff', csv_extract: '#58a6ff',
   filter: '#e3b341', sort: '#e3b341', aggregate: '#e3b341',
-  sql_transform: '#e3b341', lookup: '#e3b341', join: '#e3b341',
+  sql_transform: '#c0c7d1', lookup: '#e3b341', join: '#e3b341',
   notebook_transform: '#8b5cf6', foreach: '#e3b341',
-  load_parquet: '#3fb950', load_sql: '#3fb950',
+  load_parquet: '#ec407a', load_sql: '#ec407a',
 }
 
 const STATUS_COLOR: Record<string, string> = {
   completed: '#3fb950',
   failed: '#f85149',
   running: '#58a6ff',
-  pending: '#6e7681',
+  pending: '#58a6ff',
   cancelled: '#6e7681',
   skipped: '#6e7681',
   completed_with_warnings: '#d29922',
@@ -44,22 +44,30 @@ function formatDur(s: number): string {
   return `${Math.floor(s / 60)}m ${(s % 60).toFixed(0)}s`
 }
 
+function extractNodeIdFromStepLabel(label?: string): string | null {
+  if (!label) return null
+  const match = label.match(/\[([^\]]+)\]\s*$/)
+  return match?.[1]?.trim() || null
+}
+
 // ── Custom node ────────────────────────────────────────────────────────────────
 
 interface RunNodeData {
   nodeType: string
   label: string
   step?: RunStep
+  stepRef?: string
 }
 
 function RunStatusNode({ data, selected }: { data: RunNodeData; selected?: boolean }) {
   const theme = useTheme()
-  const { nodeType, label, step } = data
+  const { nodeType, label, step, stepRef } = data
   const color = NODE_COLOR[nodeType] ?? '#6e7681'
   const status = step?.status ?? 'pending'
   const statusColor = STATUS_COLOR[status] ?? '#6e7681'
   const isFailed = status === 'failed'
   const isRunning = status === 'running'
+  const isPending = status === 'pending'
 
   return (
     <>
@@ -92,7 +100,7 @@ function RunStatusNode({ data, selected }: { data: RunNodeData; selected?: boole
             {nodeType.replace(/_/g, ' ')}
           </Box>
           <Box sx={{ flex: 1 }} />
-          {isRunning
+          {(isRunning || isPending)
             ? <CircularProgress size={9} thickness={5} sx={{ color: statusColor, flexShrink: 0 }} />
             : <Box sx={{ width: 9, height: 9, borderRadius: '50%', bgcolor: statusColor, flexShrink: 0 }} />
           }
@@ -102,6 +110,11 @@ function RunStatusNode({ data, selected }: { data: RunNodeData; selected?: boole
         <Typography sx={{ fontSize: '0.74rem', fontWeight: 600, lineHeight: 1.2, mb: 0.25 }}>
           {label}
         </Typography>
+        {step && (
+          <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.6rem', display: 'block', mb: 0.25 }}>
+            step #{step.id} • {step.status}
+          </Typography>
+        )}
 
         {/* Stats */}
         {step && (step.duration_seconds != null || step.records_out != null) && (
@@ -158,6 +171,7 @@ export default function RunGraphView({
 }: RunGraphViewProps) {
   const theme = useTheme()
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [statusCleared, setStatusCleared] = useState(false)
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const canvasConfig = pipeline.canvas_config as any
@@ -204,9 +218,33 @@ export default function RunGraphView({
 
   // Match each canvas node to its run step (by type, in execution order)
   const nodeStepMap = useMemo(() => {
+    const byStepId = new Map<number, RunStep>()
+    for (const s of (run.steps ?? [])) byStepId.set(s.id, s)
+
+    const nodeStepMapRaw = ((run.run_metadata as Record<string, unknown> | undefined)?.node_step_map ?? {}) as Record<string, number>
+    const fromMetadata: Record<string, RunStep> = {}
+    for (const [nodeId, stepId] of Object.entries(nodeStepMapRaw)) {
+      const s = byStepId.get(Number(stepId))
+      if (s) fromMetadata[nodeId] = s
+    }
+
+    const byNodeId: Record<string, RunStep> = {}
+    for (const s of (run.steps ?? [])) {
+      const nodeId = extractNodeIdFromStepLabel(s.step_label)
+      if (nodeId && !byNodeId[nodeId]) byNodeId[nodeId] = s
+    }
+
     const typeIdx: Record<string, number> = {}
     const map: Record<string, RunStep | undefined> = {}
     for (const cn of sortedCanvasNodes) {
+      if (fromMetadata[cn.id]) {
+        map[cn.id] = fromMetadata[cn.id]
+        continue
+      }
+      if (byNodeId[cn.id]) {
+        map[cn.id] = byNodeId[cn.id]
+        continue
+      }
       const nodeType = cn.data?.nodeType ?? cn.type
       const stepType = toStepType(nodeType)
       const candidates = stepsByType[stepType] ?? []
@@ -227,10 +265,11 @@ export default function RunGraphView({
       data: {
         nodeType: n.data?.nodeType ?? n.type ?? 'unknown',
         label: n.data?.label ?? (n.data?.nodeType ?? n.type ?? '').replace(/_/g, ' '),
-        step: nodeStepMap[n.id],
+        step: statusCleared ? undefined : nodeStepMap[n.id],
+        stepRef: (!statusCleared && nodeStepMap[n.id]) ? `step #${nodeStepMap[n.id]!.id}` : undefined,
       } satisfies RunNodeData,
     }))
-  }, [canvasConfig, nodeStepMap, selectedId])
+  }, [canvasConfig, nodeStepMap, selectedId, statusCleared])
 
   const flowEdges: Edge[] = useMemo(() => {
     const cedges: any[] = canvasConfig?.edges ?? []
@@ -260,9 +299,9 @@ export default function RunGraphView({
     return {
       nodeType,
       label: cn.data?.label ?? nodeType.replace(/_/g, ' '),
-      step: nodeStepMap[selectedId],
+      step: statusCleared ? undefined : nodeStepMap[selectedId],
     }
-  }, [selectedId, canvasConfig, nodeStepMap])
+  }, [selectedId, canvasConfig, nodeStepMap, statusCleared])
 
   if (!canvasConfig?.nodes?.length) {
     return (
@@ -285,7 +324,18 @@ export default function RunGraphView({
         borderRadius: selectedNodeInfo ? '6px 6px 0 0' : 1,
         overflow: 'hidden',
         bgcolor: alpha(theme.palette.background.default, 0.7),
+        position: 'relative',
       }}>
+        <Box sx={{ position: 'absolute', right: 8, top: 8, zIndex: 5 }}>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => setStatusCleared(v => !v)}
+            sx={{ fontSize: '0.68rem', py: 0.2, minWidth: 96, bgcolor: alpha(theme.palette.background.paper, 0.9) }}
+          >
+            {statusCleared ? 'Show Status' : 'Clear Status'}
+          </Button>
+        </Box>
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}
@@ -330,6 +380,11 @@ export default function RunGraphView({
                 {selectedNodeInfo.nodeType.replace(/_/g, ' ')}
               </Box>
               <Typography variant="body2" noWrap sx={{ fontWeight: 700 }}>{selectedNodeInfo.label}</Typography>
+              {selectedNodeInfo.step && (
+                <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.66rem' }}>
+                  step #{selectedNodeInfo.step.id}
+                </Typography>
+              )}
               {selectedNodeInfo.step && (
                 <Box sx={{
                   width: 8, height: 8, borderRadius: '50%', flexShrink: 0,

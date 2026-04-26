@@ -168,10 +168,12 @@ class ETLRun(Base):
 
     pipeline: Mapped[ETLPipeline] = relationship("ETLPipeline", back_populates="runs")
     logs: Mapped[list[ETLRunLog]] = relationship(
-        "ETLRunLog", back_populates="run", cascade="all, delete-orphan"
+        "ETLRunLog", back_populates="run", cascade="all, delete-orphan",
+        order_by="ETLRunLog.id",
     )
     extract_jobs: Mapped[list[ExtractJob]] = relationship(
-        "ExtractJob", back_populates="run", cascade="all, delete-orphan"
+        "ExtractJob", back_populates="run", cascade="all, delete-orphan",
+        order_by="ExtractJob.id",
     )
     steps: Mapped[list["RunStep"]] = relationship(
         "RunStep", back_populates="run", cascade="all, delete-orphan",

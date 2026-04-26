@@ -83,6 +83,23 @@ class ExtractConfig(BaseModel):
     parquet_path_template: Optional[str] = None   # template: {business_date}/{pipeline_name}/{app_id}
     parquet_write_mode: str = "overwrite"
 
+    # Multi-source execution plan derived from the canvas graph.
+    # Each item may provide per-branch extract/load overrides and transform node subset.
+    source_branches: list[dict[str, Any]] = Field(default_factory=list)
+
+    # Internal resume marker used by the engine to skip already-completed
+    # branches and continue from the failed branch.
+    resume_from_job_name: Optional[str] = None
+
+    # Internal path metadata used by the engine when resolving parquet output
+    # layout: {business_date}/{pipeline_name}/{extract_label}/{app_id?}
+    pipeline_name: Optional[str] = None
+    extract_label: Optional[str] = None
+    source_node_id: Optional[str] = None
+
+    # Skip failed step mode: mark the step as SKIPPED instead of FAILED and continue
+    skip_failed_step: bool = False
+
 
 class TransformStep(BaseModel):
     """One step in a canvas-derived transform pipeline."""
@@ -167,6 +184,8 @@ class RunTrigger(BaseModel):
     extract_config: Optional[ExtractConfig] = None  # override pipeline extract config
     business_date: Optional[str] = None             # YYYY-MM-DD override for this run
     run_scope: Literal["full", "extract", "load"] = "full"
+    resume_from_failed: bool = False
+    skip_failed_step: bool = False
 
 
 class RunSummary(BaseModel):
