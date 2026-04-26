@@ -95,7 +95,7 @@ function deriveSparkDatabaseName(businessDate?: string): string {
 
 const EXTRACT_COLOR = '#58a6ff'
 const TRANSFORM_COLOR = '#c0c7d1'
-const LOAD_COLOR = '#ec407a'
+const LOAD_COLOR = '#f4d35e'
 const ORCHESTRATION_COLOR = '#8b5cf6'
 
 interface CatalogItem {
@@ -2883,7 +2883,16 @@ function PropertiesPanel({
       const extractSqlFile = Number.isFinite(extractSqlId) && extractSqlId > 0
         ? sqlFiles.find(f => f.id === extractSqlId)
         : null
-      const sourceName = (extractSqlFile?.name ?? pipelineName ?? 'pipeline')
+      const immediateUpstreamName = upstream.length > 0
+        ? (upstream[0].data.label || CATALOG_MAP[upstream[0].data.nodeType]?.label || upstream[0].data.nodeType)
+        : ''
+      const sourceSeed = (() => {
+        if (node.data.nodeType === 'load_sql' && immediateUpstreamName) {
+          return immediateUpstreamName
+        }
+        return extractSqlFile?.name ?? pipelineName ?? 'pipeline'
+      })()
+      const sourceName = sourceSeed
         .replace(/\.[^/.]+$/, '')
         .replace(/[^a-zA-Z0-9_\-]/g, '_')
         .toUpperCase()

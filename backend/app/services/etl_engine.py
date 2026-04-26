@@ -912,23 +912,57 @@ async def execute_pipeline(
         await log(f"Run scope: {run_scope}", step="init")
 
         # ── Initialise per-node run tracking rows ────────────────────────────
-        # Build the step list from the actual canvas pipeline:
-        #   extract → each transform node (filter/sort/…) → load
+        # Build the step list from the actual executable order. For branch-mode
+        # runs, use canvas-derived execution_nodes (which can interleave load and
+        # transform nodes). For legacy mode, keep extract -> transforms -> load.
         _LABEL_MAP = {
             "filter": "Filter", "join": "Join", "sort": "Sort",
             "lookup": "Lookup", "sql_transform": "SQL Transform",
             "aggregate": "Aggregate", "notebook_transform": "Notebook Transform",
+            "load_sql": "Load", "load_parquet": "Load",
         }
         _step_specs: list[tuple[str, str, str]] = []  # (key, step_type, label)
         _step_specs.append(("extract", "extract", "Extract"))
-        for _xs in transform_cfg.transforms_pipeline:
-            _xkey = f"xform_{_xs.node_id}" if getattr(_xs, 'node_id', None) else f"xform_{_xs.node_type}"
-            _xlabel = _LABEL_MAP.get(_xs.node_type, _xs.node_type.replace('_', ' ').title())
-            _xnode = str(getattr(_xs, 'node_id', '') or '').strip()
-            if _xnode:
-                _xlabel = f"{_xlabel} [{_xnode}]"
-            _step_specs.append((_xkey, _xs.node_type, _xlabel))
-        _step_specs.append(("load", "load", "Load"))
+
+        _branch_plans = extract_cfg.source_branches or []
+        _branch_exec_nodes: list[dict[str, Any]] = []
+        _seen_exec_node_ids: set[str] = set()
+        for _bp in _branch_plans:
+            for _en in (_bp.get("execution_nodes") or []):
+                _nid = str(_en.get("node_id") or "").strip()
+                if not _nid or _nid in _seen_exec_node_ids:
+                    continue
+                _seen_exec_node_ids.add(_nid)
+                _branch_exec_nodes.append(_en)
+
+        if _branch_exec_nodes:
+            _first_load_consumed = False
+            for _en in _branch_exec_nodes:
+                _ntype = str(_en.get("node_type") or "").strip()
+                _nid = str(_en.get("node_id") or "").strip()
+                _nlabel = str(_en.get("label") or "").strip() or _nid
+                if _ntype in {"filter", "join", "sort", "lookup", "sql_transform", "aggregate", "notebook_transform"}:
+                    _xkey = f"xform_{_nid}" if _nid else f"xform_{_ntype}"
+                    _xlabel = _LABEL_MAP.get(_ntype, _ntype.replace('_', ' ').title())
+                    if _nid:
+                        _xlabel = f"{_xlabel} [{_nid}]"
+                    _step_specs.append((_xkey, _ntype, _xlabel))
+                elif _ntype in {"load_sql", "load_parquet"}:
+                    _lkey = "load" if not _first_load_consumed else f"load_{_nid}"
+                    _first_load_consumed = True
+                    _llabel = f"{_nlabel} [{_nid}]" if _nid else (_nlabel or "Load")
+                    _step_specs.append((_lkey, "load", _llabel))
+            if not any(_stype == "load" for _, _stype, _ in _step_specs):
+                _step_specs.append(("load", "load", "Load"))
+        else:
+            for _xs in transform_cfg.transforms_pipeline:
+                _xkey = f"xform_{_xs.node_id}" if getattr(_xs, 'node_id', None) else f"xform_{_xs.node_type}"
+                _xlabel = _LABEL_MAP.get(_xs.node_type, _xs.node_type.replace('_', ' ').title())
+                _xnode = str(getattr(_xs, 'node_id', '') or '').strip()
+                if _xnode:
+                    _xlabel = f"{_xlabel} [{_xnode}]"
+                _step_specs.append((_xkey, _xs.node_type, _xlabel))
+            _step_specs.append(("load", "load", "Load"))
 
         step_rows: dict[str, RunStep] = {}
         for _order, (_key, _stype, _label) in enumerate(_step_specs):
@@ -1267,8 +1301,8 @@ async def execute_pipeline(
         transform_stats_by_key: dict[str, dict[str, int]] = {}
         spark_table_failed = False
         spark_load_dates_by_job: dict[str, set[str]] = {}
-        spark_input_dirs_by_job_date: dict[str, dict[str, set[str]]] = {}
         spark_load_invocations_by_step: dict[str, int] = {}
+        reset_dirs_done: set[str] = set()
         step_io: dict[str, dict[str, list[str]]] = {}
         step_io_by_key: dict[str, dict[str, list[str]]] = {}
         _ctx_branch_job_name: Optional[str] = None
@@ -1347,8 +1381,9 @@ async def execute_pipeline(
             if branch_plans:
                 # plans tuple: (extract_cfg, load_cfg, transforms, job_name, label,
                 #                source_node_id, load_node_id, load_node_label,
-                #                intermediate_load_node_id, intermediate_load_node_label)
-                plans: list[tuple[ExtractConfig, LoadConfig, list, str, str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]] = []
+                #                intermediate_load_node_id, intermediate_load_node_label,
+                #                execution_nodes)
+                plans: list[tuple[ExtractConfig, LoadConfig, list, str, str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], list[dict[str, Any]]]] = []
                 for idx, plan in enumerate(branch_plans, start=1):
                     plan_extract = extract_cfg.model_copy(update=plan.get("extract_overrides") or {}, deep=True)
                     plan_load = load_cfg.model_copy(update=plan.get("load_overrides") or {}, deep=True)
@@ -1370,6 +1405,7 @@ async def execute_pipeline(
                     if plan_intermediate_load_node_id and plan_intermediate_load_node_id == plan_load_node_id:
                         plan_intermediate_load_node_id = None
                         plan_intermediate_load_node_label = None
+                    plan_execution_nodes = list(plan.get("execution_nodes") or [])
                     plan_pipeline_name = str(plan.get("pipeline_name") or extract_cfg.pipeline_name or job_name).strip() or job_name
                     plan_extract_label = str(plan.get("extract_label") or plan_label or plan_source_node_id or f"branch_{idx}").strip()
                     plan_extract = plan_extract.model_copy(update={
@@ -1389,6 +1425,7 @@ async def execute_pipeline(
                         plan_load_node_label,
                         plan_intermediate_load_node_id,
                         plan_intermediate_load_node_label,
+                        plan_execution_nodes,
                     ))
             else:
                 fallback_label = (extract_cfg.extract_label or extract_cfg.source_node_id or "default").strip() or "default"
@@ -1407,6 +1444,7 @@ async def execute_pipeline(
                     None,
                     None,
                     None,
+                    [],
                 )]
 
             # Ensure each planned branch load has a dedicated tracked step so final
@@ -1414,39 +1452,52 @@ async def execute_pipeline(
             load_step_key_by_job: dict[str, str] = {}
             load_step_key_by_node: dict[str, str] = {}
             default_load_consumed = False
-            for _idx, (_pex, _pld, _ptr, _pjob, _plabel, _psid, _load_nid, _load_nlabel, _int_load_nid, _int_load_nlabel) in enumerate(plans):
-                _node_key = (_load_nid or _pjob).strip()
-                if _node_key in load_step_key_by_node:
-                    _lkey = load_step_key_by_node[_node_key]
-                elif not default_load_consumed and "load" in step_rows:
-                    _lkey = "load"
-                    default_load_consumed = True
-                    _lrs = step_rows.get(_lkey)
-                    if _lrs:
-                        _base = (_load_nlabel or "Load").strip() or "Load"
-                        _lrs.step_label = f"{_base} [{_load_nid}]" if _load_nid else _base
-                    load_step_key_by_node[_node_key] = _lkey
-                else:
-                    _lkey = f"load_{_node_key}"
-                    if _lkey not in step_rows:
-                        _base = (_load_nlabel or f"Load - {_plabel}").strip() or f"Load - {_plabel}"
-                        _llabel = f"{_base} [{_load_nid}]" if _load_nid else _base
-                        _lrs = RunStep(
-                            run_id=run_id,
-                            step_order=_dynamic_order,
-                            step_type="load",
-                            step_label=_llabel,
-                            status=RunStatus.PENDING,
-                        )
-                        _dynamic_order += 1
-                        db.add(_lrs)
-                        step_rows[_lkey] = _lrs
-                    load_step_key_by_node[_node_key] = _lkey
-                load_step_key_by_job[_pjob] = _lkey
+            for _idx, (_pex, _pld, _ptr, _pjob, _plabel, _psid, _load_nid, _load_nlabel, _int_load_nid, _int_load_nlabel, _exec_nodes) in enumerate(plans):
+                _load_nodes = [n for n in (_exec_nodes or []) if str(n.get("node_type") or "") in ("load_sql", "load_parquet")]
+                if not _load_nodes and _load_nid:
+                    _load_nodes = [{"node_id": _load_nid, "label": _load_nlabel or _load_nid, "node_type": "load"}]
+
+                _last_lkey: Optional[str] = None
+                for _ln in _load_nodes:
+                    _lnid = str(_ln.get("node_id") or "").strip() or _pjob
+                    _lbase = str(_ln.get("label") or _load_nlabel or f"Load - {_plabel}").strip() or f"Load - {_plabel}"
+                    _node_key = _lnid
+                    if _node_key in load_step_key_by_node:
+                        _lkey = load_step_key_by_node[_node_key]
+                    elif not default_load_consumed and "load" in step_rows:
+                        _lkey = "load"
+                        default_load_consumed = True
+                        _lrs = step_rows.get(_lkey)
+                        if _lrs:
+                            _lrs.step_label = f"{_lbase} [{_lnid}]"
+                        load_step_key_by_node[_node_key] = _lkey
+                    else:
+                        _lkey = f"load_{_node_key}"
+                        if _lkey not in step_rows:
+                            _llabel = f"{_lbase} [{_lnid}]"
+                            _lrs = RunStep(
+                                run_id=run_id,
+                                step_order=_dynamic_order,
+                                step_type="load",
+                                step_label=_llabel,
+                                status=RunStatus.PENDING,
+                            )
+                            _dynamic_order += 1
+                            db.add(_lrs)
+                            step_rows[_lkey] = _lrs
+                        load_step_key_by_node[_node_key] = _lkey
+                    _last_lkey = _lkey
+
+                if _last_lkey:
+                    load_step_key_by_job[_pjob] = _last_lkey
 
             # ── Create dedicated RunSteps for intermediate (staging) load nodes ──────
             # These are exclusive parquet staging nodes between a source and the final load.
-            for _pex, _pld, _ptr, _pjob, _plabel, _psid, _load_nid, _load_nlabel, _int_nid, _int_nlabel in plans:
+            for _pex, _pld, _ptr, _pjob, _plabel, _psid, _load_nid, _load_nlabel, _int_nid, _int_nlabel, _exec_nodes in plans:
+                # In execution-node mode, load nodes are already represented explicitly.
+                # Creating intermediate load steps here duplicates node-level load rows.
+                if _exec_nodes:
+                    continue
                 if not _int_nid:
                     continue
                 _int_key = f"int_load_{_int_nid}"
@@ -1468,7 +1519,7 @@ async def execute_pipeline(
             await db.commit()
 
             # ── Embed source node IDs in extract step label for live canvas polling ──
-            _src_node_ids_for_label = [_psid for _, _, _, _, _, _psid, _, _, _, _ in plans if _psid]
+            _src_node_ids_for_label = [_psid for _, _, _, _, _, _psid, _, _, _, _, _ in plans if _psid]
             _extract_rs_live = step_rows.get("extract")
             if _extract_rs_live and len(_src_node_ids_for_label) == 1:
                 _extract_rs_live.step_label = f"Extract [{_src_node_ids_for_label[0]}]"
@@ -1513,7 +1564,7 @@ async def execute_pipeline(
             # Pre-create app/branch rows so the full known execution tree is visible
             # from the beginning of the run (before dynamic chunk rows are added).
             app_lists_by_job: dict[str, list[tuple[Optional[str], str]]] = {}
-            for plan_extract_cfg, _plan_load_cfg, _plan_transforms, plan_job_name, plan_label, _plan_source_node_id, _plan_load_node_id, _plan_load_node_label, _plan_int_load_nid, _plan_int_load_nlabel in plans:
+            for plan_extract_cfg, _plan_load_cfg, _plan_transforms, plan_job_name, plan_label, _plan_source_node_id, _plan_load_node_id, _plan_load_node_label, _plan_int_load_nid, _plan_int_load_nlabel, _plan_exec_nodes in plans:
                 app_list: list[tuple[Optional[str], str]] = [
                     (str(a.get("id", "")).strip(), str(a.get("name", "")).strip())
                     for a in (plan_extract_cfg.apps or [])
@@ -1547,7 +1598,7 @@ async def execute_pipeline(
 
             if resume_skipped_jobs:
                 _now = datetime.now(timezone.utc)
-                for _plan_extract_cfg, _plan_load_cfg, _plan_transforms, _plan_job_name, _plan_label, _plan_source_node_id, _plan_load_node_id, _plan_load_node_label, _plan_int_load_nid, _plan_int_load_nlabel in plans:
+                for _plan_extract_cfg, _plan_load_cfg, _plan_transforms, _plan_job_name, _plan_label, _plan_source_node_id, _plan_load_node_id, _plan_load_node_label, _plan_int_load_nid, _plan_int_load_nlabel, _plan_exec_nodes in plans:
                     if _plan_job_name not in resume_skipped_jobs:
                         continue
                     for _app_id, _app_name in app_lists_by_job.get(_plan_job_name, []):
@@ -1570,11 +1621,15 @@ async def execute_pipeline(
             # Start the extract parent step once before app iterations.
             await _begin_step("extract")
 
-            for plan_extract_cfg, plan_load_cfg, plan_transforms, plan_job_name, plan_label, plan_source_node_id, plan_load_node_id, plan_load_node_label, plan_int_load_node_id, plan_int_load_node_label in active_plans:
+            for plan_extract_cfg, plan_load_cfg, plan_transforms, plan_job_name, plan_label, plan_source_node_id, plan_load_node_id, plan_load_node_label, plan_int_load_node_id, plan_int_load_node_label, plan_execution_nodes in active_plans:
                 _ctx_branch_job_name = plan_job_name
                 _ctx_branch_label = plan_label
                 _ctx_source_node_id = plan_source_node_id
-                _int_load_key = (f"int_load_{plan_int_load_node_id}" if plan_int_load_node_id else None)
+                _int_load_key = (
+                    f"int_load_{plan_int_load_node_id}"
+                    if (plan_int_load_node_id and not plan_execution_nodes)
+                    else None
+                )
                 _load_key = load_step_key_by_job.get(plan_job_name, "load")
                 source = plan_extract_cfg.source_type
                 plan_rows_per_seg = plan_extract_cfg.rows_per_segment
@@ -1733,90 +1788,156 @@ async def execute_pipeline(
                             if _seg_delay:
                                 await asyncio.sleep(_seg_delay)
                             try:
-                                # Apply legacy simple transforms first
-                                transformed = _apply_transforms(chunk, transform_cfg)
-                                # Execute each canvas transform node as its own tracked step
-                                if plan_transforms:
-                                    for _xs in plan_transforms:
-                                        _xkey = f"xform_{_xs.node_id}" if getattr(_xs, 'node_id', None) else f"xform_{_xs.node_type}"
-                                        await _begin_step(_xkey)
-                                        n_before = len(transformed)
-                                        transformed, xmsg = _execute_transform_step(
-                                            transformed, _xs.node_type, _xs.config, lookup_tables
+                                if source == "jdbc":
+                                    # Always persist raw extract chunks to parquet via pyarrow
+                                    # so reload/load-only runs have durable extract output.
+                                    from app.services.jdbc_service import (
+                                        _write_chunk_pyarrow_sync,
+                                        schema_to_dict,
+                                    )
+                                    if _jdbc_output_dir is None:
+                                        _jdbc_output_dir = _resolve_parquet_output_dir(
+                                            plan_extract_cfg, date_str, plan_job_name, app_id,
+                                            settings.parquet_path,
                                         )
+                                    out_file = _jdbc_output_dir / f"part_{seg_idx:05d}.parquet"
+                                    _jdbc_schema, _ = await asyncio.to_thread(
+                                        _write_chunk_pyarrow_sync,
+                                        chunk,
+                                        out_file,
+                                        _jdbc_schema,
+                                    )
+                                    if seg_idx == 0 and _jdbc_schema is not None:
+                                        schema_fields = schema_to_dict(_jdbc_schema)
+                                        field_preview = ", ".join(
+                                            f"{f['name']}:{f['type']}" for f in schema_fields[:6]
+                                        )
+                                        if len(schema_fields) > 6:
+                                            field_preview += f" … +{len(schema_fields) - 6} more"
                                         await log(
-                                            f"  [{plan_label}] seg={seg_idx + 1}/{n_segs} {xmsg}",
+                                            f"  Raw extract schema inferred: {len(schema_fields)} field(s) — {field_preview}",
                                             level="DEBUG",
-                                            step=_xs.node_type,
+                                            step="extract",
                                             extra={
+                                                "schema": schema_fields,
                                                 "branch": plan_label,
                                                 "job_name": plan_job_name,
                                                 "extract_label": plan_extract_cfg.extract_label,
                                                 "app_id": app_id,
                                                 "date": date_str,
-                                                "segment": seg_idx + 1,
-                                                "segments_total": n_segs,
                                             },
                                         )
-                                        if _xkey not in transform_stats_by_key:
-                                            transform_stats_by_key[_xkey] = {"records_in": 0, "records_out": 0}
-                                        transform_stats_by_key[_xkey]["records_in"] += n_before
-                                        transform_stats_by_key[_xkey]["records_out"] += len(transformed)
-                                total_transformed += len(transformed)
-                                run.records_transformed = total_transformed
+                                    _set_step_io(
+                                        "extract",
+                                        outputs=[str(_jdbc_output_dir)],
+                                    )
+
+                                execution_nodes = list(plan_execution_nodes or [])
+                                transformed = chunk if execution_nodes else _apply_transforms(chunk, transform_cfg)
                                 output_path = ""
-                                if transformed:
-                                    if source == "jdbc":
-                                        # JDBC: write using pyarrow with strict schema enforcement,
-                                        # output path from the load_parquet canvas node config.
-                                        from app.services.jdbc_service import (
-                                            _write_chunk_pyarrow_sync,
-                                            schema_to_dict,
-                                        )
-                                        if _jdbc_output_dir is None:
-                                            _jdbc_output_dir = _resolve_parquet_output_dir(
-                                                plan_extract_cfg, date_str, plan_job_name, app_id,
-                                                settings.parquet_path,
+
+                                if execution_nodes:
+                                    for _en in execution_nodes:
+                                        _ntype = str(_en.get("node_type") or "")
+                                        _nid = str(_en.get("node_id") or "").strip()
+                                        _cfg = _en.get("config") or {}
+
+                                        if _ntype in {"filter", "join", "sort", "lookup", "sql_transform", "aggregate", "notebook_transform"}:
+                                            _xkey = f"xform_{_nid}" if _nid else f"xform_{_ntype}"
+                                            await _begin_step(_xkey)
+                                            n_before = len(transformed)
+                                            transformed, xmsg = _execute_transform_step(
+                                                transformed, _ntype, _cfg, lookup_tables
                                             )
-                                        spark_input_dirs_by_job_date.setdefault(plan_job_name, {}).setdefault(date_str, set()).add(str(_jdbc_output_dir))
-                                        out_file = _jdbc_output_dir / f"part_{seg_idx:05d}.parquet"
-                                        _jdbc_schema, output_path = await asyncio.to_thread(
-                                            _write_chunk_pyarrow_sync,
-                                            transformed,
-                                            out_file,
-                                            _jdbc_schema,
-                                        )
-                                        if seg_idx == 0:
-                                            # Log schema after the first chunk
-                                            schema_fields = schema_to_dict(_jdbc_schema)
-                                            field_preview = ", ".join(
-                                                f"{f['name']}:{f['type']}" for f in schema_fields[:6]
-                                            )
-                                            if len(schema_fields) > 6:
-                                                field_preview += f" … +{len(schema_fields) - 6} more"
                                             await log(
-                                                f"  Schema inferred: {len(schema_fields)} field(s) — {field_preview}",
+                                                f"  [{plan_label}] seg={seg_idx + 1}/{n_segs} {xmsg}",
                                                 level="DEBUG",
-                                                step="extract",
+                                                step=_ntype,
                                                 extra={
-                                                    "schema": schema_fields,
                                                     "branch": plan_label,
                                                     "job_name": plan_job_name,
                                                     "extract_label": plan_extract_cfg.extract_label,
                                                     "app_id": app_id,
                                                     "date": date_str,
+                                                    "segment": seg_idx + 1,
+                                                    "segments_total": n_segs,
                                                 },
                                             )
-                                        if _int_load_key:
-                                            _append_step_io_key(
-                                                _int_load_key,
-                                                inputs=[
-                                                    f"Branch: {plan_label}{(" app=" + app_id) if app_id else ""} date={date_str}",
-                                                    f"{len(transformed):,} transformed rows",
-                                                ],
-                                                outputs=[str(_jdbc_output_dir)],
+                                            if _xkey not in transform_stats_by_key:
+                                                transform_stats_by_key[_xkey] = {"records_in": 0, "records_out": 0}
+                                            transform_stats_by_key[_xkey]["records_in"] += n_before
+                                            transform_stats_by_key[_xkey]["records_out"] += len(transformed)
+                                            continue
+
+                                        if _ntype in {"load_sql", "load_parquet"} and transformed:
+                                            _lkey = load_step_key_by_node.get(_nid) or _load_key
+                                            await _begin_step(_lkey)
+
+                                            if _ntype == "load_sql":
+                                                _ns = str(_cfg.get("namespace_db") or _cfg.get("database") or plan_load_cfg.namespace_db or "").strip()
+                                                _tbl = str(_cfg.get("table_name") or plan_load_cfg.table_name or "").strip()
+                                                _mode = str(_cfg.get("mode") or plan_load_cfg.mode or "overwrite").strip() or "overwrite"
+                                                _effective_mode = (
+                                                    _mode
+                                                    if spark_load_invocations_by_step.get(_lkey, 0) == 0
+                                                    else "append"
+                                                )
+                                                _direct = await spark_service.save_records_to_spark_table(
+                                                    records=transformed,
+                                                    namespace_db=_ns,
+                                                    table_name=_tbl,
+                                                    mode=_effective_mode,
+                                                )
+                                                spark_load_invocations_by_step[_lkey] = spark_load_invocations_by_step.get(_lkey, 0) + 1
+                                                _rows_loaded = int(_direct.get("rows_loaded") or 0)
+                                                output_path = str(_direct.get("table") or "")
+                                                if _lkey not in load_stats_by_key:
+                                                    load_stats_by_key[_lkey] = {"records_in": 0, "records_out": 0}
+                                                load_stats_by_key[_lkey]["records_in"] += len(chunk)
+                                                load_stats_by_key[_lkey]["records_out"] += _rows_loaded
+                                                _append_step_io_key(
+                                                    _lkey,
+                                                    inputs=[f"Branch: {plan_label}{(' app=' + app_id) if app_id else ''} date={date_str}"],
+                                                    outputs=[str(_direct.get("table")), f"{_rows_loaded:,} rows"],
+                                                )
+                                            else:
+                                                _node_mode = str(_cfg.get("mode") or plan_load_cfg.mode or "overwrite").strip() or "overwrite"
+                                                _out = await _load_segment(
+                                                    transformed,
+                                                    app_id,
+                                                    date_str,
+                                                    seg_idx,
+                                                    LoadConfig(target="parquet", mode=_node_mode),
+                                                    log,
+                                                    job_name=plan_job_name,
+                                                    pipeline_name=plan_extract_cfg.pipeline_name,
+                                                    extract_label=f"{plan_extract_cfg.extract_label}_{_nid or 'parquet'}",
+                                                )
+                                                output_path = _out
+                                                _append_step_io_key(
+                                                    _lkey,
+                                                    inputs=[f"Branch: {plan_label}{(' app=' + app_id) if app_id else ''} date={date_str}"],
+                                                    outputs=[str(_out)],
+                                                )
+                                                if _lkey not in load_stats_by_key:
+                                                    load_stats_by_key[_lkey] = {"records_in": 0, "records_out": 0}
+                                                load_stats_by_key[_lkey]["records_in"] += len(chunk)
+                                                load_stats_by_key[_lkey]["records_out"] += len(transformed)
+                                else:
+                                    # Legacy path (single-load configuration without execution nodes)
+                                    if plan_transforms:
+                                        for _xs in plan_transforms:
+                                            _xkey = f"xform_{_xs.node_id}" if getattr(_xs, 'node_id', None) else f"xform_{_xs.node_type}"
+                                            await _begin_step(_xkey)
+                                            n_before = len(transformed)
+                                            transformed, xmsg = _execute_transform_step(
+                                                transformed, _xs.node_type, _xs.config, lookup_tables
                                             )
-                                    else:
+                                            if _xkey not in transform_stats_by_key:
+                                                transform_stats_by_key[_xkey] = {"records_in": 0, "records_out": 0}
+                                            transform_stats_by_key[_xkey]["records_in"] += n_before
+                                            transform_stats_by_key[_xkey]["records_out"] += len(transformed)
+                                    if transformed:
                                         await _begin_step(_load_key)
                                         output_path = await _load_segment(
                                             transformed,
@@ -1829,29 +1950,22 @@ async def execute_pipeline(
                                             pipeline_name=plan_extract_cfg.pipeline_name,
                                             extract_label=plan_extract_cfg.extract_label,
                                         )
-                                        if _int_load_key and output_path:
-                                            _append_step_io_key(
-                                                _int_load_key,
-                                                inputs=[
-                                                    f"Branch: {plan_label}{(" app=" + app_id) if app_id else ""} date={date_str}",
-                                                    f"{len(transformed):,} transformed rows",
-                                                ],
-                                                outputs=[str(output_path)],
-                                            )
+                                        if _load_key not in load_stats_by_key:
+                                            load_stats_by_key[_load_key] = {"records_in": 0, "records_out": 0}
+                                        load_stats_by_key[_load_key]["records_in"] += len(chunk)
+                                        load_stats_by_key[_load_key]["records_out"] += len(transformed)
+
+                                total_transformed += len(transformed)
+                                run.records_transformed = total_transformed
                                 total_loaded += len(transformed)
                                 _app_loaded += len(transformed)
-                                if plan_load_cfg.target in ("parquet", "csv"):
-                                    if _load_key not in load_stats_by_key:
-                                        load_stats_by_key[_load_key] = {"records_in": 0, "records_out": 0}
-                                    load_stats_by_key[_load_key]["records_in"] += len(chunk)
-                                    load_stats_by_key[_load_key]["records_out"] += len(transformed)
                                 run.records_loaded = total_loaded
                                 total_segs += 1
                                 run.segments_processed = total_segs
                                 job.status = RunStatus.COMPLETED
                                 job.records_count = len(transformed)
                                 job.output_path = output_path
-                                job.output_format = "parquet" if source == "jdbc" else plan_load_cfg.target
+                                job.output_format = "parquet"
                                 job.finished_at = datetime.now(timezone.utc)
                                 await log(
                                     f"  [{plan_label}] seg={seg_idx + 1}/{n_segs}: "
@@ -1934,7 +2048,7 @@ async def execute_pipeline(
                             }
                             await db.commit()
 
-                        if spark_load_enabled and plan_load_cfg.target == "spark_table":
+                        if spark_load_enabled and (not plan_execution_nodes) and plan_load_cfg.target == "spark_table":
                             spark_load_dates_by_job.setdefault(plan_job_name, set()).add(date_str)
 
                 # Finish app step after all dates for this app are done
@@ -1975,7 +2089,8 @@ async def execute_pipeline(
                                        records_out=run.records_loaded or 0)
 
             if spark_load_enabled:
-                for plan_extract_cfg, plan_load_cfg, plan_transforms, plan_job_name, plan_label, _plan_source_node_id, _plan_load_node_id, _plan_load_node_label, _pl_int_nid, _pl_int_nlabel in active_plans:
+                # Legacy single-load spark table merge path (non execution-node mode)
+                for plan_extract_cfg, plan_load_cfg, plan_transforms, plan_job_name, plan_label, _plan_source_node_id, _plan_load_node_id, _plan_load_node_label, _pl_int_nid, _pl_int_nlabel, _plan_exec_nodes in active_plans:
                     if plan_load_cfg.target != "spark_table":
                         continue
                     if not plan_load_cfg.namespace_db:
@@ -1984,24 +2099,9 @@ async def execute_pipeline(
                         try:
                             _load_key = load_step_key_by_job.get(plan_job_name, "load")
                             await _begin_step(_load_key)
-                            src_dirs = sorted(
-                                spark_input_dirs_by_job_date.get(plan_job_name, {}).get(date_str, set())
-                            )
                             _base_dir = settings.parquet_path / date_str / (plan_extract_cfg.pipeline_name or plan_job_name) / (plan_extract_cfg.extract_label or plan_label)
-                            _set_step_io(
-                                "load",
-                                inputs=src_dirs or [f"directories under {_base_dir}"],
-                            )
-                            _append_step_io_key(
-                                _load_key,
-                                inputs=src_dirs or [f"directories under {_base_dir}"],
-                            )
-                            if any(xs.node_type == "aggregate" for xs in plan_transforms):
-                                _set_step_io(
-                                    "aggregate",
-                                    inputs=src_dirs or [f"directories under {_base_dir}"],
-                                    outputs=["aggregated in-memory dataset"],
-                                )
+                            _set_step_io("load", inputs=[f"directories under {_base_dir}"])
+                            _append_step_io_key(_load_key, inputs=[f"directories under {_base_dir}"])
                             result = await spark_service.load_to_spark_table(
                                 date=date_str,
                                 job_name=plan_job_name,
@@ -2021,44 +2121,8 @@ async def execute_pipeline(
                                 load_stats_by_key[_load_key] = {"records_in": 0, "records_out": 0}
                             load_stats_by_key[_load_key]["records_in"] += _rows_loaded
                             load_stats_by_key[_load_key]["records_out"] += _rows_loaded
-                            _set_step_io(
-                                "load",
-                                outputs=[
-                                    str(result.get("table")),
-                                    f"{_rows_loaded:,} rows merged",
-                                ],
-                            )
-                            _append_step_io_key(
-                                _load_key,
-                                outputs=[
-                                    str(result.get("table")),
-                                    f"{_rows_loaded:,} rows merged",
-                                ],
-                            )
-                            await log(
-                                (
-                                    f"  Saved catalog table: {result.get('table')} "
-                                    f"(branch={plan_label}, date={date_str}, job={plan_job_name}, "
-                                    f"mode={'append' if spark_load_invocations_by_step.get(_load_key, 0) > 1 else (plan_load_cfg.mode or 'overwrite')}, "
-                                    f"merged {result.get('app_ids_merged')} app folder(s))"
-                                ),
-                                step="load",
-                            )
-                            await log(
-                                (
-                                    f"Load complete: branch={plan_label} date={date_str} "
-                                    f"table={result.get('table')} rows={_rows_loaded:,}"
-                                ),
-                                step="load",
-                                extra={
-                                    "branch": plan_label,
-                                    "job_name": plan_job_name,
-                                    "extract_label": plan_extract_cfg.extract_label,
-                                    "date": date_str,
-                                    "rows_loaded": _rows_loaded,
-                                    "table": result.get("table"),
-                                },
-                            )
+                            _set_step_io("load", outputs=[str(result.get("table")), f"{_rows_loaded:,} rows merged"])
+                            _append_step_io_key(_load_key, outputs=[str(result.get("table")), f"{_rows_loaded:,} rows merged"])
                         except Exception as exc:
                             spark_table_failed = True
                             spark_err_msg = f"Spark table registration failed (date={date_str}): {exc}"

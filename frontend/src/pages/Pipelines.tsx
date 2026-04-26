@@ -88,7 +88,7 @@ function derivedStatus(node: StepNode): string {
 
 const STEP_COLORS: Record<string, string> = {
   extract: '#58a6ff', app: '#e3b341', chunk: '#a371f7',
-  load: '#ec407a', filter: '#f0883e', sort: '#f0883e',
+  load: '#f4d35e', filter: '#f0883e', sort: '#f0883e',
   join: '#f0883e', aggregate: '#f0883e', sql_transform: '#c0c7d1',
 }
 

@@ -557,6 +557,36 @@ class SparkService:
             "extract_label": extract_token,
         }
 
+    async def save_records_to_spark_table(
+        self,
+        records: list[dict],
+        namespace_db: str,
+        table_name: str,
+        mode: str = "append",
+    ) -> dict:
+        """Write in-memory records directly to a Spark table (no parquet staging path)."""
+        if not namespace_db:
+            raise ValueError("namespace_db is required")
+        if not table_name:
+            raise ValueError("table_name is required")
+        if not records:
+            tbl = f"`{namespace_db}`.`{table_name}`"
+            return {"table": tbl, "rows_loaded": 0}
+
+        def _write() -> tuple[str, int]:
+            import pandas as pd  # type: ignore
+            spark = _get_spark()
+            _ensure_namespace_db(spark, namespace_db)
+            df = spark.createDataFrame(pd.DataFrame(records))
+            tbl = f"`{namespace_db}`.`{table_name}`"
+            df.write.mode(mode).saveAsTable(tbl)
+            return tbl, int(df.count())
+
+        tbl, rows = await asyncio.to_thread(_write)
+        self._suppressed_views.discard(table_name)
+        self._save_suppressed()
+        return {"table": tbl, "rows_loaded": rows}
+
     # ─────────────────────────────────────────────────────────────────────
     # Query
     # ─────────────────────────────────────────────────────────────────────

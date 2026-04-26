@@ -17,7 +17,7 @@ const NODE_COLOR: Record<string, string> = {
   filter: '#e3b341', sort: '#e3b341', aggregate: '#e3b341',
   sql_transform: '#c0c7d1', lookup: '#e3b341', join: '#e3b341',
   notebook_transform: '#8b5cf6', foreach: '#e3b341',
-  load_parquet: '#ec407a', load_sql: '#ec407a',
+  load_parquet: '#f4d35e', load_sql: '#f4d35e',
 }
 
 const STATUS_COLOR: Record<string, string> = {

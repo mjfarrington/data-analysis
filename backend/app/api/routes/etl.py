@@ -219,6 +219,21 @@ def _build_canvas_source_branches(canvas: dict, base_job_name: str) -> list[dict
             if nid in reachable and str((node_by_id.get(nid, {}).get("data") or {}).get("nodeType") or "") in transform_types
         ]
 
+        execution_node_ids = [
+            nid for nid in topo
+            if nid in reachable and str((node_by_id.get(nid, {}).get("data") or {}).get("nodeType") or "") in (transform_types | load_types)
+        ]
+        execution_nodes = []
+        for nid in execution_node_ids:
+            _n = node_by_id.get(nid, {})
+            _d = _n.get("data") or {}
+            execution_nodes.append({
+                "node_id": nid,
+                "node_type": str(_d.get("nodeType") or ""),
+                "label": str(_d.get("label") or "").strip() or nid,
+                "config": _d.get("config") or {},
+            })
+
         # Final load: last reachable load node (shared or exclusive) — actual execution target
         load_node = None
         load_node_id: Optional[str] = None
@@ -354,6 +369,7 @@ def _build_canvas_source_branches(canvas: dict, base_job_name: str) -> list[dict
             "extract_overrides": {k: v for k, v in extract_overrides.items() if v is not None},
             "load_overrides": {k: v for k, v in load_overrides.items() if v is not None},
             "transform_node_ids": transform_node_ids,
+            "execution_nodes": execution_nodes,
         })
 
     return branches
@@ -758,16 +774,6 @@ async def trigger_run(
     canvas = pipeline.canvas_config or {}
     canvas_nodes = canvas.get("nodes") or []
     if canvas_nodes:
-        shape_issues = _validate_supported_canvas_shape(canvas)
-        if shape_issues:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Unsupported execution graph shape. "
-                    + " ".join(shape_issues)
-                ),
-            )
-
         source_types = {"jdbc_extract", "dw_extract", "s3_extract", "csv_extract", "json_extract"}
         node_types = [str((n.get("data") or {}).get("nodeType") or "") for n in canvas_nodes]
         has_source_node = any(
