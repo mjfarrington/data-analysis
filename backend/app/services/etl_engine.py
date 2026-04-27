@@ -364,6 +364,68 @@ def inject_sql_vars(
     return result, variables
 
 
+def _inject_template_vars(text: str, variables: dict[str, str]) -> str:
+    """Replace $placeholder variables in notebook cell source text."""
+    if not text or not variables:
+        return text
+    out = text
+    for placeholder, value in sorted(variables.items(), key=lambda kv: -len(kv[0])):
+        out = out.replace(placeholder, value)
+    return out
+
+
+def _prepare_notebook_cells(
+    cells: list[dict],
+    template_vars: dict[str, str],
+    runtime_vars: dict[str, Any],
+) -> list[dict]:
+    """Build executable notebook cells with injected runtime variables.
+
+    - Prepends one code cell that defines python variables like business_date/app_id.
+    - Replaces $placeholders in every code cell source.
+    """
+    prepared: list[dict] = []
+
+    # Runtime context variables available in notebook code directly.
+    # Use repr() to properly serialize Python values (None → None, not null).
+    runtime_lines = [
+        "# Runtime variables injected by ETL engine",
+        f"business_date = {repr(runtime_vars.get('business_date'))}",
+        f"business_date_from = {repr(runtime_vars.get('business_date_from'))}",
+        f"business_date_to = {repr(runtime_vars.get('business_date_to'))}",
+        f"app_id = {repr(runtime_vars.get('app_id'))}",
+        f"app_name = {repr(runtime_vars.get('app_name'))}",
+        f"namespace_db = {repr(runtime_vars.get('namespace_db'))}",
+        f"run_id = {repr(runtime_vars.get('run_id'))}",
+        f"pipeline_id = {repr(runtime_vars.get('pipeline_id'))}",
+        "runtime_vars = {",
+        "    'business_date': business_date,",
+        "    'business_date_from': business_date_from,",
+        "    'business_date_to': business_date_to,",
+        "    'app_id': app_id,",
+        "    'app_name': app_name,",
+        "    'namespace_db': namespace_db,",
+        "    'run_id': run_id,",
+        "    'pipeline_id': pipeline_id,",
+        "}",
+    ]
+    prepared.append({"type": "code", "source": "\n".join(runtime_lines)})
+
+    for cell in cells:
+        c = dict(cell or {})
+        ctype = str(c.get("type") or ("code" if c.get("cell_type") == "code" else "markdown"))
+        src = c.get("source") or c.get("content") or ""
+        if isinstance(src, list):
+            src = "\n".join(str(line) for line in src)
+        else:
+            src = str(src)
+        if ctype == "code":
+            src = _inject_template_vars(src, template_vars)
+        prepared.append({"type": ctype, "source": src})
+
+    return prepared
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Source handlers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -922,7 +984,8 @@ async def execute_pipeline(
             "load_sql": "Load", "load_parquet": "Load",
         }
         _step_specs: list[tuple[str, str, str]] = []  # (key, step_type, label)
-        _step_specs.append(("extract", "extract", "Extract"))
+        if extract_cfg.source_type != "notebook_only":
+            _step_specs.append(("extract", "extract", "Extract"))
 
         _branch_plans = extract_cfg.source_branches or []
         _branch_exec_nodes: list[dict[str, Any]] = []
@@ -943,7 +1006,7 @@ async def execute_pipeline(
                 _nlabel = str(_en.get("label") or "").strip() or _nid
                 if _ntype in {"filter", "join", "sort", "lookup", "sql_transform", "aggregate", "notebook_transform"}:
                     _xkey = f"xform_{_nid}" if _nid else f"xform_{_ntype}"
-                    _xlabel = _LABEL_MAP.get(_ntype, _ntype.replace('_', ' ').title())
+                    _xlabel = _nlabel if (_nlabel and _nlabel != _nid) else _LABEL_MAP.get(_ntype, _ntype.replace('_', ' ').title())
                     if _nid:
                         _xlabel = f"{_xlabel} [{_nid}]"
                     _step_specs.append((_xkey, _ntype, _xlabel))
@@ -952,7 +1015,7 @@ async def execute_pipeline(
                     _first_load_consumed = True
                     _llabel = f"{_nlabel} [{_nid}]" if _nid else (_nlabel or "Load")
                     _step_specs.append((_lkey, "load", _llabel))
-            if not any(_stype == "load" for _, _stype, _ in _step_specs):
+            if extract_cfg.source_type != "notebook_only" and not any(_stype == "load" for _, _stype, _ in _step_specs):
                 _step_specs.append(("load", "load", "Load"))
         else:
             for _xs in transform_cfg.transforms_pipeline:
@@ -962,7 +1025,10 @@ async def execute_pipeline(
                 if _xnode:
                     _xlabel = f"{_xlabel} [{_xnode}]"
                 _step_specs.append((_xkey, _xs.node_type, _xlabel))
-            _step_specs.append(("load", "load", "Load"))
+            if extract_cfg.source_type != "notebook_only":
+                _step_specs.append(("load", "load", "Load"))
+            elif load_cfg.target == "spark_table" and bool(load_cfg.table_name):
+                _step_specs.append(("load", "load", "Load"))
 
         step_rows: dict[str, RunStep] = {}
         for _order, (_key, _stype, _label) in enumerate(_step_specs):
@@ -1025,6 +1091,242 @@ async def execute_pipeline(
         source = extract_cfg.source_type
         extract_enabled = run_scope in ("full", "extract")
         spark_load_enabled = run_scope in ("full", "load")
+
+        # ── Notebook-only mode: execute notebook transform nodes directly ───
+        if source == "notebook_only":
+            if run_scope != "full":
+                raise ValueError("Notebook-only mode supports only full runs.")
+
+            notebook_steps = [s for s in transform_cfg.transforms_pipeline if s.node_type == "notebook_transform"]
+            if not notebook_steps:
+                raise ValueError("Notebook-only mode requires at least one notebook_transform node.")
+
+            from app.models.etl import NotebookFile
+
+            executed_notebooks: list[dict[str, Any]] = []
+            app_list: list[tuple[Optional[str], str]] = [
+                (str(a.get("id", "")).strip() or None, str(a.get("name", "")).strip())
+                for a in (extract_cfg.apps or [])
+                if str(a.get("id", "")).strip()
+            ] or [(None, "")]
+
+            load_rows = 0
+            load_table = None
+            load_invocations = 0
+
+            for app_id, app_name in app_list:
+                last_notebook_file_id: Optional[int] = None
+                for nb_step in notebook_steps:
+                    _xkey = f"xform_{nb_step.node_id}" if getattr(nb_step, "node_id", None) else "xform_notebook_transform"
+                    if _xkey not in step_rows:
+                        _xkey = "xform_notebook_transform"
+
+                    notebook_file_id_raw = (nb_step.config or {}).get("notebook_file_id")
+                    if not notebook_file_id_raw:
+                        raise ValueError("notebook_transform requires notebook_file_id in notebook-only mode.")
+                    try:
+                        notebook_file_id = int(notebook_file_id_raw)
+                    except (TypeError, ValueError):
+                        raise ValueError("notebook_transform.notebook_file_id must be a valid integer.")
+
+                    notebook_file = await db.get(NotebookFile, notebook_file_id)
+                    if not notebook_file:
+                        raise ValueError(f"NotebookFile id={notebook_file_id} not found")
+                    last_notebook_file_id = notebook_file_id
+
+                    cells = notebook_file.cells or []
+                    _, injected_vars = inject_sql_vars(
+                        "",
+                        business_date,
+                        date_var_format=extract_cfg.jdbc_date_var_format or "YYYYMMDD",
+                        date_range_mode=extract_cfg.jdbc_date_range_mode or "single",
+                        date_range_from_iso=extract_cfg.jdbc_date_range_from,
+                        date_range_to_iso=extract_cfg.jdbc_date_range_to,
+                        app_id=app_id,
+                        app_name=app_name,
+                    )
+                    if load_cfg.namespace_db:
+                        injected_vars["$namespace_db"] = str(load_cfg.namespace_db)
+
+                    runtime_vars: dict[str, Any] = {
+                        "business_date": business_date,
+                        "business_date_from": injected_vars.get("$business_date_from"),
+                        "business_date_to": injected_vars.get("$business_date_to"),
+                        "app_id": app_id,
+                        "app_name": app_name or None,
+                        "namespace_db": load_cfg.namespace_db,
+                        "run_id": run_id,
+                        "pipeline_id": run.pipeline_id,
+                    }
+                    prepared_cells = _prepare_notebook_cells(cells, injected_vars, runtime_vars)
+
+                    await _begin_step(_xkey)
+                    await log(
+                        f"Executing notebook transform `{notebook_file.name}` (id={notebook_file_id})"
+                        + (f" app={app_id}" if app_id else ""),
+                        step="notebook_transform",
+                        extra={
+                            "notebook_file_id": notebook_file_id,
+                            "notebook_file_name": notebook_file.name,
+                            "app_id": app_id,
+                            "app_name": app_name or None,
+                            "business_date": business_date,
+                            "injected_vars": injected_vars,
+                        },
+                    )
+
+                    outputs = await spark_service.execute_notebook_cells(
+                        nb_id=notebook_file_id,
+                        cells=prepared_cells,
+                        reset_session=True,
+                    )
+
+                    # Mirror notebook stdout/stderr into ETL run logs for observability.
+                    for output_idx, out in enumerate(outputs, start=1):
+                        _stdout = str(out.get("stdout") or "").strip()
+                        if _stdout:
+                            _trimmed = _stdout if len(_stdout) <= 4000 else (_stdout[:4000] + "\n...[truncated]")
+                            await log(
+                                (
+                                    f"Notebook output [{notebook_file.name}] cell={output_idx}"
+                                    + (f" app={app_id}" if app_id else "")
+                                    + f":\n{_trimmed}"
+                                ),
+                                step="notebook_transform",
+                                extra={
+                                    "notebook_file_id": notebook_file_id,
+                                    "cell_index": output_idx,
+                                    "execution_time_ms": out.get("execution_time_ms"),
+                                    "app_id": app_id,
+                                },
+                            )
+                        _err = str(out.get("error") or "").strip()
+                        if _err:
+                            _trimmed_err = _err if len(_err) <= 4000 else (_err[:4000] + "\n...[truncated]")
+                            await log(
+                                (
+                                    f"Notebook error [{notebook_file.name}] cell={output_idx}"
+                                    + (f" app={app_id}" if app_id else "")
+                                    + f":\n{_trimmed_err}"
+                                ),
+                                level="ERROR",
+                                step="notebook_transform",
+                                extra={
+                                    "notebook_file_id": notebook_file_id,
+                                    "cell_index": output_idx,
+                                    "execution_time_ms": out.get("execution_time_ms"),
+                                    "app_id": app_id,
+                                },
+                            )
+
+                    first_error = next((o.get("error") for o in outputs if o.get("error")), None)
+                    if first_error:
+                        raise ValueError(
+                            f"Notebook transform `{notebook_file.name}` failed: {str(first_error).splitlines()[-1]}"
+                        )
+
+                    code_cell_count = len([c for c in prepared_cells if (c or {}).get("type") == "code"])
+                    await _finish_step(_xkey, RunStatus.COMPLETED, records_in=0, records_out=0)
+                    await log(
+                        (
+                            f"Notebook transform complete: notebook={notebook_file.name}, "
+                            f"code_cells={code_cell_count}, outputs={len(outputs)}"
+                            + (f", app={app_id}" if app_id else "")
+                        ),
+                        step="notebook_transform",
+                        extra={
+                            "notebook_file_id": notebook_file_id,
+                            "notebook_file_name": notebook_file.name,
+                            "code_cells": code_cell_count,
+                            "output_count": len(outputs),
+                            "app_id": app_id,
+                        },
+                    )
+                    executed_notebooks.append(
+                        {
+                            "id": notebook_file_id,
+                            "name": notebook_file.name,
+                            "code_cells": code_cell_count,
+                            "app_id": app_id,
+                        }
+                    )
+
+                if load_cfg.target == "spark_table" and bool(load_cfg.table_name):
+                    if not load_cfg.namespace_db:
+                        raise ValueError("Notebook Spark output requires load_config.namespace_db.")
+                    if not last_notebook_file_id:
+                        raise ValueError("Notebook Spark output requires at least one executed notebook_transform node.")
+                    await _begin_step("load")
+                    _effective_mode = (
+                        load_cfg.mode or "overwrite"
+                        if load_invocations == 0
+                        else "append"
+                    )
+                    await log(
+                        f"Exporting notebook result_df -> `{load_cfg.namespace_db}`.`{load_cfg.table_name}`"
+                        + (f" app={app_id}" if app_id else "")
+                        + f" (mode={_effective_mode})",
+                        step="load",
+                        extra={
+                            "namespace_db": load_cfg.namespace_db,
+                            "table_name": load_cfg.table_name,
+                            "mode": _effective_mode,
+                            "app_id": app_id,
+                        },
+                    )
+                    load_result = await spark_service.export_notebook_result(
+                        nb_id=last_notebook_file_id,
+                        target_db=load_cfg.namespace_db,
+                        target_table=load_cfg.table_name,
+                        source_var="result_df",
+                        mode=_effective_mode,
+                    )
+                    load_invocations += 1
+                    _rows = int(load_result.get("row_count") or 0)
+                    load_rows += _rows
+                    load_table = str(load_result.get("table") or "")
+                    await log(
+                        "Notebook Spark output complete: "
+                        + f"rows={_rows:,} table={load_table}"
+                        + (f" app={app_id}" if app_id else ""),
+                        step="load",
+                        extra={"rows": _rows, "table": load_table, "app_id": app_id},
+                    )
+
+            if load_invocations > 0:
+                await _finish_step("load", RunStatus.COMPLETED, records_in=load_rows, records_out=load_rows)
+
+            _notebook_node_map: dict[str, int] = {}
+            for _rs in step_rows.values():
+                _lbl = (_rs.step_label or "").strip()
+                if "[" in _lbl and _lbl.endswith("]"):
+                    _nid = _lbl[_lbl.rfind("[") + 1 : -1].strip()
+                    if _nid and _nid not in _notebook_node_map:
+                        _notebook_node_map[_nid] = _rs.id
+
+            run.records_transformed = load_rows
+            run.records_loaded = load_rows
+            run.total_records_transformed = load_rows
+            run.total_records_loaded = load_rows
+            run.status = RunStatus.COMPLETED
+            run.finished_at = datetime.now(timezone.utc)
+            run.run_metadata = {
+                **(run.run_metadata or {}),
+                "mode": "notebook_only",
+                "notebooks": executed_notebooks,
+                "spark_output": {
+                    "target": load_cfg.target,
+                    "table": load_table,
+                    "rows": load_rows,
+                },
+                "node_step_map": _notebook_node_map,
+            }
+            await db.commit()
+            await log(
+                f"Pipeline complete — notebook_only with {len(executed_notebooks)} notebook step(s)",
+                step="done",
+            )
+            return
 
         # ── Spark SQL-only mode: sql_transform reads directly from Spark DB ──
         if source == "spark_sql":
@@ -1520,9 +1822,13 @@ async def execute_pipeline(
 
             # ── Embed source node IDs in extract step label for live canvas polling ──
             _src_node_ids_for_label = [_psid for _, _, _, _, _, _psid, _, _, _, _, _ in plans if _psid]
+            _single_source_label = None
+            if len(plans) == 1:
+                _single_source_label = str(plans[0][4] or "").strip() or None
             _extract_rs_live = step_rows.get("extract")
             if _extract_rs_live and len(_src_node_ids_for_label) == 1:
-                _extract_rs_live.step_label = f"Extract [{_src_node_ids_for_label[0]}]"
+                _extract_base = _single_source_label or "Extract"
+                _extract_rs_live.step_label = f"{_extract_base} [{_src_node_ids_for_label[0]}]"
 
             # ── Build preliminary node_step_map for live canvas status polling ──────────
             # (will be updated again at end-of-run with full data)

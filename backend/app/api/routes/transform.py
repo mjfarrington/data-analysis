@@ -9,16 +9,37 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, AsyncSessionLocal
-from app.models.etl import NotebookFile, TransformJob, TransformJobStatus, SqlFile
+from app.models.etl import NotebookFile, TransformJob, TransformJobStatus, SqlFile, TransformJobLog
 from app.schemas.etl import (
     NotebookFileCreate, NotebookFileUpdate, NotebookFileResponse,
     NotebookCell,
     TransformJobCreate, TransformJobUpdate, TransformJobResponse,
+    TransformJobLogResponse,
 )
 from app.services.spark_service import spark_service
 
 router = APIRouter(prefix="/transform", tags=["Transform"])
 logger = logging.getLogger(__name__)
+
+
+async def _push_job_log(
+    db: AsyncSession,
+    job_id: int,
+    message: str,
+    *,
+    level: str = "INFO",
+    step: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    db.add(
+        TransformJobLog(
+            job_id=job_id,
+            level=level,
+            message=message,
+            step=step,
+            extra=extra,
+        )
+    )
 
 
 # ─── Notebook Files ───────────────────────────────────────────────────────────
@@ -224,8 +245,36 @@ async def run_transform_job(
             j = await session.get(TransformJob, job_id)
             if not j:
                 return
+
+            async def log(
+                msg: str,
+                *,
+                level: str = "INFO",
+                step: str | None = None,
+                extra: dict | None = None,
+            ) -> None:
+                logger.log(getattr(logging, level, logging.INFO), "[transform_job=%d] %s", job_id, msg)
+                await _push_job_log(session, job_id, msg, level=level, step=step, extra=extra)
+                await session.commit()
+
             try:
+                started_at = datetime.now(timezone.utc)
+                j.last_run_at = started_at
+                j.last_error = None
+                await session.commit()
+                await log("Transform job started", step="init")
+                await log(f"Type: {j.transform_type.upper()}", step="init")
+                await log(
+                    f"Source: {(j.source_database + '.') if j.source_database else ''}{j.source_table}",
+                    step="init",
+                )
+                await log(
+                    f"Target: {(j.target_database + '.') if j.target_database else ''}{j.target_table} ({j.target_mode or 'overwrite'})",
+                    step="init",
+                )
+
                 if j.transform_type == "sql":
+                    await log("Executing SQL transform", step="transform")
                     result = await spark_service.run_sql_transform(
                         source_db=j.source_database,
                         source_table=j.source_table,
@@ -235,6 +284,7 @@ async def run_transform_job(
                         mode=j.target_mode or "overwrite",
                     )
                 else:
+                    await log("Executing notebook transform", step="transform")
                     result = await spark_service.run_notebook_transform(
                         source_db=j.source_database,
                         source_table=j.source_table,
@@ -243,20 +293,50 @@ async def run_transform_job(
                         target_table=j.target_table,
                         mode=j.target_mode or "overwrite",
                     )
+
                 j.status = TransformJobStatus.COMPLETED
                 j.last_run_at = datetime.now(timezone.utc)
                 j.last_run_duration_s = result["duration_s"]
                 j.last_run_rows = result["row_count"]
                 j.last_error = None
+                await log(
+                    f"Transform completed: {result['row_count']:,} rows in {result['duration_s']:.2f}s",
+                    step="done",
+                    extra={"row_count": result["row_count"], "duration_s": result["duration_s"]},
+                )
             except Exception as exc:
                 logger.exception("Transform job %d failed", job_id)
                 j.status = TransformJobStatus.FAILED
                 j.last_run_at = datetime.now(timezone.utc)
                 j.last_error = str(exc)
+                await log(f"Transform FAILED: {exc}", level="ERROR", step="done")
             await session.commit()
 
     background_tasks.add_task(_execute)
     return TransformJobResponse.model_validate(job)
+
+
+@router.get("/jobs/{job_id}/logs", response_model=list[TransformJobLogResponse])
+async def list_transform_job_logs(
+    job_id: int,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+):
+    job = await db.get(TransformJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Transform job not found")
+
+    safe_limit = max(1, min(limit, 1000))
+    rows = (
+        await db.execute(
+            select(TransformJobLog)
+            .where(TransformJobLog.job_id == job_id)
+            .order_by(TransformJobLog.id.desc())
+            .limit(safe_limit)
+        )
+    ).scalars().all()
+    rows = list(reversed(rows))
+    return [TransformJobLogResponse.model_validate(r) for r in rows]
 
 
 # ─── ETL Chains ───────────────────────────────────────────────────────────────

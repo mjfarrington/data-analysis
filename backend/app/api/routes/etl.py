@@ -775,6 +775,7 @@ async def trigger_run(
     canvas_nodes = canvas.get("nodes") or []
     if canvas_nodes:
         source_types = {"jdbc_extract", "dw_extract", "s3_extract", "csv_extract", "json_extract"}
+        load_types = {"load_sql", "load_parquet"}
         node_types = [str((n.get("data") or {}).get("nodeType") or "") for n in canvas_nodes]
         has_source_node = any(
             str((n.get("data") or {}).get("nodeType") or "") in source_types
@@ -782,7 +783,51 @@ async def trigger_run(
         )
         if not has_source_node:
             has_sql_transform = "sql_transform" in node_types
+            has_notebook_transform = "notebook_transform" in node_types
             has_load_sql = "load_sql" in node_types
+            has_any_load = any(t in load_types for t in node_types)
+            notebook_only_allowed = False
+            notebook_with_spark_output_allowed = False
+
+            if has_notebook_transform and not has_sql_transform and not has_any_load:
+                nb_nodes = [
+                    n for n in canvas_nodes
+                    if str((n.get("data") or {}).get("nodeType") or "") == "notebook_transform"
+                ]
+                if nb_nodes and all(
+                    (n.get("data") or {}).get("config", {}).get("notebook_file_id")
+                    for n in nb_nodes
+                ):
+                    notebook_only_allowed = True
+
+            # Notebook + Spark output mode: no extract source, at least one
+            # notebook_transform connected to load_sql.
+            if has_notebook_transform and not has_sql_transform and has_load_sql:
+                nb_nodes = [
+                    n for n in canvas_nodes
+                    if str((n.get("data") or {}).get("nodeType") or "") == "notebook_transform"
+                ]
+                if (
+                    nb_nodes
+                    and all((n.get("data") or {}).get("config", {}).get("notebook_file_id") for n in nb_nodes)
+                    and _has_path_between(canvas, {"notebook_transform"}, {"load_sql"})
+                ):
+                    notebook_with_spark_output_allowed = True
+
+            if notebook_with_spark_output_allowed:
+                load_sql_nodes = [
+                    n for n in canvas_nodes
+                    if str((n.get("data") or {}).get("nodeType") or "") == "load_sql"
+                ]
+                selected_load = load_sql_nodes[-1] if load_sql_nodes else None
+                lcfg = ((selected_load or {}).get("data") or {}).get("config") or {}
+                ns = (lcfg.get("namespace_db") or lcfg.get("database") or "").strip()
+                load_cfg = load_cfg.model_copy(update={
+                    "target": "spark_table",
+                    "table_name": (lcfg.get("table_name") or "").strip() or load_cfg.table_name,
+                    "mode": lcfg.get("mode") or load_cfg.mode or "overwrite",
+                    **({"namespace_db": ns} if ns else {}),
+                })
 
             # SQL-only Spark mode: sql_transform reads from Spark source DB and
             # load_sql writes to target table, with no extract node.
@@ -800,6 +845,10 @@ async def trigger_run(
 
             if sql_only_allowed:
                 extract_cfg = extract_cfg.model_copy(update={"source_type": "spark_sql"})
+            elif notebook_with_spark_output_allowed:
+                extract_cfg = extract_cfg.model_copy(update={"source_type": "notebook_only"})
+            elif notebook_only_allowed:
+                extract_cfg = extract_cfg.model_copy(update={"source_type": "notebook_only"})
             else:
                 raise HTTPException(
                     status_code=400,
@@ -810,6 +859,12 @@ async def trigger_run(
                             "source_database defaults dynamically to data_<business_date> if left empty."
                         )
                         if has_sql_transform else
+                        (
+                            "Pipeline canvas has only Notebook Transform node(s) with no source/load path. "
+                            "Add a source extract node and a downstream load node, then connect them through "
+                            "Notebook Transform before running."
+                        )
+                        if has_notebook_transform else
                         (
                             "Pipeline canvas has no source extract node. Add a source node "
                             "(JDBC, DataWarehouse, S3, CSV or JSON) upstream of transforms/load."

@@ -388,6 +388,34 @@ class TransformJob(Base):
 
     sql_file: Mapped[Optional[SqlFile]] = relationship("SqlFile")
     notebook_file: Mapped[Optional[NotebookFile]] = relationship("NotebookFile")
+    logs: Mapped[list["TransformJobLog"]] = relationship(
+        "TransformJobLog",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="TransformJobLog.id",
+    )
+
+
+class TransformJobLog(Base):
+    __tablename__ = "transform_job_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    job_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("transform_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    level: Mapped[str] = mapped_column(String(10), default="INFO")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    step: Mapped[Optional[str]] = mapped_column(String(50))
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    extra: Mapped[Optional[dict]] = mapped_column(JSON)
+
+    job: Mapped["TransformJob"] = relationship("TransformJob", back_populates="logs")
 
 
 class ETLChainStatus(str, enum.Enum):

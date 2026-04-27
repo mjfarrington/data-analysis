@@ -124,6 +124,16 @@ export interface TransformJob {
   updated_at: string
 }
 
+export interface TransformJobLog {
+  id: number
+  job_id: number
+  level: string
+  message: string
+  step?: string
+  timestamp: string
+  extra?: Record<string, unknown>
+}
+
 export interface NotebookCell {
   id: string
   type: 'code' | 'markdown'
@@ -370,6 +380,8 @@ export const transformApi = {
   deleteJob: (id: number) => api.delete(`/transform/jobs/${id}`),
   runJob: (id: number) =>
     api.post<RunSummary>(`/transform/jobs/${id}/run`).then(r => r.data),
+  getJobLogs: (id: number, limit = 200) =>
+    api.get<TransformJobLog[]>(`/transform/jobs/${id}/logs`, { params: { limit } }).then(r => r.data),
 
   listNotebooks: () =>
     api.get<NotebookFile[]>('/transform/notebooks').then(r => r.data),

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import {
   Box, Typography, Button, CircularProgress, Alert,
   alpha, useTheme, ToggleButtonGroup, ToggleButton,
@@ -31,6 +31,37 @@ export function formatRunDate(str?: string): string {
 interface StepNode { step: RunStep; children: StepNode[] }
 interface StepIoEntry { inputs?: string[]; outputs?: string[] }
 
+const STEP_TERMINAL = ['completed', 'failed', 'cancelled', 'completed_with_warnings', 'skipped']
+
+function normalizeStepStatusesForDisplay(steps: RunStep[], runStatus: string): RunStep[] {
+  const live = runStatus === 'running' || runStatus === 'pending'
+  if (!live || steps.length === 0) return steps
+
+  const cloned = steps.map(s => ({ ...s }))
+  const topLevel = cloned
+    .filter(s => s.parent_step_id == null && !['app', 'chunk'].includes(s.step_type))
+    .sort((a, b) => a.step_order - b.step_order)
+
+  if (topLevel.length === 0) return cloned
+
+  const active = topLevel.find(s => s.status === 'running' || s.status === 'pending')
+  if (!active) return cloned
+
+  const activeOrder = active.step_order
+  for (const step of topLevel) {
+    if (['failed', 'cancelled', 'skipped', 'completed_with_warnings'].includes(step.status)) continue
+    if (step.step_order < activeOrder) {
+      step.status = 'completed'
+    } else if (step.step_order === activeOrder) {
+      step.status = 'running'
+    } else if (step.status !== 'completed') {
+      step.status = 'pending'
+    }
+  }
+
+  return cloned
+}
+
 function buildStepTree(steps: RunStep[]): StepNode[] {
   const byId = new Map<number, StepNode>()
   for (const s of steps) byId.set(s.id, { step: s, children: [] })
@@ -49,6 +80,9 @@ function buildStepTree(steps: RunStep[]): StepNode[] {
 }
 
 function derivedStatus(node: StepNode): string {
+  if (node.step.parent_step_id == null && !['app', 'chunk'].includes(node.step.step_type)) {
+    return node.step.status
+  }
   if (node.children.length === 0) return node.step.status
   const cs = node.children.map(derivedStatus)
   if (cs.some(s => s === 'failed')) return 'failed'
@@ -294,6 +328,11 @@ export default function RunDetailPanel({ runId, fillLogToBottom = false, bgcolor
     staleTime: 120_000,
   })
 
+  const displaySteps = useMemo(
+    () => normalizeStepStatusesForDisplay(run?.steps ?? [], run?.status ?? ''),
+    [run?.steps, run?.status],
+  )
+
   const cancelMut = useMutation({
     mutationFn: () => runsApi.cancel(runId),
     onSuccess: () => {
@@ -363,7 +402,7 @@ export default function RunDetailPanel({ runId, fillLogToBottom = false, bgcolor
       </Box>
 
       {/* ── Steps / Graph toggle ── */}
-      {run.steps.length > 0 && !disableGraphView && (
+      {displaySteps.length > 0 && !disableGraphView && (
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
           <ToggleButtonGroup
             value={stepView} exclusive onChange={(_, v) => v && setStepView(v)} size="small"
@@ -409,11 +448,11 @@ export default function RunDetailPanel({ runId, fillLogToBottom = false, bgcolor
       )}
 
       {/* ── Step tree or graph ── */}
-      {run.steps.length > 0 && (
+      {displaySteps.length > 0 && (
         <Box sx={{ mb: 2 }}>
           {stepView === 'steps' ? (
             <Box sx={{ border: `1px solid ${theme.palette.divider}`, borderRadius: 1, overflow: 'hidden' }}>
-              {buildStepTree(run.steps).map(node => (
+              {buildStepTree(displaySteps).map(node => (
                 <StepTreeRow key={node.step.id} node={node} depth={0} stepIoByType={stepIoByType} stepIoByStepId={stepIoByStepId} />
               ))}
             </Box>

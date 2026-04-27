@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Box, Typography, Button, Card, CardContent, CardActions,
   Chip, IconButton, Dialog, DialogTitle, DialogContent, DialogActions,
@@ -7,10 +7,10 @@ import {
 } from '@mui/material'
 import {
   Add, PlayArrow, Edit, Delete, CheckCircleOutlined, ErrorOutlined,
-  Schedule, LibraryBooks, Code, PlayCircleOutlined,
+  Schedule, LibraryBooks, Code, PlayCircleOutlined, Subject,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { transformApi, sqlFilesApi, TransformJob } from '../api/client'
+import { transformApi, sqlFilesApi, TransformJob, TransformJobLog } from '../api/client'
 import StatusChip from '../components/StatusChip'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -236,11 +236,45 @@ export default function TransformJobs() {
   const [newOpen, setNewOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<TransformJob | null>(null)
   const [runStatus, setRunStatus] = useState<Record<number, 'running' | 'done' | 'error'>>({})
+  const [logsJobId, setLogsJobId] = useState<number | null>(null)
 
   const { data: jobs = [], isLoading } = useQuery({
     queryKey: ['transform-jobs'],
     queryFn: transformApi.listJobs,
+    refetchInterval: query => {
+      const data = (query.state.data as TransformJob[] | undefined) ?? []
+      const localRunning = Object.values(runStatus).includes('running')
+      const backendRunning = data.some(j => j.status === 'running')
+      return localRunning || backendRunning ? 2000 : false
+    },
   })
+
+  const logsJob = useMemo(
+    () => (logsJobId != null ? jobs.find(j => j.id === logsJobId) ?? null : null),
+    [jobs, logsJobId],
+  )
+
+  const { data: jobLogs = [], isFetching: isLogsFetching } = useQuery({
+    queryKey: ['transform-job-logs', logsJobId],
+    queryFn: () => transformApi.getJobLogs(logsJobId as number, 300),
+    enabled: logsJobId != null,
+    refetchInterval: logsJob?.status === 'running' ? 1500 : false,
+  })
+
+  useEffect(() => {
+    setRunStatus(prev => {
+      const next = { ...prev }
+      for (const [idStr, state] of Object.entries(prev)) {
+        if (state !== 'running') continue
+        const id = Number(idStr)
+        const job = jobs.find(j => j.id === id)
+        if (!job) continue
+        if (job.status === 'completed') next[id] = 'done'
+        if (job.status === 'failed') next[id] = 'error'
+      }
+      return next
+    })
+  }, [jobs])
 
   const createMut = useMutation({
     mutationFn: (data: Partial<TransformJob>) => transformApi.createJob(data),
@@ -257,7 +291,10 @@ export default function TransformJobs() {
   })
   const runMut = useMutation({
     mutationFn: (id: number) => transformApi.runJob(id),
-    onSuccess: (_, id) => { setRunStatus(m => ({ ...m, [id]: 'done' })) },
+    onSuccess: (_, id) => {
+      qc.invalidateQueries({ queryKey: ['transform-jobs'] })
+      setRunStatus(m => ({ ...m, [id]: 'running' }))
+    },
     onError: (_, id) => { setRunStatus(m => ({ ...m, [id]: 'error' })) },
   })
 
@@ -359,6 +396,15 @@ export default function TransformJobs() {
                     {/* Run status */}
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
                       <StatusChip status={job.status} />
+                      {job.status === 'running' && (
+                        <Chip
+                          label="Live"
+                          size="small"
+                          color="info"
+                          variant="outlined"
+                          sx={{ fontSize: '0.65rem', height: 20 }}
+                        />
+                      )}
                       {rs === 'done' && (
                         <Chip icon={<CheckCircleOutlined sx={{ fontSize: '0.8rem !important' }} />}
                           label="Run complete" size="small" color="success" variant="outlined" sx={{ fontSize: '0.65rem', height: 20 }} />
@@ -391,6 +437,11 @@ export default function TransformJobs() {
                       <Tooltip title="Run job">
                         <IconButton size="small" color="primary" onClick={() => handleRun(job.id)} disabled={isRunning}>
                           {isRunning ? <CircularProgress size={14} /> : <PlayArrow fontSize="small" />}
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title="View logs">
+                        <IconButton size="small" onClick={() => setLogsJobId(job.id)}>
+                          <Subject fontSize="small" />
                         </IconButton>
                       </Tooltip>
                       <Tooltip title="Edit">
@@ -427,6 +478,69 @@ export default function TransformJobs() {
           onDelete={async () => { await deleteMut.mutateAsync(editTarget.id) }}
         />
       )}
+
+      <Dialog open={logsJobId != null} onClose={() => setLogsJobId(null)} maxWidth="md" fullWidth>
+        <DialogTitle>
+          Transform Logs{logsJob ? ` · ${logsJob.name}` : ''}
+        </DialogTitle>
+        <DialogContent>
+          <Box sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+            {logsJob && <StatusChip status={logsJob.status} />}
+            {isLogsFetching && <CircularProgress size={14} />}
+          </Box>
+          <Box sx={{
+            border: `1px solid ${theme.palette.divider}`,
+            borderRadius: 1,
+            bgcolor: alpha(theme.palette.background.default, 0.45),
+            maxHeight: 420,
+            overflow: 'auto',
+            p: 1,
+          }}>
+            {jobLogs.length === 0 ? (
+              <Typography sx={{ fontSize: '0.8rem', color: 'text.secondary', p: 1 }}>
+                No logs yet for this job.
+              </Typography>
+            ) : (
+              jobLogs.map((l: TransformJobLog) => (
+                <Box key={l.id} sx={{ p: 0.75, borderBottom: `1px solid ${alpha(theme.palette.divider, 0.5)}` }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.25, flexWrap: 'wrap' }}>
+                    <Chip
+                      label={l.level}
+                      size="small"
+                      sx={{
+                        height: 18,
+                        fontSize: '0.62rem',
+                        bgcolor:
+                          l.level === 'ERROR' ? alpha(theme.palette.error.main, 0.12)
+                            : l.level === 'WARN' ? alpha(theme.palette.warning.main, 0.12)
+                              : alpha(theme.palette.info.main, 0.12),
+                        color:
+                          l.level === 'ERROR' ? theme.palette.error.main
+                            : l.level === 'WARN' ? theme.palette.warning.main
+                              : theme.palette.info.main,
+                      }}
+                    />
+                    {l.step && (
+                      <Typography sx={{ fontSize: '0.68rem', color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        {l.step}
+                      </Typography>
+                    )}
+                    <Typography sx={{ fontSize: '0.68rem', color: 'text.disabled' }}>
+                      {fmt(l.timestamp)}
+                    </Typography>
+                  </Box>
+                  <Typography sx={{ fontSize: '0.78rem', fontFamily: '"JetBrains Mono", monospace', whiteSpace: 'pre-wrap' }}>
+                    {l.message}
+                  </Typography>
+                </Box>
+              ))
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setLogsJobId(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }

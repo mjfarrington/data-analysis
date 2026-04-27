@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, ConfigDict
 # ─────────────────────────────────────────────────────────────────────────────
 class ExtractConfig(BaseModel):
     # Source selector
-    source_type: str = "datawarehouse"  # jdbc | datawarehouse | json | csv
+    source_type: str = "datawarehouse"  # jdbc | datawarehouse | json | csv | spark_sql | notebook_only
 
     # Unified application list — used by ALL source types.
     # Each entry: {"name": "<display name>", "id": "<app_id>"}
@@ -457,6 +457,17 @@ class TransformJobResponse(TransformJobBase):
     # Resolved names from FK joins
     sql_file_name: Optional[str] = None
     notebook_file_name: Optional[str] = None
+
+
+class TransformJobLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    job_id: int
+    level: str
+    message: str
+    step: Optional[str]
+    timestamp: datetime
+    extra: Optional[dict] = None
 
 
 PipelineResponse.model_rebuild()

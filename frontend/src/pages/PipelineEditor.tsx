@@ -89,6 +89,16 @@ function deriveSparkDatabaseName(businessDate?: string): string {
   return `data_${compact}`
 }
 
+function sqlFileLabel(file?: Pick<SqlFile, 'name' | 'display_name'> | null): string {
+  if (!file) return ''
+  const display = (file.display_name ?? '').trim()
+  if (display) return display
+  const raw = (file.name ?? '').trim()
+  if (!raw) return ''
+  const parts = raw.split('/').filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1] : raw
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Node catalog
 // ─────────────────────────────────────────────────────────────────────────────
@@ -891,7 +901,7 @@ function JdbcSharedConfig({
   const extractSqlFiles = useMemo(
     () => sqlFiles
       .filter(f => f.file_type === 'extract')
-      .sort((a, b) => a.name.localeCompare(b.name)),
+      .sort((a, b) => sqlFileLabel(a).localeCompare(sqlFileLabel(b))),
     [sqlFiles],
   )
   const selectedExtractSql = extractSqlFiles.find(f => f.id === config.sql_file_id) ?? null
@@ -1004,10 +1014,10 @@ function JdbcSharedConfig({
               if (hasInlineSql) onOpenSqlEditor?.()
             }}
             isOptionEqualToValue={(option, value) => option.id === value.id}
-            getOptionLabel={(option) => option.name}
+            getOptionLabel={(option) => sqlFileLabel(option)}
             renderOption={(props, option) => (
               <li {...props}>
-                <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{option.name}</Typography>
+                <Typography variant="body2" sx={{ fontSize: '0.78rem' }}>{sqlFileLabel(option)}</Typography>
               </li>
             )}
             renderInput={(params) => (
@@ -3053,7 +3063,7 @@ function PropertiesPanel({
             <InputLabel>SQL File</InputLabel>
             <Select label="SQL File" value={node.data.config.sql_file_id ?? ''} onChange={e => onChange({ sql_file_id: e.target.value || null })}>
               <MenuItem value=""><em>None</em></MenuItem>
-              {transformSqlFiles.map(f => <MenuItem key={f.id} value={f.id}><Typography sx={{ fontSize: '0.78rem' }}>{f.name}</Typography></MenuItem>)}
+              {transformSqlFiles.map(f => <MenuItem key={f.id} value={f.id}><Typography sx={{ fontSize: '0.78rem' }}>{sqlFileLabel(f)}</Typography></MenuItem>)}
             </Select>
           </FormControl>
           <Button
@@ -3910,6 +3920,7 @@ export default function PipelineEditor() {
   const [activeRunId, setActiveRunId] = useState<number | null>(null)
   const [canvasRunId, setCanvasRunId] = useState<number | null>(null)
   const [showCanvasRunStatus, setShowCanvasRunStatus] = useState(true)
+  const [runActionError, setRunActionError] = useState('')
   const [warnNoBizDate, setWarnNoBizDate] = useState(false)
   const [executionPlanOpen, setExecutionPlanOpen] = useState(false)
   const [runScope, setRunScope] = useState<'full' | 'extract' | 'load'>('full')
@@ -4050,6 +4061,35 @@ export default function PipelineEditor() {
       }
     }
 
+    // Enforce a strict visual lifecycle for live runs:
+    // pending -> running -> completed, with only the current step shown as running.
+    if (runLive) {
+      const mapped = Object.entries(out)
+        .map(([nodeId, meta]) => ({ nodeId, meta, step: meta.stepId ? byStepId.get(meta.stepId) : undefined }))
+        .filter(entry => entry.step)
+
+      const inFlight = mapped
+        .filter(entry => entry.meta.status === 'running' || entry.meta.status === 'pending')
+        .sort((a, b) => (a.step!.step_order - b.step!.step_order))
+
+      if (inFlight.length > 0) {
+        const activeOrder = inFlight[0].step!.step_order
+        for (const entry of mapped) {
+          const step = entry.step!
+          const status = entry.meta.status
+          if (['failed', 'cancelled', 'skipped'].includes(status)) continue
+
+          if (step.step_order < activeOrder) {
+            out[entry.nodeId] = { ...entry.meta, status: 'completed' }
+          } else if (step.step_order === activeOrder) {
+            out[entry.nodeId] = { ...entry.meta, status: 'running' }
+          } else {
+            out[entry.nodeId] = { ...entry.meta, status: status === 'completed' ? 'completed' : 'pending' }
+          }
+        }
+      }
+    }
+
     return out
   }, [activeRunDetail, showCanvasRunStatus, canvasRunId, nodes, edges])
 
@@ -4145,34 +4185,53 @@ export default function PipelineEditor() {
   const runMut = useMutation({
     mutationFn: (scope: 'full' | 'extract' | 'load') => pipelinesApi.run(Number(id), { run_scope: scope }),
     onSuccess: (run) => {
+      setRunActionError('')
       setActiveRunId(run.id)
       qc.invalidateQueries({ queryKey: ['pipelines'] })
       qc.invalidateQueries({ queryKey: ['all-runs'] })
       qc.invalidateQueries({ queryKey: ['pipeline-runs', id] })
+    },
+    onError: (err: any) => {
+      const detail = err?.response?.data?.detail
+      const msg = typeof detail === 'string' ? detail : (err?.message || 'Failed to start pipeline run.')
+      setRunActionError(msg)
     },
   })
 
   const resumeMut = useMutation({
     mutationFn: () => pipelinesApi.run(Number(id), { run_scope: 'full', resume_from_failed: true }),
     onSuccess: (run) => {
+      setRunActionError('')
       setActiveRunId(run.id)
       qc.invalidateQueries({ queryKey: ['pipelines'] })
       qc.invalidateQueries({ queryKey: ['all-runs'] })
       qc.invalidateQueries({ queryKey: ['pipeline-runs', id] })
+    },
+    onError: (err: any) => {
+      const detail = err?.response?.data?.detail
+      const msg = typeof detail === 'string' ? detail : (err?.message || 'Failed to resume pipeline run.')
+      setRunActionError(msg)
     },
   })
 
   const skipMut = useMutation({
     mutationFn: () => pipelinesApi.run(Number(id), { run_scope: 'full', skip_failed_step: true }),
     onSuccess: (run) => {
+      setRunActionError('')
       setActiveRunId(run.id)
       qc.invalidateQueries({ queryKey: ['pipelines'] })
       qc.invalidateQueries({ queryKey: ['all-runs'] })
       qc.invalidateQueries({ queryKey: ['pipeline-runs', id] })
     },
+    onError: (err: any) => {
+      const detail = err?.response?.data?.detail
+      const msg = typeof detail === 'string' ? detail : (err?.message || 'Failed to run with skip failed step.')
+      setRunActionError(msg)
+    },
   })
 
   function handleRunPipeline(scope: 'full' | 'extract' | 'load' = runScope) {
+    setRunActionError('')
     if (!execContext?.business_date) {
       setWarnNoBizDate(true)
       return
@@ -4181,6 +4240,7 @@ export default function PipelineEditor() {
   }
 
   function handleResumeFromFailure() {
+    setRunActionError('')
     if (!execContext?.business_date) {
       setWarnNoBizDate(true)
       return
@@ -4189,6 +4249,7 @@ export default function PipelineEditor() {
   }
 
   function handleSkipFailedStep() {
+    setRunActionError('')
     if (!execContext?.business_date) {
       setWarnNoBizDate(true)
       return
@@ -4338,7 +4399,7 @@ export default function PipelineEditor() {
         onSqlChange: () => {},
         readOnly: true,
         iteratorInfo: sqlFile
-          ? `Previewing SQL Transform file "${sqlFile.name}" against Spark DB "${sourceDb}"${autoMode ? ' (auto from business date)' : ''}.`
+          ? `Previewing SQL Transform file "${sqlFileLabel(sqlFile)}" against Spark DB "${sourceDb}"${autoMode ? ' (auto from business date)' : ''}.`
           : 'Select a SQL file to preview SQL Transform output.',
       }))
       return
@@ -4890,6 +4951,14 @@ export default function PipelineEditor() {
           </IconButton>
         </Tooltip>
       </Box>
+
+      {runActionError && (
+        <Box sx={{ px: 1, py: 0.5, borderBottom: `1px solid ${theme.palette.divider}`, bgcolor: 'background.paper' }}>
+          <Alert severity="error" sx={{ py: 0.4 }}>
+            {runActionError}
+          </Alert>
+        </Box>
+      )}
 
       {/* ── Layout row ──────────────────────────────────────────────── */}
       <Box
