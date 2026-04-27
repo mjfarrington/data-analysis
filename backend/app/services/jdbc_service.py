@@ -30,7 +30,8 @@ def build_sqlalchemy_url(conn) -> str:
     if "url" in extra:
         return str(extra["url"])
     # 2) assemble from fields
-    dialect = extra.get("dialect", "postgresql")
+    default_dialect = "impala" if str(getattr(conn, "conn_type", "")).lower() == "impala" else "postgresql"
+    dialect = extra.get("dialect", default_dialect)
     driver  = extra.get("driver", "")
     scheme  = f"{dialect}+{driver}" if driver else dialect
     password = decrypt_password(conn.password_encrypted) if conn.password_encrypted else None

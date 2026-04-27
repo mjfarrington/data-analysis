@@ -60,7 +60,7 @@ const CONNECTION_LINE_TYPE_BY_STYLE: Record<LineRenderStyle, ConnectionLineType>
 }
 
 function toRunStepType(nodeType: string): string {
-  if (['dw_extract', 'jdbc_extract', 's3_extract', 'iterator', 'csv_extract'].includes(nodeType)) return 'extract'
+  if (['jdbc_extract', 'impala_extract', 's3_extract', 'iterator', 'csv_extract'].includes(nodeType)) return 'extract'
   if (['load_parquet', 'load_sql', 'load_s3'].includes(nodeType)) return 'load'
   return nodeType
 }
@@ -119,8 +119,8 @@ interface CatalogItem {
 
 const CATALOG: CatalogItem[] = [
   { type: 'iterator',         label: 'Iterator',           color: ORCHESTRATION_COLOR,    category: 'source',    icon: <LoopIcon fontSize="inherit" /> },
-  { type: 'dw_extract',       label: 'Datawarehouse',     color: EXTRACT_COLOR,    category: 'source',    icon: <StorageIcon fontSize="inherit" /> , dualHandle: true },
   { type: 'jdbc_extract',     label: 'JDBC Extract',       color: EXTRACT_COLOR,    category: 'source',    icon: <DatasetIcon fontSize="inherit" />, dualHandle: true },
+  { type: 'impala_extract',   label: 'Impala Extract',     color: EXTRACT_COLOR,    category: 'source',    icon: <DatasetIcon fontSize="inherit" />, dualHandle: true },
   { type: 's3_extract',       label: 'S3 Extract',         color: EXTRACT_COLOR,    category: 'source',    icon: <S3Icon fontSize="inherit" /> , dualHandle: true },
   { type: 'filter',        label: 'Filter Rows',        color: TRANSFORM_COLOR,  category: 'transform', icon: <FilterList fontSize="inherit" /> },
   { type: 'join',          label: 'Join',               color: TRANSFORM_COLOR,  category: 'transform', icon: <JoinFull fontSize="inherit" /> },
@@ -159,19 +159,6 @@ const PIPELINE_TEMPLATES: TemplateItem[] = [
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function defaultConfig(type: string): Record<string, any> {
   switch (type) {
-    case 'dw_extract':
-      return {
-        connection_id: null,
-        sql_file_id: null,
-        date_format: 'YYYY-MM-DD',
-        date_range_mode: 'current_month',
-        date_from: '',
-        date_to: '',
-        output_format: 'parquet',
-        sample_data: false,
-        sample_row_limit: 1000,
-        apps: [],
-      }
     case 'iterator':
       return {
         dictionary_id: null,
@@ -186,6 +173,17 @@ function defaultConfig(type: string): Record<string, any> {
         sql: '',
         sql_file_id: null,
         params: [],   // [{key, value}] static params shared across all runs
+        limit: null,
+        chunk_size: 100000,
+        output_subdir: '',
+        date_format: 'YYYY-MM-DD',
+      }
+    case 'impala_extract':
+      return {
+        connection_id: null,
+        sql: '',
+        sql_file_id: null,
+        params: [],
         limit: null,
         chunk_size: 100000,
         output_subdir: '',
@@ -245,14 +243,14 @@ function nodeSummary(type: string, config: Record<string, any>, meta?: { connNam
         filters.length > 0 ? `Filters: ${filters.length}` : 'Filters: none',
       ]
     }
-    case 'dw_extract':
+    case 'jdbc_extract':
       return [
         meta?.connName ? `🔌 ${meta.connName}` : '🔌 No connection',
-        meta?.sqlName  ? `📄 ${meta.sqlName}`   : '📄 No SQL file',
-        `📅 ${config.date_range_mode?.replace('_', ' ') ?? '—'}`,
-        config.sample_data ? `🔬 Sample: ${config.sample_row_limit} rows` : `→ ${config.output_format ?? 'parquet'}`,
+        config.sql || config.sql_file_id ? '📝 SQL configured' : '📝 No SQL',
+        Number(config.limit) > 0 ? `🔢 Limit ${Number(config.limit).toLocaleString()} rows` : '🔢 No row limit',
+        `📦 ${config.chunk_size?.toLocaleString() ?? '100,000'} rows/chunk`,
       ]
-    case 'jdbc_extract':
+    case 'impala_extract':
       return [
         meta?.connName ? `🔌 ${meta.connName}` : '🔌 No connection',
         config.sql || config.sql_file_id ? '📝 SQL configured' : '📝 No SQL',
@@ -1137,6 +1135,8 @@ function JdbcExtractForm({
   sqlFiles,
   dictionaries,
   onOpenSqlEditor,
+  connectionType = 'jdbc',
+  connectionLabel = 'JDBC Connection',
 }: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   config: Record<string, any>
@@ -1146,6 +1146,8 @@ function JdbcExtractForm({
   sqlFiles: SqlFile[]
   dictionaries: Dictionary[]
   onOpenSqlEditor: () => void
+  connectionType?: string
+  connectionLabel?: string
 }) {
   const [extracting, setExtracting] = useState(false)
   const [extractResult, setExtractResult] = useState<{ total_rows: number; file_count: number; output_dir: string } | null>(null)
@@ -1187,8 +1189,8 @@ function JdbcExtractForm({
         connections={connections}
         sqlFiles={sqlFiles}
         dictionaries={dictionaries}
-        connectionType="jdbc"
-        connectionLabel="JDBC Connection"
+        connectionType={connectionType}
+        connectionLabel={connectionLabel}
         onOpenSqlEditor={onOpenSqlEditor}
       />
 
@@ -1400,138 +1402,6 @@ function S3ExtractForm({
           slotProps={{ htmlInput: { style: { fontFamily: 'monospace', fontSize: '0.75rem' } } }}
         />
       </Collapse>
-    </Box>
-  )
-}
-
-function DWExtractForm({
-  config, onChange, connections, sqlFiles, dictionaries, onOpenSqlEditor,
-}: {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  config: Record<string, any>
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  onChange: (patch: Record<string, any>) => void
-  connections: Connection[]
-  sqlFiles: SqlFile[]
-  dictionaries: Dictionary[]
-  onOpenSqlEditor?: () => void
-}) {
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.75 }}>
-
-      <JdbcSharedConfig
-        config={config}
-        onChange={onChange}
-        connections={connections}
-        sqlFiles={sqlFiles}
-        dictionaries={dictionaries}
-        connectionType="datawarehouse"
-        connectionLabel="DataWarehouse Connection"
-        onOpenSqlEditor={onOpenSqlEditor}
-      />
-
-      <Divider />
-
-      {/* Date format */}
-      <FormControl size="small" fullWidth>
-        <InputLabel>Date Format</InputLabel>
-        <Select
-          label="Date Format"
-          value={config.date_format ?? 'YYYY-MM-DD'}
-          onChange={e => onChange({ date_format: e.target.value })}
-        >
-          {['YYYY-MM-DD', 'YYYYMMDD', 'YYYYMM', 'YYYY/MM/DD', 'DD/MM/YYYY', 'MM/DD/YYYY'].map(f => (
-            <MenuItem key={f} value={f}><Typography sx={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{f}</Typography></MenuItem>
-          ))}
-        </Select>
-      </FormControl>
-
-      {/* Date range mode */}
-      <FormControl size="small" fullWidth>
-        <InputLabel>Date Range</InputLabel>
-        <Select
-          label="Date Range"
-          value={config.date_range_mode ?? 'current_month'}
-          onChange={e => onChange({ date_range_mode: e.target.value })}
-        >
-          <MenuItem value="single">Single (business date)</MenuItem>
-          <MenuItem value="current_month">Current Month</MenuItem>
-          <MenuItem value="previous_month">Previous Month</MenuItem>
-          <MenuItem value="custom">Custom Range</MenuItem>
-        </Select>
-      </FormControl>
-
-      {/* Custom range */}
-      {config.date_range_mode === 'custom' && (
-        <Box sx={{ display: 'flex', gap: 1 }}>
-          <TextField
-            label="From"
-            type="date"
-            size="small"
-            value={config.date_from ?? ''}
-            onChange={e => onChange({ date_from: e.target.value })}
-            slotProps={{ inputLabel: { shrink: true } }}
-            sx={{ flex: 1 }}
-          />
-          <TextField
-            label="To"
-            type="date"
-            size="small"
-            value={config.date_to ?? ''}
-            onChange={e => onChange({ date_to: e.target.value })}
-            slotProps={{ inputLabel: { shrink: true } }}
-            sx={{ flex: 1 }}
-          />
-        </Box>
-      )}
-
-      <Divider />
-
-      {/* Output format */}
-      <Box>
-        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, display: 'block', mb: 0.75 }}>
-          Output Format
-        </Typography>
-        <ToggleButtonGroup
-          value={config.output_format ?? 'parquet'}
-          exclusive
-          onChange={(_, v) => v && onChange({ output_format: v })}
-          size="small"
-          fullWidth
-        >
-          <ToggleButton value="parquet" sx={{ fontSize: '0.72rem' }}>Parquet</ToggleButton>
-          <ToggleButton value="sql_table" sx={{ fontSize: '0.72rem' }}>SQL Table</ToggleButton>
-        </ToggleButtonGroup>
-      </Box>
-
-      <Divider />
-
-      {/* Sample data */}
-      <Box>
-        <FormControlLabel
-          control={
-            <Switch
-              size="small"
-              checked={Boolean(config.sample_data)}
-              onChange={e => onChange({ sample_data: e.target.checked })}
-            />
-          }
-          label={<Typography variant="body2" sx={{ fontSize: '0.78rem' }}>Generate Sample Data</Typography>}
-        />
-        {config.sample_data && (
-          <TextField
-            label="Max Rows"
-            type="number"
-            size="small"
-            fullWidth
-            value={config.sample_row_limit ?? 1000}
-            onChange={e => onChange({ sample_row_limit: Number(e.target.value) })}
-            sx={{ mt: 1 }}
-            slotProps={{ htmlInput: { min: 1, max: 100000 } }}
-            helperText="Rows returned when sample mode is enabled"
-          />
-        )}
-      </Box>
     </Box>
   )
 }
@@ -2815,7 +2685,7 @@ function PropertiesPanel({
       visited.add(currentId)
       const current = nodeById.get(currentId)
       if (!current) continue
-      if (current.data.nodeType === 'jdbc_extract' || current.data.nodeType === 'dw_extract') return current
+      if (current.data.nodeType === 'jdbc_extract' || current.data.nodeType === 'impala_extract') return current
       const parents = edges.filter(e => e.target === currentId).map(e => e.source)
       queue.push(...parents)
     }
@@ -2862,7 +2732,7 @@ function PropertiesPanel({
       outputs.push(`Params emitted: $${keyParam}, $${valueParam}`)
     }
 
-    if (node.data.nodeType === 'jdbc_extract' || node.data.nodeType === 'dw_extract') {
+    if (node.data.nodeType === 'jdbc_extract' || node.data.nodeType === 'impala_extract') {
       const sqlConfigured = Boolean((node.data.config?.sql ?? '').trim() || node.data.config?.sql_file_id)
       const outputSubdir = String(node.data.config?.output_subdir ?? '').trim()
       const selectedSqlFile = sqlFiles.find(f => f.id === Number(node.data.config?.sql_file_id))
@@ -3003,11 +2873,20 @@ function PropertiesPanel({
         <IteratorForm config={node.data.config} onChange={onChange} dictionaries={dictionaries}
           onPreview={() => onPreviewIterator(node.id)} />
       )}
-      {node.data.nodeType === 'dw_extract' && (
-        <DWExtractForm config={node.data.config} onChange={onChange} connections={connections} sqlFiles={sqlFiles} dictionaries={dictionaries} onOpenSqlEditor={onOpenSqlEditor} />
-      )}
       {node.data.nodeType === 'jdbc_extract' && (
         <JdbcExtractForm config={node.data.config} onChange={onChange} connections={connections} sqlFiles={sqlFiles} dictionaries={dictionaries} onOpenSqlEditor={onOpenSqlEditor} />
+      )}
+      {node.data.nodeType === 'impala_extract' && (
+        <JdbcExtractForm
+          config={node.data.config}
+          onChange={onChange}
+          connections={connections}
+          sqlFiles={sqlFiles}
+          dictionaries={dictionaries}
+          onOpenSqlEditor={onOpenSqlEditor}
+          connectionType="impala"
+          connectionLabel="Impala Connection"
+        />
       )}
       {node.data.nodeType === 's3_extract' && (
         <S3ExtractForm config={node.data.config} onChange={onChange} connections={connections} />
@@ -3139,14 +3018,14 @@ function PropertiesPanel({
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CONN_TYPE_LABELS: Record<string, string> = {
-  datawarehouse: 'DW',
   jdbc: 'JDBC',
+  impala: 'Impala',
   grpc: 'gRPC',
   rest: 'REST',
   other: 'Other',
 }
 
-const EMPTY_FORM = { name: '', description: '', conn_type: 'datawarehouse', host: '', port: '', database: '', username: '', password: '' }
+const EMPTY_FORM = { name: '', description: '', conn_type: 'jdbc', host: '', port: '', database: '', username: '', password: '', environment: 'PROD' }
 
 function ConnectionsPanel({ onConnectionsChange }: { onConnectionsChange?: () => void }) {
   const qc = useQueryClient()
@@ -3167,13 +3046,25 @@ function ConnectionsPanel({ onConnectionsChange }: { onConnectionsChange?: () =>
 
   const createMut = useMutation({
     mutationFn: (d: typeof form) =>
-      connectionsApi.create({ ...d, port: d.port ? Number(d.port) : undefined }),
+      connectionsApi.create({
+        ...d,
+        host: d.conn_type === 'impala' ? undefined : (d.host || undefined),
+        port: d.conn_type === 'impala' ? undefined : (d.port ? Number(d.port) : undefined),
+        database: d.conn_type === 'impala' ? undefined : (d.database || undefined),
+        extra: d.conn_type === 'impala' ? { datasource: 'IMPALA', dialect: 'impala', environment: d.environment || 'PROD' } : undefined,
+      }),
     onSuccess: () => { refetch(); setEditing(null) },
   })
 
   const updateMut = useMutation({
     mutationFn: (d: typeof form & { id: number }) =>
-      connectionsApi.update(d.id, { ...d, port: d.port ? Number(d.port) : undefined }),
+      connectionsApi.update(d.id, {
+        ...d,
+        host: d.conn_type === 'impala' ? undefined : (d.host || undefined),
+        port: d.conn_type === 'impala' ? undefined : (d.port ? Number(d.port) : undefined),
+        database: d.conn_type === 'impala' ? undefined : (d.database || undefined),
+        extra: d.conn_type === 'impala' ? { datasource: 'IMPALA', dialect: 'impala', environment: d.environment || 'PROD' } : undefined,
+      }),
     onSuccess: () => { refetch(); setEditing(null) },
   })
 
@@ -3190,7 +3081,7 @@ function ConnectionsPanel({ onConnectionsChange }: { onConnectionsChange?: () =>
   function openEdit(c: Connection) {
     setForm({ name: c.name, description: c.description ?? '', conn_type: c.conn_type,
       host: c.host ?? '', port: c.port?.toString() ?? '', database: c.database ?? '',
-      username: c.username ?? '', password: '' })
+      username: c.username ?? '', password: '', environment: String((c.extra as Record<string, unknown> | undefined)?.environment ?? 'PROD') })
     setEditing(c.id)
   }
 
@@ -3304,11 +3195,30 @@ function ConnectionForm({
           {Object.entries(CONN_TYPE_LABELS).map(([v, l]) => <MenuItem key={v} value={v}>{l}</MenuItem>)}
         </Select>
       </FormControl>
-      <TextField label="Host / URL" size="small" fullWidth value={form.host} onChange={e => onChange({ host: e.target.value })} />
-      <Box sx={{ display: 'flex', gap: 1 }}>
-        <TextField label="Port" size="small" sx={{ width: 80 }} value={form.port} onChange={e => onChange({ port: e.target.value })} />
-        <TextField label="Database" size="small" sx={{ flex: 1 }} value={form.database} onChange={e => onChange({ database: e.target.value })} />
-      </Box>
+      {form.conn_type === 'impala' ? (
+        <>
+          <TextField label="Datasource" size="small" fullWidth value="impala" slotProps={{ input: { readOnly: true } }} />
+          <FormControl size="small" fullWidth>
+            <InputLabel>Environment</InputLabel>
+            <Select
+              label="Environment"
+              value={form.environment || 'PROD'}
+              onChange={e => onChange({ environment: e.target.value })}
+            >
+              <MenuItem value="PROD">PROD</MenuItem>
+              <MenuItem value="UAT">UAT</MenuItem>
+            </Select>
+          </FormControl>
+        </>
+      ) : (
+        <>
+          <TextField label="Host / URL" size="small" fullWidth value={form.host} onChange={e => onChange({ host: e.target.value })} />
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <TextField label="Port" size="small" sx={{ width: 80 }} value={form.port} onChange={e => onChange({ port: e.target.value })} />
+            <TextField label="Database" size="small" sx={{ flex: 1 }} value={form.database} onChange={e => onChange({ database: e.target.value })} />
+          </Box>
+        </>
+      )}
       <TextField label="Username" size="small" fullWidth value={form.username} onChange={e => onChange({ username: e.target.value })} />
       <TextField
         label="Password"
@@ -3742,15 +3652,15 @@ export default function PipelineEditor() {
   const setupChecklist = useMemo(() => {
     const iteratorNode = nodes.find(n => n.data.nodeType === 'iterator')
     const jdbcNode = nodes.find(n => n.data.nodeType === 'jdbc_extract')
-    const dwNode = nodes.find(n => n.data.nodeType === 'dw_extract')
+    const impalaNode = nodes.find(n => n.data.nodeType === 'impala_extract')
     const s3Node = nodes.find(n => n.data.nodeType === 's3_extract')
     const csvNode = nodes.find(n => n.data.nodeType === 'csv_extract' || n.data.nodeType === 'json_extract')
     const aggregateNode = nodes.find(n => n.data.nodeType === 'aggregate')
     const loadNode = nodes.find(n => ['load_sql', 'load_parquet'].includes(n.data.nodeType))
     const sqlTransformNodes = nodes.filter(n => n.data.nodeType === 'sql_transform')
-    const hasSourceNode = Boolean(jdbcNode || dwNode || s3Node || csvNode)
+    const hasSourceNode = Boolean(jdbcNode || impalaNode || s3Node || csvNode)
 
-    const sourceTypes = new Set(['jdbc_extract', 'dw_extract', 's3_extract', 'csv_extract', 'json_extract'])
+    const sourceTypes = new Set(['jdbc_extract', 'impala_extract', 's3_extract', 'csv_extract', 'json_extract'])
     const loadTypes = new Set(['load_sql', 'load_parquet'])
     const outEdges = new Map<string, string[]>()
     for (const n of nodes) outEdges.set(n.id, [])
@@ -3798,6 +3708,19 @@ export default function PipelineEditor() {
       })
     }
 
+    if (impalaNode) {
+      items.push({
+        key: 'impala-conn',
+        label: 'Impala connection selected',
+        ok: Boolean(impalaNode.data.config?.connection_id),
+      })
+      items.push({
+        key: 'impala-sql',
+        label: 'Impala SQL configured (inline or file)',
+        ok: Boolean((impalaNode.data.config?.sql ?? '').trim() || impalaNode.data.config?.sql_file_id),
+      })
+    }
+
     if (aggregateNode) {
       items.push({
         key: 'agg-present',
@@ -3823,21 +3746,6 @@ export default function PipelineEditor() {
             if (!mode && /^data_\d{8}$/.test(configured)) return true
             return Boolean(configured)
           }),
-        })
-      }
-    }
-
-    if (loadNode) {
-      items.push({
-        key: 'load-present',
-        label: 'Load node is configured',
-        ok: true,
-      })
-      if (loadNode.data.nodeType === 'load_sql') {
-        items.push({
-          key: 'load-spark-table',
-          label: 'Spark table name is set',
-          ok: Boolean((loadNode.data.config?.table_name ?? '').trim()),
         })
       }
     }
@@ -4110,7 +4018,6 @@ export default function PipelineEditor() {
   }, [nodes, canvasNodeRunMap, showCanvasRunStatus])
 
   function buildPipelineRequestPayload(name: string, category: string, status: Pipeline['status']) {
-    const dwNode = nodes.find(n => n.data.nodeType === 'dw_extract')
     const loadNode =
       nodes.find(n => n.data.nodeType === 'load_sql')
       ?? nodes.find(n => n.data.nodeType === 'load_parquet')
@@ -4134,16 +4041,14 @@ export default function PipelineEditor() {
       .map(n => ({ node_id: n.id, node_type: n.data.nodeType, config: n.data.config }))
 
     const jdbcNode = nodes.find(n => n.data.nodeType === 'jdbc_extract')
+    const impalaNode = nodes.find(n => n.data.nodeType === 'impala_extract')
 
-    const extract_config = dwNode ? {
-      source_type: 'datawarehouse',
-      dw_connection_id: dwNode.data.config.connection_id,
-      jdbc_sql_file_id: dwNode.data.config.sql_file_id,
-      jdbc_date_var_format: dwNode.data.config.date_format,
-      jdbc_date_range_mode: dwNode.data.config.date_range_mode,
-      jdbc_date_range_from: dwNode.data.config.date_from,
-      jdbc_date_range_to: dwNode.data.config.date_to,
-      output_format: dwNode.data.config.output_format,
+    const extract_config = impalaNode ? {
+      source_type: 'impala',
+      jdbc_connection_id: impalaNode.data.config.connection_id,
+      jdbc_sql: impalaNode.data.config.sql || undefined,
+      jdbc_sql_file_id: impalaNode.data.config.sql_file_id || undefined,
+      jdbc_date_var_format: impalaNode.data.config.date_format,
     } : jdbcNode ? {
       source_type: 'jdbc',
       jdbc_connection_id: jdbcNode.data.config.connection_id,
@@ -4259,7 +4164,7 @@ export default function PipelineEditor() {
 
   function handleRunSelectedStep() {
     if (!selectedNode) return
-    const sourceNodeTypes = new Set(['iterator', 'jdbc_extract', 'dw_extract', 's3_extract'])
+    const sourceNodeTypes = new Set(['iterator', 'jdbc_extract', 'impala_extract', 's3_extract'])
     const targetScope: 'extract' | 'load' = sourceNodeTypes.has(selectedNode.data.nodeType) ? 'extract' : 'load'
     handleRunPipeline(targetScope)
   }
@@ -5294,7 +5199,7 @@ export default function PipelineEditor() {
         businessDate={execContext?.business_date}
         panel={(() => {
           const base = { ...sqlPanel }
-          if (selectedNode?.data?.nodeType !== 'jdbc_extract') return base
+          if (selectedNode?.data?.nodeType !== 'jdbc_extract' && selectedNode?.data?.nodeType !== 'impala_extract') return base
           base.connectionId = selectedNode.data.config?.connection_id ?? null
           const ownParams: { key: string; value: string }[] = selectedNode.data.config?.params ?? []
           // Look for an upstream Iterator node connected to this JDBC Extract

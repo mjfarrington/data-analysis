@@ -537,7 +537,7 @@ export default function Pipelines() {
 
   const createMut = useMutation({
     mutationFn: ({ name, category }: { name: string; category: string }) =>
-      pipelinesApi.create({ name, category: normalizePipelineCategory(category), status: 'draft', source_type: 'datawarehouse', load_target: 'parquet' }),
+      pipelinesApi.create({ name, category: normalizePipelineCategory(category), status: 'draft', source_type: 'jdbc', load_target: 'parquet' }),
     onSuccess: (pipeline) => { qc.invalidateQueries({ queryKey: ['pipelines'] }); navigate(`/pipelines/${pipeline.id}/edit`) },
   })
 

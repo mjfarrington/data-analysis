@@ -12,7 +12,7 @@ import { RunDetail, RunStep, Pipeline } from '../api/client'
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const NODE_COLOR: Record<string, string> = {
-  dw_extract: '#58a6ff', jdbc_extract: '#58a6ff', s3_extract: '#3fb950',
+  jdbc_extract: '#58a6ff', impala_extract: '#58a6ff', s3_extract: '#3fb950',
   iterator: '#58a6ff', csv_extract: '#58a6ff',
   filter: '#e3b341', sort: '#e3b341', aggregate: '#e3b341',
   sql_transform: '#c0c7d1', lookup: '#e3b341', join: '#e3b341',
@@ -32,7 +32,7 @@ const STATUS_COLOR: Record<string, string> = {
 
 /** Map canvas nodeType → run step_type */
 function toStepType(nodeType: string): string {
-  if (['dw_extract', 'jdbc_extract', 's3_extract', 'iterator', 'csv_extract'].includes(nodeType))
+  if (['jdbc_extract', 'impala_extract', 's3_extract', 'iterator', 'csv_extract'].includes(nodeType))
     return 'extract'
   if (['load_parquet', 'load_sql'].includes(nodeType))
     return 'load'

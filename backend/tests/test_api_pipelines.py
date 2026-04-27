@@ -22,7 +22,7 @@ BASE = "/api/v1/etl"
 
 # ─── Helper factories ─────────────────────────────────────────────────────────
 
-def _pipeline_payload(name: str = "Test Pipeline", source_type: str = "datawarehouse") -> dict:
+def _pipeline_payload(name: str = "Test Pipeline", source_type: str = "jdbc") -> dict:
     return {
         "name": name,
         "description": "Automated test pipeline",

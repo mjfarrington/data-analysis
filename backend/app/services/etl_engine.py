@@ -1,6 +1,6 @@
 """
 ETL Execution Engine — orchestrates Extract, Transform, Load pipelines.
-Supports sources: JDBC (SQLAlchemy), DataWarehouse, JSON, CSV.
+Supports sources: JDBC/Impala (SQLAlchemy), JSON, CSV.
 Runs asynchronously and emits log events via an asyncio queue.
 """
 from __future__ import annotations
@@ -570,200 +570,6 @@ async def _extract_jdbc(
         date_str,
         cfg.jdbc_row_limit,
     )
-
-
-async def _extract_datawarehouse(
-    cfg: ExtractConfig,
-    date_str: Optional[str],
-    log_fn,
-    db: AsyncSession,
-    business_date: Optional[str] = None,
-    app_id: Optional[str] = None,
-    app_name: Optional[str] = None,
-    rows_per_segment: int = 100_000,
-) -> tuple[list[dict], float]:
-    """Extract records from a DataWarehouse connection (Impala or Spark).
-
-    Returns (records, segment_delay_s) where segment_delay_s is an optional
-    per-segment sleep injected by the DUMMY datasource for testing.
-    """
-    if not cfg.dw_connection_id:
-        raise ValueError("DataWarehouse source requires a named connection (dw_connection_id).")
-    from app.models.etl import Connection as ConnModel
-    from app.services.crypto import decrypt_password
-
-    conn = await db.get(ConnModel, cfg.dw_connection_id)
-    if not conn:
-        raise ValueError(f"DataWarehouse connection ID {cfg.dw_connection_id} not found.")
-    extra = conn.extra or {}
-    datasource = str(extra.get("datasource", "IMPALA")).upper()
-    timeout_ms = int(extra.get("timeout", 30000))
-    uppercase_columns = bool(extra.get("uppercase_columns", False))
-    extra_params = dict(extra.get("params", {}))
-    segment_delay_s = float(extra_params.get("dummy_segment_delay", 0.0)) if datasource == "DUMMY" else 0.0
-    password = decrypt_password(conn.password_encrypted) if conn.password_encrypted else None
-
-    sql = await _resolve_sql(cfg, db, business_date=business_date, app_id=app_id, app_name=app_name)
-    await log_fn(
-        f"  DataWarehouse ({datasource}) env={extra.get('environment', '?')} "
-        f"user={conn.username!r} — SQL {len(sql)} chars"
-        + (f" [segment_delay={segment_delay_s}s]" if segment_delay_s else ""),
-        step="extract",
-    )
-    records = await asyncio.to_thread(
-        _read_dw_sync,
-        conn.host,
-        conn.port,
-        conn.username,
-        password,
-        datasource,
-        timeout_ms,
-        uppercase_columns,
-        extra_params,
-        sql,
-        rows_per_segment,
-    )
-    return records, segment_delay_s
-
-
-def _read_dw_sync(
-    host: Optional[str],
-    port: Optional[int],
-    username: Optional[str],
-    password: Optional[str],
-    datasource: str,
-    timeout_ms: int,
-    uppercase_columns: bool,
-    extra_params: dict,
-    sql: str,
-    rows_per_segment: int = 100_000,
-) -> list[dict]:
-    """Synchronous DataWarehouse query (runs in a thread pool)."""
-    import pandas as pd
-
-    timeout_s = max(1, timeout_ms // 1000) if timeout_ms else 30
-
-    if datasource == "IMPALA":
-        from impala.dbapi import connect  # type: ignore[import]
-        cx = connect(
-            host=host or "",
-            port=port or 21050,
-            user=username,
-            password=password,
-            timeout=timeout_s,
-            **extra_params,
-        )
-        df = pd.read_sql(sql, cx)
-        cx.close()
-    elif datasource == "SPARK":
-        from pyspark.sql import SparkSession  # type: ignore[import]
-        spark = SparkSession.builder.getOrCreate()
-        df = spark.sql(sql).toPandas()
-    elif datasource == "DUMMY":
-        import hashlib as _hashlib
-        import random as _random
-        import datetime as _dt
-        import re as _re
-
-        num_segs = int(extra_params.get("dummy_num_segments", 0))
-        row_count = (
-            num_segs * rows_per_segment
-            if num_segs > 0
-            else int(extra_params.get("dummy_row_count", 500_000))
-        )
-
-        # Parse column specs from SELECT ... FROM.
-        # Each entry is (col_name, fixed_value_or_None).  A fixed value is set
-        # when the SELECT expression is a literal (e.g. injected $business_date
-        # becomes 20260416) so those columns keep the injected value instead of
-        # having fake data generated for them.
-        col_specs: list[tuple[str, object]] = []
-        select_match = _re.search(r'\bSELECT\b(.*?)\bFROM\b', sql, _re.IGNORECASE | _re.DOTALL)
-        if select_match:
-            select_body = select_match.group(1).strip()
-            if select_body.strip() == '*':
-                col_specs = [(f"col_{i}", None) for i in range(1, 6)]
-            else:
-                for part in _re.split(r',(?![^()]*\))', select_body):
-                    part = part.strip()
-                    alias_m = _re.search(r'\bAS\s+`?(\w+)`?\s*$', part, _re.IGNORECASE)
-                    expr = part[:alias_m.start()].strip() if alias_m else part
-                    col_name = alias_m.group(1) if alias_m else None
-
-                    # Detect literal values produced by $variable injection
-                    fixed_value: object = None
-                    quoted_m = _re.fullmatch(r"""['"](.*?)['"]""", expr)
-                    if quoted_m:
-                        fixed_value = quoted_m.group(1)
-                    elif _re.fullmatch(r'\d{4}-\d{2}-\d{2}', expr):   # YYYY-MM-DD
-                        fixed_value = expr
-                    elif _re.fullmatch(r'\d{4}/\d{2}/\d{2}', expr):   # YYYY/MM/DD
-                        fixed_value = expr
-                    elif _re.fullmatch(r'\d{2}/\d{2}/\d{4}', expr):   # DD/MM/YYYY or MM/DD/YYYY
-                        fixed_value = expr
-                    elif _re.fullmatch(r'\d{6,8}', expr):              # YYYYMMDD / YYYYMM
-                        fixed_value = expr
-                    elif _re.fullmatch(r'-?\d+\.\d+', expr):
-                        fixed_value = float(expr)
-                    elif _re.fullmatch(r'-?\d+', expr):
-                        fixed_value = int(expr)
-
-                    if not col_name:
-                        bare = _re.sub(r'\(.*?\)', '', part).strip()
-                        word = _re.split(r'[\s.]+', bare)[-1].strip('`"\'') if bare else ''
-                        col_name = word if word else None
-
-                    if col_name:
-                        col_specs.append((col_name, fixed_value))
-
-        if not col_specs:
-            col_specs = [(f"col_{i}", None) for i in range(1, 6)]
-
-        columns = [c for c, _ in col_specs]
-
-        # Deterministic RNG seeded from the SQL text so re-runs are consistent
-        seed = int(_hashlib.md5(sql.encode()).hexdigest(), 16) % (2 ** 31)
-        rng = _random.Random(seed)
-
-        _STATUSES = ["ACTIVE", "INACTIVE", "PENDING", "CLOSED", "PROCESSING"]
-        _NAMES = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta"]
-        _REGIONS = ["NORTH", "SOUTH", "EAST", "WEST", "CENTRAL"]
-        _CURRENCIES = ["GBP", "USD", "EUR", "JPY"]
-
-        def _fake(col: str, row_idx: int) -> object:
-            n = col.lower()
-            if _re.search(r'(^id$|_id$|_key$|_ref$)', n):
-                return row_idx + 1
-            if _re.search(r'(date|_dt$)', n):
-                base = _dt.date(2026, 1, 1)
-                return str(base.replace(month=rng.randint(1, 12), day=rng.randint(1, 28)))
-            if _re.search(r'(name|desc|label|title|category)', n):
-                return rng.choice(_NAMES)
-            if _re.search(r'(amount|value|price|rate|total|sum|balance)', n):
-                return round(rng.uniform(10.0, 10000.0), 2)
-            if _re.search(r'(status|state|type|flag)', n):
-                return rng.choice(_STATUSES)
-            if _re.search(r'(region|area|zone)', n):
-                return rng.choice(_REGIONS)
-            if _re.search(r'(currency|ccy)', n):
-                return rng.choice(_CURRENCIES)
-            if _re.search(r'(count|num|qty|quantity|segment)', n):
-                return rng.randint(1, 999)
-            if _re.search(r'(is_|has_|active|enabled)', n):
-                return rng.randint(0, 1)
-            return f"VAL_{rng.randint(1000, 9999)}"
-
-        records = [
-            {col: (fixed if fixed is not None else _fake(col, i)) for col, fixed in col_specs}
-            for i in range(row_count)
-        ]
-        df = pd.DataFrame(records)
-    else:
-        raise ValueError(f"Unsupported DataWarehouse datasource: {datasource!r}")
-
-    if uppercase_columns:
-        df.columns = [c.upper() for c in df.columns]  # type: ignore[assignment]
-    return df.to_dict(orient="records")
 
 
 def _read_file_sync(
@@ -1985,23 +1791,16 @@ async def execute_pipeline(
                             },
                         )
 
-                        if source == "jdbc":
+                        if source in ("jdbc", "impala"):
                             all_records = await _extract_jdbc(
                                 plan_extract_cfg, date_str, log, db,
                                 business_date=business_date, app_id=app_id,
                             )
-                            _dw_segment_delay = 5.0  # simulate processing time per chunk
-                        elif source == "datawarehouse":
-                            all_records, _dw_segment_delay = await _extract_datawarehouse(
-                                plan_extract_cfg, date_str, log, db,
-                                business_date=business_date, app_id=app_id, app_name=app_name,
-                                rows_per_segment=plan_rows_per_seg,
-                            )
-                        else:
+                            _dw_segment_delay = 5.0  # simulate processing time per chunk                        else:
                             if source not in ("csv", "json"):
                                 raise ValueError(
                                     f"Source type '{source}' is not supported. "
-                                    "Please edit the pipeline and select a valid source (JDBC, DataWarehouse, CSV or JSON)."
+                                    "Please edit the pipeline and select a valid source (JDBC, Impala, CSV or JSON)."
                                 )
                             all_records = await _extract_file(plan_extract_cfg, log)
                             _dw_segment_delay = 0.0
@@ -2029,7 +1828,7 @@ async def execute_pipeline(
                         _jdbc_output_dir: Optional[Path] = None
 
                         # Rerun safety: clear stale output files for this app/date before writing.
-                        if source == "jdbc":
+                        if source in ("jdbc", "impala"):
                             _jdbc_output_dir = _resolve_parquet_output_dir(
                                 plan_extract_cfg, date_str, plan_job_name, app_id,
                                 settings.parquet_path,
@@ -2094,7 +1893,7 @@ async def execute_pipeline(
                             if _seg_delay:
                                 await asyncio.sleep(_seg_delay)
                             try:
-                                if source == "jdbc":
+                                if source in ("jdbc", "impala"):
                                     # Always persist raw extract chunks to parquet via pyarrow
                                     # so reload/load-only runs have durable extract output.
                                     from app.services.jdbc_service import (

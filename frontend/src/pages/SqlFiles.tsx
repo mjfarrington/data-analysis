@@ -44,7 +44,7 @@ interface SqlWorkspaceTabsState {
   activeFileId: number | null
 }
 
-type SqlSourceType = 'datawarehouse' | 'jdbc'
+type SqlSourceType = 'jdbc' | 'impala'
 
 interface SqlFileMetadata {
   source_type?: SqlSourceType
@@ -71,7 +71,7 @@ function parseSqlFileMetadata(description?: string): SqlFileMetadata {
   try {
     const parsed = JSON.parse(raw) as SqlFileMetadata
     const out: SqlFileMetadata = {}
-    if (parsed.source_type === 'datawarehouse' || parsed.source_type === 'jdbc') {
+    if (parsed.source_type === 'jdbc' || parsed.source_type === 'impala') {
       out.source_type = parsed.source_type
     }
     if (Number.isInteger(parsed.source_connection_id) && Number(parsed.source_connection_id) > 0) {
@@ -86,7 +86,7 @@ function parseSqlFileMetadata(description?: string): SqlFileMetadata {
 
 function buildSqlFileMetadataDescription(meta: SqlFileMetadata): string | undefined {
   const payload: SqlFileMetadata = {}
-  if (meta.source_type === 'datawarehouse' || meta.source_type === 'jdbc') {
+  if (meta.source_type === 'jdbc' || meta.source_type === 'impala') {
     payload.source_type = meta.source_type
   }
   if (Number.isInteger(meta.source_connection_id) && Number(meta.source_connection_id) > 0) {
@@ -256,7 +256,7 @@ export default function SqlFiles() {
   const [metadataDisplayName, setMetadataDisplayName] = useState('')
   const [metadataFilename, setMetadataFilename] = useState('')
   const [metadataFileType, setMetadataFileType] = useState('extract')
-  const [metadataSourceType, setMetadataSourceType] = useState<SqlSourceType>('datawarehouse')
+  const [metadataSourceType, setMetadataSourceType] = useState<SqlSourceType>('jdbc')
   const [metadataConnectionId, setMetadataConnectionId] = useState<number | ''>('')
   const [metadataNotes, setMetadataNotes] = useState('')
 
@@ -451,7 +451,7 @@ export default function SqlFiles() {
     setMetadataDisplayName(activeDraft.display_name)
     setMetadataFilename(activeDraft.name)
     setMetadataFileType(activeDraft.file_type)
-    setMetadataSourceType(meta.source_type ?? 'datawarehouse')
+    setMetadataSourceType(meta.source_type ?? 'jdbc')
     setMetadataConnectionId(meta.source_connection_id ?? '')
     setMetadataNotes(meta.notes ?? '')
     setMetadataOpen(true)
@@ -1225,8 +1225,8 @@ export default function SqlFiles() {
             size="small"
             fullWidth
           >
-            <MenuItem value="datawarehouse">Datawarehouse</MenuItem>
             <MenuItem value="jdbc">JDBC</MenuItem>
+            <MenuItem value="impala">Impala</MenuItem>
           </TextField>
           <TextField
             select

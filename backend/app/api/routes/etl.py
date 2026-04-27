@@ -168,7 +168,7 @@ def _build_canvas_source_branches(canvas: dict, base_job_name: str) -> list[dict
             if in_deg[nxt] == 0:
                 queue.append(nxt)
 
-    source_types = {"jdbc_extract", "dw_extract", "s3_extract"}
+    source_types = {"jdbc_extract", "impala_extract", "s3_extract"}
     transform_types = {"filter", "join", "sort", "lookup", "sql_transform", "aggregate", "notebook_transform"}
     load_types = {"load_sql", "load_parquet"}
 
@@ -270,9 +270,9 @@ def _build_canvas_source_branches(canvas: dict, base_job_name: str) -> list[dict
         extract_overrides: dict = {}
         load_overrides: dict = {}
 
-        if node_type == "jdbc_extract":
+        if node_type in {"jdbc_extract", "impala_extract"}:
             extract_overrides.update({
-                "source_type": "jdbc",
+                "source_type": "impala" if node_type == "impala_extract" else "jdbc",
                 "jdbc_connection_id": int(cfg.get("connection_id")) if cfg.get("connection_id") is not None else None,
                 "jdbc_sql": cfg.get("sql") or None,
                 "jdbc_sql_file_id": int(cfg.get("sql_file_id")) if cfg.get("sql_file_id") else None,
@@ -281,16 +281,6 @@ def _build_canvas_source_branches(canvas: dict, base_job_name: str) -> list[dict
             chunk_size = cfg.get("chunk_size")
             if chunk_size:
                 extract_overrides["rows_per_segment"] = int(chunk_size)
-        elif node_type == "dw_extract":
-            extract_overrides.update({
-                "source_type": "datawarehouse",
-                "dw_connection_id": int(cfg.get("connection_id")) if cfg.get("connection_id") is not None else None,
-                "jdbc_sql_file_id": int(cfg.get("sql_file_id")) if cfg.get("sql_file_id") else None,
-                "jdbc_date_var_format": cfg.get("date_format") or "YYYY-MM-DD",
-                "jdbc_date_range_mode": cfg.get("date_range_mode") or "current_month",
-                "jdbc_date_range_from": cfg.get("date_from") or None,
-                "jdbc_date_range_to": cfg.get("date_to") or None,
-            })
         elif node_type == "s3_extract":
             extract_overrides.update({
                 "source_type": "s3",
@@ -434,7 +424,7 @@ def _validate_supported_canvas_shape(canvas: dict) -> list[str]:
     def _type(nid: str) -> str:
         return str((node_by_id.get(nid, {}).get("data") or {}).get("nodeType") or "")
 
-    source_types = {"jdbc_extract", "dw_extract", "s3_extract", "csv_extract", "json_extract"}
+    source_types = {"jdbc_extract", "impala_extract", "s3_extract", "csv_extract", "json_extract"}
     load_types = {"load_sql", "load_parquet"}
     issues: list[str] = []
 
@@ -477,7 +467,7 @@ async def _apply_canvas_to_extract_cfg(
     The canvas is the source of truth.  The stored extract_config is a legacy
     field that may be stale.  This function reads:
       - iterator node  → app list (from dictionary entries for selected_keys)
-      - jdbc_extract   → source_type, connection, SQL, chunk_size
+    - jdbc_extract / impala_extract → source_type, connection, SQL, chunk_size
     """
     from app.schemas.etl import ExtractConfig as _ExtractConfig
     from sqlalchemy import select as _sel
@@ -542,8 +532,8 @@ async def _apply_canvas_to_extract_cfg(
                     apps = [{"id": str(e.key), "name": str(e.value)} for e in entries]
                 updates["apps"] = apps
 
-        elif node_type == "jdbc_extract":
-            updates["source_type"] = "jdbc"
+        elif node_type in {"jdbc_extract", "impala_extract"}:
+            updates["source_type"] = "impala" if node_type == "impala_extract" else "jdbc"
             conn_id = cfg.get("connection_id")
             if conn_id is not None:
                 updates["jdbc_connection_id"] = int(conn_id)
@@ -774,7 +764,7 @@ async def trigger_run(
     canvas = pipeline.canvas_config or {}
     canvas_nodes = canvas.get("nodes") or []
     if canvas_nodes:
-        source_types = {"jdbc_extract", "dw_extract", "s3_extract", "csv_extract", "json_extract"}
+        source_types = {"jdbc_extract", "impala_extract", "s3_extract", "csv_extract", "json_extract"}
         load_types = {"load_sql", "load_parquet"}
         node_types = [str((n.get("data") or {}).get("nodeType") or "") for n in canvas_nodes]
         has_source_node = any(
@@ -867,7 +857,7 @@ async def trigger_run(
                         if has_notebook_transform else
                         (
                             "Pipeline canvas has no source extract node. Add a source node "
-                            "(JDBC, DataWarehouse, S3, CSV or JSON) upstream of transforms/load."
+                            "(JDBC, Impala, S3, CSV or JSON) upstream of transforms/load."
                         )
                     ),
                 )
@@ -1346,7 +1336,7 @@ async def get_pipeline_graph(db: AsyncSession = Depends(get_db)):
             name=p.name,
             description=p.description,
             status=p.status,
-            source_type=(p.extract_config or {}).get("source_type", "datawarehouse"),
+            source_type=(p.extract_config or {}).get("source_type", "jdbc"),
             last_run_status=last_run_by_pipeline.get(p.id),
             app_names=_app_names(p.extract_config or {}),
             load_target=(p.load_config or {}).get("target", "parquet"),

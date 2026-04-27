@@ -26,6 +26,7 @@ structlog>=24.1.0
 psycopg2-binary>=2.9.9
 # JDBC via JayDeBeApi (uses JPype1 JVM bridge)
 #JPype1>=1.5.0
+--only-binary :all: JPype1
 JayDeBeApi>=1.2.3
 # S3 support
 boto3>=1.42.0

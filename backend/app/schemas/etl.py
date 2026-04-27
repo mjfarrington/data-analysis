@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, ConfigDict
 # ─────────────────────────────────────────────────────────────────────────────
 class ExtractConfig(BaseModel):
     # Source selector
-    source_type: str = "datawarehouse"  # jdbc | datawarehouse | json | csv | spark_sql | notebook_only
+    source_type: str = "jdbc"  # jdbc | impala | json | csv | spark_sql | notebook_only
 
     # Unified application list — used by ALL source types.
     # Each entry: {"name": "<display name>", "id": "<app_id>"}
@@ -34,22 +34,19 @@ class ExtractConfig(BaseModel):
 
     # JDBC source
     jdbc_url: Optional[str] = None            # SQLAlchemy connection string
-    jdbc_connection_id: Optional[int] = None  # named Connection (conn_type=jdbc)
+    jdbc_connection_id: Optional[int] = None  # named Connection (conn_type=jdbc|impala)
     jdbc_sql_file_id: Optional[int] = None    # reference to SqlFile.id
     jdbc_sql: Optional[str] = None            # inline SQL (alternative to file)
     jdbc_table: Optional[str] = None          # simple table name (no SQL needed)
     jdbc_date_column: Optional[str] = None    # column used for date filtering
 
-    # SQL variable injection (JDBC + DataWarehouse)
+    # SQL variable injection (JDBC + Impala)
     # Placeholders resolved at run time: $business_date, $business_date_from,
     # $business_date_to, $business_date_range
     jdbc_date_var_format: str = "YYYYMMDD"   # YYYYMMDD | YYYY-MM-DD | YYYYMM | YYYY/MM/DD | DD/MM/YYYY | MM/DD/YYYY
     jdbc_date_range_mode: str = "single"     # single | current_month | previous_month | custom
     jdbc_date_range_from: Optional[str] = None   # YYYY-MM-DD (custom range start)
     jdbc_date_range_to: Optional[str] = None     # YYYY-MM-DD (custom range end)
-
-    # DataWarehouse source
-    dw_connection_id: Optional[int] = None   # named Connection (conn_type=datawarehouse)
 
     # S3 source
     s3_connection_id: Optional[int] = None   # named Connection (conn_type=s3)
@@ -646,7 +643,7 @@ class PipelineGraph(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 # Connection schemas
 # ─────────────────────────────────────────────────────────────────────────────
-CONNECTION_TYPES = ("jdbc", "grpc", "rest", "other", "datawarehouse", "s3")
+CONNECTION_TYPES = ("jdbc", "impala", "grpc", "rest", "other", "s3")
 
 
 class ConnectionCreate(BaseModel):

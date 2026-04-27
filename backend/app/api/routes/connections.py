@@ -147,7 +147,8 @@ class AdhocTestRequest(BaseModel):
 async def test_connection_adhoc(body: AdhocTestRequest):
     """Test a connection using form values directly (no saved record needed)."""
     extra = body.extra or {}
-    dialect = extra.get("dialect", "postgresql")
+    default_dialect = "impala" if str(body.conn_type).lower() == "impala" else "postgresql"
+    dialect = extra.get("dialect", default_dialect)
     driver  = extra.get("driver", "")
     scheme  = f"{dialect}+{driver}" if driver else dialect
 
@@ -381,101 +382,6 @@ async def foreach_extract(
             ))
 
     return results
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Datawarehouse — test
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.post("/{conn_id}/test-dw")
-async def test_dw_connection(
-    conn_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """Test a datawarehouse-type connection using the bespoke library."""
-    from app.services import datawarehouse_service
-
-    conn = await db.get(Connection, conn_id)
-    if not conn:
-        raise HTTPException(status_code=404, detail="Connection not found")
-    if conn.conn_type != "datawarehouse":
-        raise HTTPException(status_code=400, detail="Connection is not of type 'datawarehouse'")
-
-    config = datawarehouse_service.config_from_connection(conn)
-    return await datawarehouse_service.test_connection(config)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Datawarehouse — streaming extract (SSE)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class DWExtractRequest(BaseModel):
-    sql:            str
-    chunk_size:     int = 100_000
-    output_subdir:  Optional[str] = None
-    output_format:  str = "parquet"   # "parquet" | "csv"
-
-
-@router.post("/{conn_id}/extract-dw")
-async def extract_dw_stream(
-    conn_id: int,
-    body: DWExtractRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Stream a datawarehouse extraction as Server-Sent Events.
-
-    Each SSE message carries a JSON payload with an 'event' field:
-      connected | schema | chunk | done | error
-
-    The client should consume this endpoint with EventSource or fetch+ReadableStream.
-    """
-    from fastapi.responses import StreamingResponse
-    from app.services import datawarehouse_service
-
-    conn = await db.get(Connection, conn_id)
-    if not conn:
-        raise HTTPException(status_code=404, detail="Connection not found")
-    if conn.conn_type != "datawarehouse":
-        raise HTTPException(status_code=400, detail="Connection is not of type 'datawarehouse'")
-
-    stripped = body.sql.strip().upper()
-    if not stripped.startswith("SELECT") and not stripped.startswith("WITH"):
-        raise HTTPException(status_code=400, detail="Only SELECT / WITH statements are allowed")
-
-    # Resolve output directory
-    if body.output_subdir:
-        safe = re.sub(r"[^a-zA-Z0-9_\-/]", "_", body.output_subdir)
-        output_dir = Path(settings.PARQUET_DIR) / safe
-    else:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", conn.name)
-        output_dir = Path(settings.PARQUET_DIR) / f"{safe_name}_{ts}"
-
-    try:
-        fmt = datawarehouse_service.OutputFormat(body.output_format)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid output_format '{body.output_format}'. Use 'parquet' or 'csv'.")
-
-    config = datawarehouse_service.config_from_connection(conn)
-
-    async def event_stream():
-        import json
-        # Emit a "connected" heartbeat immediately so the client knows the stream opened
-        yield f"data: {json.dumps({'event': 'connected', 'message': f'Starting extract for connection {conn.name}'})}\n\n"
-        async for line in datawarehouse_service.extract_stream_async(
-            config, body.sql, output_dir, body.chunk_size, fmt
-        ):
-            yield line
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # disable nginx buffering if present
-        },
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

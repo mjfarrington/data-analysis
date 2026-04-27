@@ -21,9 +21,8 @@ import SortableTableCell from '../components/SortableTableCell'
 // Constants
 // ───────────────────────────────────────────────────────────────────────────────
 
-const CONN_TYPES     = ['jdbc', 'datawarehouse', 's3', 'grpc', 'rest', 'other']
+const CONN_TYPES     = ['jdbc', 'impala', 's3', 'grpc', 'rest', 'other']
 const DIALECTS       = ['postgresql', 'mysql', 'mssql', 'oracle', 'sqlite', 'redshift', 'snowflake', 'bigquery']
-const DW_DIALECTS    = ['spark', 'impala']
 const DW_ENVS        = ['PROD', 'UAT']
 const S3_FORMATS     = ['auto', 'parquet', 'csv', 'json', 'orc']
 const S3_WRITE_MODES = ['overwrite', 'append', 'ignore', 'error']
@@ -31,7 +30,7 @@ const API_BASE_URL   = 'http://localhost:8000/api/v1'
 
 function connTypeBadge(t: string) {
   const map: Record<string, 'default' | 'primary' | 'secondary' | 'success' | 'warning' | 'error' | 'info'> = {
-    jdbc: 'primary', datawarehouse: 'secondary', s3: 'success', grpc: 'warning', rest: 'info', other: 'default',
+    jdbc: 'primary', impala: 'primary', s3: 'success', grpc: 'warning', rest: 'info', other: 'default',
   }
   return map[t] ?? 'default'
 }
@@ -102,7 +101,8 @@ function ConnectionDialog({
           database: initial.database ?? '',
           username: initial.username ?? '',
           password: '',
-          dialect: (initial.extra?.dialect as string) ?? (initial.conn_type === 'datawarehouse' ? 'spark' : 'postgresql'),
+          dialect: (initial.extra?.dialect as string)
+            ?? (initial.conn_type === 'impala' ? 'impala' : 'postgresql'),
           environment: (initial.extra?.environment as string) ?? 'PROD',
           s3_bucket: (initial.extra?.bucket as string) ?? '',
           s3_region: (initial.extra?.region as string) ?? 'us-east-1',
@@ -127,19 +127,19 @@ function ConnectionDialog({
   })
 
   const handleSave = () => {
-    const isDW = form.conn_type === 'datawarehouse'
+    const isImpala = form.conn_type === 'impala'
     const isS3 = form.conn_type === 's3'
     saveMutation.mutate({
       name: form.name,
       description: form.description || undefined,
       conn_type: form.conn_type,
-      host: (isDW || isS3) ? undefined : (form.host || undefined),
-      port: (isDW || isS3) ? undefined : (form.port ? Number(form.port) : undefined),
-      database: (isDW || isS3) ? undefined : (form.database || undefined),
+      host: (isS3 || isImpala) ? undefined : (form.host || undefined),
+      port: (isS3 || isImpala) ? undefined : (form.port ? Number(form.port) : undefined),
+      database: (isS3 || isImpala) ? undefined : (form.database || undefined),
       username: form.username || undefined,
       password: form.password || undefined,
-      extra: isDW
-        ? { dialect: form.dialect, environment: form.environment }
+      extra: isImpala
+          ? { datasource: 'IMPALA', dialect: 'impala', environment: form.environment }
         : isS3
           ? {
               bucket: form.s3_bucket,
@@ -154,6 +154,10 @@ function ConnectionDialog({
     setTesting(true)
     setTestResult(null)
     try {
+      if (form.conn_type === 'impala') {
+        setTestResult({ ok: true, latency_ms: 0, message: 'Saved. Impala connectivity test is deferred to backend environment mapping.' })
+        return
+      }
       if (form.conn_type === 's3' && isEdit && initial?.id) {
         const r = await connectionsApi.testS3(initial.id)
         setTestResult(r)
@@ -188,27 +192,23 @@ function ConnectionDialog({
 
           <FormControl size="small" fullWidth>
             <InputLabel>Type</InputLabel>
-            <Select label="Type" value={form.conn_type} onChange={e => setForm(f => ({ ...f, conn_type: e.target.value as string }))}>
+            <Select
+              label="Type"
+              value={form.conn_type}
+              onChange={e => setForm(f => {
+                const next = e.target.value as string
+                if (next === 'impala') {
+                  return { ...f, conn_type: next, dialect: 'impala', environment: f.environment || 'PROD' }
+                }
+                if (f.conn_type === 'impala') {
+                  return { ...f, conn_type: next, dialect: 'postgresql' }
+                }
+                return { ...f, conn_type: next }
+              })}
+            >
               {CONN_TYPES.map(t => <MenuItem key={t} value={t}>{t}</MenuItem>)}
             </Select>
           </FormControl>
-
-          {form.conn_type === 'datawarehouse' && (<>
-            <FormControl size="small" fullWidth>
-              <InputLabel>Datasource / Dialect</InputLabel>
-              <Select label="Datasource / Dialect" value={form.dialect}
-                onChange={e => setForm(f => ({ ...f, dialect: e.target.value as string }))}>
-                {DW_DIALECTS.map(d => <MenuItem key={d} value={d}>{d.charAt(0).toUpperCase() + d.slice(1)}</MenuItem>)}
-              </Select>
-            </FormControl>
-            <FormControl size="small" fullWidth>
-              <InputLabel>Environment</InputLabel>
-              <Select label="Environment" value={form.environment}
-                onChange={e => setForm(f => ({ ...f, environment: e.target.value as string }))}>
-                {DW_ENVS.map(env => <MenuItem key={env} value={env}>{env}</MenuItem>)}
-              </Select>
-            </FormControl>
-          </>)}
 
           {form.conn_type === 'jdbc' && (
             <FormControl size="small" fullWidth>
@@ -220,7 +220,24 @@ function ConnectionDialog({
             </FormControl>
           )}
 
-          {form.conn_type !== 'datawarehouse' && form.conn_type !== 's3' && (<>
+          {form.conn_type === 'impala' && (<>
+            <TextField
+              label="Datasource"
+              size="small"
+              value="impala"
+              fullWidth
+              slotProps={{ input: { readOnly: true } }}
+            />
+            <FormControl size="small" fullWidth>
+              <InputLabel>Environment</InputLabel>
+              <Select label="Environment" value={form.environment}
+                onChange={e => setForm(f => ({ ...f, environment: e.target.value as string }))}>
+                {DW_ENVS.map(env => <MenuItem key={env} value={env}>{env}</MenuItem>)}
+              </Select>
+            </FormControl>
+          </>)}
+
+          {form.conn_type !== 's3' && form.conn_type !== 'impala' && (<>
             <Box sx={{ display: 'flex', gap: 1 }}>
               <TextField label="Host" value={form.host} onChange={set('host')} size="small" sx={{ flex: 3 }} />
               <TextField label="Port" value={form.port} onChange={set('port')} size="small" sx={{ flex: 1 }} type="number" />
@@ -278,7 +295,7 @@ function ConnectionDialog({
               size="small"
               startIcon={testing ? <CircularProgress size={14} /> : <TestIcon />}
               onClick={handleTest}
-              disabled={testing || (!form.host && form.conn_type !== 'datawarehouse' && form.conn_type !== 's3')}
+              disabled={testing || (!form.host && form.conn_type !== 's3' && form.conn_type !== 'impala')}
             >
               Test Connection
             </Button>

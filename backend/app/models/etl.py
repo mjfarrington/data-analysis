@@ -19,6 +19,7 @@ class PipelineStatus(str, enum.Enum):
 class SourceType(str, enum.Enum):
     GRPC = "grpc"
     JDBC = "jdbc"
+    IMPALA = "impala"
     JSON = "json"
     CSV = "csv"
 
@@ -465,10 +466,10 @@ class ETLChain(Base):
 
 class ConnectionType(str, enum.Enum):
     JDBC = "jdbc"
+    IMPALA = "impala"
     GRPC = "grpc"
     REST = "rest"
     OTHER = "other"
-    DATAWAREHOUSE = "datawarehouse"
     S3 = "s3"
 
 

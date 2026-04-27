@@ -316,7 +316,7 @@ export interface Connection {
   id: number
   name: string
   description?: string
-  conn_type: string   // datawarehouse | jdbc | grpc | rest | other
+  conn_type: string   // jdbc | impala | grpc | rest | other | s3
   host?: string
   port?: number
   database?: string
@@ -561,11 +561,6 @@ export const connectionsApi = {
     chunk_size: number
     selected_keys?: string[]
   }) => api.post<ForeachEntryResult[]>(`/connections/${id}/foreach-extract`, body).then(r => r.data),
-  /** Test a datawarehouse-type connection using the bespoke library. */
-  testDW: (id: number) =>
-    api.post<{ ok: boolean; latency_ms: number; message: string }>(`/connections/${id}/test-dw`).then(r => r.data),
-  /** Stream a datawarehouse extract as SSE. Returns the raw fetch Response so the caller can read body as a stream. */
-  extractDWUrl: (id: number) => `${api.defaults.baseURL}/connections/${id}/extract-dw`,
   /** Test an S3-type connection by checking bucket accessibility. */
   testS3: (id: number) =>
     api.post<{ ok: boolean; latency_ms: number; message: string }>(`/connections/${id}/test-s3`).then(r => r.data),
